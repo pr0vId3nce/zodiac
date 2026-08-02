@@ -64,6 +64,10 @@ pub struct Settings {
     /// Cursor tint while a pane is focused: a color name or "off".
     #[serde(default)]
     pub cursor_color: String,
+    /// Hide the keybinding hints in the bottom status bar (they stay
+    /// visible in the settings page's Controls column).
+    #[serde(default)]
+    pub hide_controls: bool,
     /// Ringtone played when an agent finishes (working → done). A file name
     /// inside the ringtones dir, "off" to disable, or "" for the default
     /// (first ringtone alphabetically).

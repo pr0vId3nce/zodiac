@@ -33,7 +33,25 @@ const RESIZE_SQUELCH: Duration = Duration::from_millis(1200);
 /// blinks (closes briefly) once per period.
 const EYE_PERIOD_MS: u64 = 4000;
 const EYE_BLINK_MS: u64 = 160;
-const SETTINGS_ROWS: usize = 20;
+const SETTINGS_ROWS: usize = 21;
+
+/// The key reference pinned to the settings page's Controls column — the
+/// same bindings the bottom bar hints at (hideable there).
+const CONTROLS: &[(&str, &str)] = &[
+    ("Alt+N", "new pane"),
+    ("Alt+W", "close pane"),
+    ("Alt+R", "rename pane"),
+    ("Alt+↑/↓", "switch pane"),
+    ("Alt+1-9", "jump to pane"),
+    ("Alt+PgUp/Dn", "move pane"),
+    ("Alt+T", "toggle sidebar"),
+    ("Alt+Z", "zoom pane"),
+    ("Alt+~", "home page"),
+    ("⇧PgUp/Dn", "scroll"),
+    ("Ctrl+S", "settings"),
+    ("Alt+Q", "detach"),
+    ("Alt+⇧Q", "kill session"),
+];
 
 const CURSOR_TYPES: &[&str] =
     &["auto", "block", "underline", "bar", "orb", "circle", "aleph"];
@@ -1565,12 +1583,13 @@ impl App {
                 self.settings.cursor_blink =
                     cycle_pick(CURSOR_BLINKS, self.cursor_blink(), dir);
             }
-            _ => {
+            19 => {
                 let mut choices: Vec<&str> = vec!["off"];
                 choices.extend(COLOR_CHOICES.iter().map(|(n, _, _)| *n));
                 self.settings.cursor_color =
                     cycle_pick(&choices, self.cursor_color_name(), dir);
             }
+            _ => self.settings.hide_controls = !self.settings.hide_controls,
         }
         self.settings.save();
     }
@@ -1780,8 +1799,11 @@ impl App {
     }
 
     fn draw_settings(&self, f: &mut Frame, area: Rect) {
-        let w = 48.min(area.width);
-        let h = 25.min(area.height);
+        // Wide terminals get a second column: the Controls key reference,
+        // always visible here even when the bottom-bar hints are hidden.
+        let two_col = area.width >= 80;
+        let w = if two_col { 78 } else { 48.min(area.width) };
+        let h = 26.min(area.height);
         let rect = Rect {
             x: (area.width - w) / 2,
             y: (area.height - h) / 2,
@@ -1793,8 +1815,37 @@ impl App {
             .borders(Borders::ALL)
             .title(" Settings ")
             .border_style(Style::default().fg(Color::Cyan));
-        let inner = block.inner(rect);
+        let outer = block.inner(rect);
         f.render_widget(block, rect);
+        let (inner, controls) = if two_col {
+            let [l, r] = Layout::horizontal([Constraint::Length(46), Constraint::Min(1)])
+                .areas(outer);
+            (l, Some(r))
+        } else {
+            (outer, None)
+        };
+        if let Some(r) = controls {
+            let cblock = Block::default()
+                .borders(Borders::LEFT)
+                .border_style(Style::default().fg(Color::DarkGray));
+            let cinner = cblock.inner(r);
+            f.render_widget(cblock, r);
+            let mut lines = vec![
+                Line::default(),
+                Line::from(Span::styled(
+                    " Controls",
+                    Style::default().fg(Color::Cyan).bold(),
+                )),
+                Line::default(),
+            ];
+            for (key, what) in CONTROLS {
+                lines.push(Line::from(vec![
+                    Span::styled(format!(" {key:<12}"), Style::default().fg(Color::Yellow)),
+                    Span::styled((*what).to_string(), Style::default().fg(Color::Gray)),
+                ]));
+            }
+            f.render_widget(Paragraph::new(lines), cinner);
+        }
 
         let row = |i: usize, label: &str, value: &str, preview: Vec<Span<'static>>| {
             let sel = self.settings_row == i;
@@ -2050,6 +2101,21 @@ impl App {
                         Style::default().fg(Color::DarkGray).bold(),
                     ),
                 }],
+            ),
+            row(
+                20,
+                "Bottom controls",
+                if self.settings.hide_controls { "hidden" } else { "shown" },
+                vec![Span::styled(
+                    if self.settings.hide_controls { "✗" } else { "✓" }.to_string(),
+                    Style::default()
+                        .fg(if self.settings.hide_controls {
+                            Color::DarkGray
+                        } else {
+                            Color::Green
+                        })
+                        .bold(),
+                )],
             ),
             Line::default(),
             Line::from(Span::styled(
@@ -2860,10 +2926,15 @@ impl App {
                 format!(" ☾ {}", self.session),
                 Style::default().fg(Color::Cyan),
             ));
-            spans.push(Span::styled(
-                format!(" · {} panes · ←↑↓→ select · Enter open · Alt+~ close", self.panes.len()),
-                Style::default().fg(Color::DarkGray),
-            ));
+            let hints = if self.settings.hide_controls {
+                format!(" · {} panes", self.panes.len())
+            } else {
+                format!(
+                    " · {} panes · ←↑↓→ select · Enter open · Alt+~ close",
+                    self.panes.len()
+                )
+            };
+            spans.push(Span::styled(hints, Style::default().fg(Color::DarkGray)));
             f.render_widget(Paragraph::new(Line::from(spans)), area);
             return;
         }
@@ -2917,10 +2988,12 @@ impl App {
                     ));
                 }
             }
-            spans.push(Span::styled(
-                "  Alt+N/W new/close · Alt+R rename · Alt+↑↓/1-9 switch · Alt+PgUp/Dn move · Alt+T bar · Alt+Z zoom · ⇧PgUp scroll · Alt+Q detach · Alt+⇧Q kill",
-                Style::default().fg(Color::DarkGray),
-            ));
+            if !self.settings.hide_controls {
+                spans.push(Span::styled(
+                    "  Alt+N/W new/close · Alt+R rename · Alt+↑↓/1-9 switch · Alt+PgUp/Dn move · Alt+T bar · Alt+Z zoom · ⇧PgUp scroll · Alt+Q detach · Alt+⇧Q kill",
+                    Style::default().fg(Color::DarkGray),
+                ));
+            }
         }
         f.render_widget(Paragraph::new(Line::from(spans)), area);
     }

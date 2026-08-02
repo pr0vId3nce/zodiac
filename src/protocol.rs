@@ -1,0 +1,190 @@
+use std::io::{Read, Write};
+use std::path::PathBuf;
+
+use serde::{Deserialize, Serialize};
+
+// client -> server
+pub const T_INPUT: u8 = 1;
+pub const T_RESIZE: u8 = 2; // payload: rows u16 LE, cols u16 LE
+pub const T_NEW_PANE: u8 = 3;
+pub const T_CLOSE_PANE: u8 = 4;
+pub const T_RENAME: u8 = 5; // payload: utf8 name
+pub const T_MOVE: u8 = 6; // payload[0]: 0 = up, 1 = down
+pub const T_FOCUS: u8 = 7;
+pub const T_DETACH: u8 = 8;
+pub const T_SHUTDOWN: u8 = 9;
+pub const T_ATTACH: u8 = 10; // become the UI client (hello + replay follow)
+pub const T_QUERY: u8 = 11; // request SessionState JSON
+pub const T_READ_SCREEN: u8 = 12; // request rendered screen text of pane id
+pub const T_AUTORESUME: u8 = 13; // payload[0]: 0 = off, 1 = on (per pane)
+
+// server -> client
+pub const T_HELLO: u8 = 20; // payload: Hello JSON
+pub const T_REPLAY: u8 = 21; // payload: raw pty backlog
+pub const T_OUTPUT: u8 = 22; // payload: raw pty bytes
+pub const T_PANE_OPENED: u8 = 23; // payload: utf8 name
+pub const T_PANE_CLOSED: u8 = 24;
+pub const T_SERVER_EXIT: u8 = 25;
+pub const T_STATE: u8 = 26; // payload: SessionState JSON
+pub const T_SCREEN: u8 = 27; // payload: utf8 screen text
+
+const MAX_FRAME: usize = 8 * 1024 * 1024;
+
+pub struct Frame {
+    pub typ: u8,
+    pub id: u64,
+    pub data: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct HelloPane {
+    pub id: u64,
+    pub name: String,
+    pub activity: bool,
+    pub attention: bool,
+    pub last_ms: Option<u64>,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Hello {
+    pub panes: Vec<HelloPane>,
+    pub active: u64,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PaneState {
+    pub index: usize,
+    pub id: u64,
+    pub name: String,
+    pub title: String,
+    pub status: String, // working | idle | done | needs_input
+    pub agent: Option<String>, // claude | opencode | ... | None = plain shell
+    pub cwd: Option<String>,
+    pub focused: bool,
+    pub auto_resume: bool, // API-stall watchdog enabled for this pane
+    /// Milliseconds since the pane's shell was spawned (this boot).
+    #[serde(default)]
+    pub uptime_ms: u64,
+    /// First line of `<agent> --version`, once probed (cached server-side).
+    #[serde(default)]
+    pub version: Option<String>,
+    /// Claude's live "esc to interrupt" spinner row is on screen.
+    #[serde(default)]
+    pub thinking: bool,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+pub struct SessionState {
+    pub session: String,
+    pub attached: bool,
+    pub panes: Vec<PaneState>,
+}
+
+#[derive(PartialEq)]
+pub enum TitleState {
+    Working,
+    Idle,
+    Unknown,
+}
+
+/// Per-agent title patterns. Claude Code prefixes the terminal title with a
+/// braille spinner while working and "✳" when idle. opencode sets a static
+/// "OpenCode" title (identity, no state) — Unknown means "fall back to
+/// output-timing heuristics".
+pub fn title_state(title: &str) -> TitleState {
+    match title.chars().next() {
+        Some(c) if ('\u{2800}'..='\u{28ff}').contains(&c) => TitleState::Working,
+        Some('✳') => TitleState::Idle,
+        _ => TitleState::Unknown,
+    }
+}
+
+/// Identify the agent from the pane's terminal title, if it gives itself away.
+pub fn agent_from_title(title: &str) -> Option<&'static str> {
+    match title_state(title) {
+        TitleState::Working | TitleState::Idle => Some("claude"),
+        TitleState::Unknown => {
+            if title.to_ascii_lowercase().starts_with("opencode") {
+                Some("opencode")
+            } else {
+                None
+            }
+        }
+    }
+}
+
+/// Fire-and-forget desktop notification; silently a no-op without notify-send.
+pub fn notify(summary: &str, body: &str) {
+    let _ = std::process::Command::new("notify-send")
+        .args(["-a", "zodiac", summary, body])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
+}
+
+/// Fire-and-forget audio playback via the first available player; silently
+/// a no-op when none is installed. mpv/ffplay decode anything (including
+/// Apple .m4r/.m4a ringtones); pw-play/paplay cover the plain formats.
+pub fn play_sound(path: &std::path::Path) {
+    const PLAYERS: &[(&str, &[&str])] = &[
+        ("mpv", &["--no-video", "--no-terminal", "--really-quiet"]),
+        ("ffplay", &["-nodisp", "-autoexit", "-loglevel", "quiet"]),
+        ("pw-play", &[]),
+        ("paplay", &[]),
+    ];
+    for (bin, args) in PLAYERS {
+        let spawned = std::process::Command::new(bin)
+            .args(*args)
+            .arg(path)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn();
+        if spawned.is_ok() {
+            return;
+        }
+    }
+}
+
+pub fn write_frame(w: &mut impl Write, typ: u8, id: u64, data: &[u8]) -> std::io::Result<()> {
+    let mut hdr = [0u8; 13];
+    hdr[0] = typ;
+    hdr[1..9].copy_from_slice(&id.to_le_bytes());
+    hdr[9..13].copy_from_slice(&(data.len() as u32).to_le_bytes());
+    w.write_all(&hdr)?;
+    w.write_all(data)?;
+    w.flush()
+}
+
+pub fn read_frame(r: &mut impl Read) -> std::io::Result<Frame> {
+    let mut hdr = [0u8; 13];
+    r.read_exact(&mut hdr)?;
+    let typ = hdr[0];
+    let id = u64::from_le_bytes(hdr[1..9].try_into().unwrap());
+    let len = u32::from_le_bytes(hdr[9..13].try_into().unwrap()) as usize;
+    if len > MAX_FRAME {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "frame too large",
+        ));
+    }
+    let mut data = vec![0; len];
+    r.read_exact(&mut data)?;
+    Ok(Frame { typ, id, data })
+}
+
+pub fn socket_path(session: &str) -> PathBuf {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(format!("/tmp/zodiac-{}", unsafe { libc::getuid() })));
+    dir.join("zodiac").join(format!("{session}.sock"))
+}
+
+pub fn state_dir(session: &str) -> PathBuf {
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/state")
+        });
+    base.join("zodiac").join(session)
+}

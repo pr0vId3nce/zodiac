@@ -380,10 +380,19 @@ pub const ORB_FRAMES: u32 = 8;
 /// Frame index whose phase sits at the pulse peak — the steady-cursor frame.
 pub const ORB_STEADY: u32 = 2;
 
-/// Paint the orb ("palantir") or circle cursor into a cell-sized straight-
-/// alpha RGBA buffer. The body is translucent so the glyph underneath stays
-/// readable; `phase` in [0,1) drives the glow pulse.
-pub fn orb_rgba(w: u32, h: u32, col: (u8, u8, u8), orb: bool, phase: f32) -> Vec<u8> {
+/// Which graphics-rendered cursor to paint.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum OrbShape {
+    Orb,
+    Circle,
+    /// A thicker bar than the hardware one terminals draw for DECSCUSR 5.
+    Bar,
+}
+
+/// Paint a graphics cursor into a cell-sized straight-alpha RGBA buffer.
+/// The body is translucent so the glyph underneath stays readable;
+/// `phase` in [0,1) drives the glow pulse.
+pub fn orb_rgba(w: u32, h: u32, col: (u8, u8, u8), shape: OrbShape, phase: f32) -> Vec<u8> {
     let mut px = vec![0u8; (w * h * 4) as usize];
     let (fw, fh) = (w as f32, h as f32);
     let (cx, cy) = (fw / 2.0, fh / 2.0);
@@ -397,7 +406,19 @@ pub fn orb_rgba(w: u32, h: u32, col: (u8, u8, u8), orb: bool, phase: f32) -> Vec
             let d = (dx * dx + dy * dy).sqrt();
             let o = ((y * w + x) * 4) as usize;
             let (mut rr, mut gg, mut bb, mut a);
-            if orb {
+            if shape == OrbShape::Bar {
+                // Left-aligned like a hardware bar, just meatier: ~28% of
+                // the cell wide, antialiased right edge, faint rounding at
+                // the ends, alpha breathing with the pulse.
+                let th = (fw * 0.28).max(2.6);
+                let edge = (th - (x as f32 + 0.5)).clamp(0.0, 1.0);
+                let fy = y as f32 + 0.5;
+                let cap = fy.min(fh - fy).clamp(0.0, 1.0);
+                rr = cr;
+                gg = cg;
+                bb = cb;
+                a = edge * cap * (0.70 + 0.30 * glow);
+            } else if shape == OrbShape::Orb {
                 if d <= r {
                     let nd = d / r;
                     // Glassy body: sparse at the core, denser at the rim,

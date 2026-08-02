@@ -384,8 +384,8 @@ struct App {
     outer_dead: Vec<u32>,
     /// Cursor (style param, tint) last applied to the outer terminal.
     cursor_applied: Option<(u8, Option<(u8, u8, u8)>)>,
-    /// Orb-cursor frames transmitted for (is_orb, rgb, cell w, cell h).
-    orb_cfg: Option<(bool, (u8, u8, u8), u16, u16)>,
+    /// Orb-cursor frames transmitted for (shape, rgb, cell w, cell h).
+    orb_cfg: Option<(crate::kitty::OrbShape, (u8, u8, u8), u16, u16)>,
     /// Orb placement currently on the terminal: (cell x, cell y, image id).
     orb_placed: Option<(u16, u16, u32)>,
     sock: UnixStream,
@@ -1982,7 +1982,7 @@ impl App {
                     match self.cursor_type() {
                         "block" => "█",
                         "underline" => "▁",
-                        "bar" => "▏",
+                        "bar" => "▎",
                         "orb" => "🔮",
                         "circle" => "○",
                         _ => "⟳", // follows the app in the pane
@@ -2512,10 +2512,11 @@ impl App {
     /// terminal last had (ghostty's shell integration leaves a thin bar).
     /// While a pane is focused the cursor is also tinted zodiac's orange,
     /// so it's obvious the pane — not the outer shell — owns it.
-    /// The cursor is drawn as a kitty-graphics orb/circle instead of a
-    /// hardware cursor shape.
+    /// The cursor is drawn through the graphics pipeline instead of a
+    /// hardware cursor shape. "bar" included: the hardware bar's thickness
+    /// is the terminal's choice, so a properly thick one is painted.
     fn orb_active(&self) -> bool {
-        self.kitty_on && matches!(self.cursor_type(), "orb" | "circle")
+        self.kitty_on && matches!(self.cursor_type(), "orb" | "circle" | "bar")
     }
 
     /// Whether the orb should pulse (drives the fast animation tick).
@@ -2574,10 +2575,14 @@ impl App {
                 }
             }
             Some((x, y)) => {
-                let is_orb = self.cursor_type() == "orb";
+                let shape = match self.cursor_type() {
+                    "orb" => crate::kitty::OrbShape::Orb,
+                    "circle" => crate::kitty::OrbShape::Circle,
+                    _ => crate::kitty::OrbShape::Bar,
+                };
                 let col = self.orb_color();
                 let cell = crate::kitty::cell_size().unwrap_or((10, 20));
-                let cfg = (is_orb, col, cell.0, cell.1);
+                let cfg = (shape, col, cell.0, cell.1);
                 if self.orb_cfg != Some(cfg) {
                     // Config changed: replace the whole frame set.
                     if self.orb_cfg.is_some() {
@@ -2595,7 +2600,7 @@ impl App {
                             cell.0 as u32,
                             cell.1 as u32,
                             col,
-                            is_orb,
+                            shape,
                             phase,
                         );
                         let _ = crate::kitty::transmit(

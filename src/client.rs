@@ -1716,18 +1716,31 @@ impl App {
             }
             // The aleph: א in the cursor color at the cursor cell — the
             // letter of the breath before speech, marking where the next
-            // word will come into being.
+            // word will come into being. On a cell that already holds a
+            // character, the letter yields: the char stays visible under a
+            // block-style highlight instead, so editing never hides text.
             if cursor_vis && self.aleph_active() {
                 let (r, c) = screen.cursor_position();
                 if r < main.height && c < main.width {
+                    let occupied = screen
+                        .cell(r, c)
+                        .is_some_and(|cell| !cell.contents().trim().is_empty());
                     let (ar, ag, ab) = self.orb_color();
                     let cell = &mut f.buffer_mut()[(main.x + c, main.y + r)];
-                    cell.set_symbol("א");
-                    cell.set_style(
-                        Style::default()
-                            .fg(Color::Rgb(ar, ag, ab))
-                            .add_modifier(Modifier::BOLD),
-                    );
+                    if occupied {
+                        cell.set_style(
+                            Style::default()
+                                .fg(Color::Rgb(20, 17, 28))
+                                .bg(Color::Rgb(ar, ag, ab)),
+                        );
+                    } else {
+                        cell.set_symbol("א");
+                        cell.set_style(
+                            Style::default()
+                                .fg(Color::Rgb(ar, ag, ab))
+                                .add_modifier(Modifier::BOLD),
+                        );
+                    }
                 }
             }
         }

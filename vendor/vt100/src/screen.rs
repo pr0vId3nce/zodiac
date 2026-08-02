@@ -83,6 +83,8 @@ pub struct Screen {
 
     events_on: bool,
     events: Vec<crate::event::TermEvent>,
+
+    cursor_style: u8,
 }
 
 impl Screen {
@@ -113,7 +115,16 @@ impl Screen {
 
             events_on: false,
             events: Vec::new(),
+
+            cursor_style: 0,
         }
+    }
+
+    /// The cursor style requested via DECSCUSR (CSI Ps SP q): 0 = terminal
+    /// default, 1/2 = block, 3/4 = underline, 5/6 = bar.
+    #[must_use]
+    pub fn cursor_style(&self) -> u8 {
+        self.cursor_style
     }
 
     fn ev(&mut self, event: crate::event::TermEvent) {
@@ -1730,6 +1741,13 @@ impl vte::Perform for Screen {
                     }
                 }
             },
+            // DECSCUSR — cursor style (0/1/2 block, 3/4 underline, 5/6 bar)
+            Some(b' ') if c == 'q' => {
+                self.cursor_style = canonicalize_params_1(params, 0)
+                    .min(6)
+                    .try_into()
+                    .unwrap_or(0);
+            }
             Some(i) => {
                 if log::log_enabled!(log::Level::Debug) {
                     log::debug!(

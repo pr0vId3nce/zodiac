@@ -375,6 +375,8 @@ struct App {
     pid_map: std::collections::HashMap<(u64, u64), u32>,
     /// Outer image ids whose data should be freed on the next overlay pass.
     outer_dead: Vec<u32>,
+    /// Cursor (style, orange tint) last applied to the outer terminal.
+    cursor_applied: Option<(u8, bool)>,
     sock: UnixStream,
     rx: Receiver<AppEvent>,
 }
@@ -450,6 +452,7 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         next_pid: 0,
         pid_map: std::collections::HashMap::new(),
         outer_dead: Vec::new(),
+        cursor_applied: None,
         sock,
         rx,
     };
@@ -472,6 +475,7 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         terminal.draw(|f| app.draw(f))?;
         app.kitty_overlay();
         app.pane_overlay();
+        app.cursor_sync();
         if app.main_size != app.sent_size {
             app.send_resize();
         }
@@ -518,6 +522,13 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         }
     }
     app.gfx_cleanup();
+    // Hand the cursor back exactly as we found it: default style, no tint.
+    {
+        use std::io::Write as _;
+        let mut out = std::io::stdout();
+        let _ = out.write_all(b"\x1b[0 q\x1b]112\x07");
+        let _ = out.flush();
+    }
     Ok(app.exit_msg)
 }
 
@@ -2350,6 +2361,38 @@ impl App {
             let _ = out.write_all(&buf);
             let _ = out.flush();
         }
+    }
+
+    /// Forward the focused pane's DECSCUSR cursor style to the outer
+    /// terminal — inner shells and TUIs set block/underline/bar cursors and
+    /// the emulator used to swallow them, leaving whatever shape the outer
+    /// terminal last had (ghostty's shell integration leaves a thin bar).
+    /// While a pane is focused the cursor is also tinted zodiac's orange,
+    /// so it's obvious the pane — not the outer shell — owns it.
+    fn cursor_sync(&mut self) {
+        let in_pane = !self.home && matches!(self.mode, Mode::Normal);
+        let style = if in_pane {
+            self.panes
+                .get(self.active)
+                .map(|p| p.parser.screen().cursor_style())
+                .unwrap_or(0)
+        } else {
+            0
+        };
+        let want = (style, in_pane);
+        if self.cursor_applied == Some(want) {
+            return;
+        }
+        self.cursor_applied = Some(want);
+        use std::io::Write as _;
+        let mut out = std::io::stdout();
+        let _ = write!(out, "\x1b[{style} q");
+        let _ = if in_pane {
+            out.write_all(b"\x1b]12;#ff8700\x07") // spinner orange
+        } else {
+            out.write_all(b"\x1b]112\x07")
+        };
+        let _ = out.flush();
     }
 
     fn draw_sidebar(&mut self, f: &mut Frame, area: Rect) {

@@ -35,8 +35,12 @@ const EYE_PERIOD_MS: u64 = 4000;
 const EYE_BLINK_MS: u64 = 160;
 const SETTINGS_ROWS: usize = 20;
 
-const CURSOR_TYPES: &[&str] = &["auto", "block", "underline", "bar"];
+const CURSOR_TYPES: &[&str] = &["auto", "block", "underline", "bar", "orb", "circle"];
 const CURSOR_BLINKS: &[&str] = &["auto", "on", "off"];
+/// Orb pulse period; frames are quantized so they can be pre-transmitted.
+const ORB_PERIOD_MS: u64 = 1400;
+/// Untinted orb: pale mystic blue-gray, a palantir at rest.
+const ORB_DEFAULT_RGB: (u8, u8, u8) = (168, 178, 210);
 
 /// Named colors offered for the spinner and the shimmer band.
 const COLOR_CHOICES: &[(&str, Color, (u8, u8, u8))] = &[
@@ -380,6 +384,10 @@ struct App {
     outer_dead: Vec<u32>,
     /// Cursor (style param, tint) last applied to the outer terminal.
     cursor_applied: Option<(u8, Option<(u8, u8, u8)>)>,
+    /// Orb-cursor frames transmitted for (is_orb, rgb, cell w, cell h).
+    orb_cfg: Option<(bool, (u8, u8, u8), u16, u16)>,
+    /// Orb placement currently on the terminal: (cell x, cell y, image id).
+    orb_placed: Option<(u16, u16, u32)>,
     sock: UnixStream,
     rx: Receiver<AppEvent>,
 }
@@ -456,6 +464,8 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         pid_map: std::collections::HashMap::new(),
         outer_dead: Vec::new(),
         cursor_applied: None,
+        orb_cfg: None,
+        orb_placed: None,
         sock,
         rx,
     };
@@ -478,6 +488,7 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         terminal.draw(|f| app.draw(f))?;
         app.kitty_overlay();
         app.pane_overlay();
+        app.orb_overlay();
         app.cursor_sync();
         if app.main_size != app.sent_size {
             app.send_resize();
@@ -497,6 +508,8 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
             250
         } else if app.any_working() || matches!(app.mode, Mode::Settings) {
             50
+        } else if app.orb_active() && app.orb_blinking() {
+            80 // keep the palantir breathing
         } else if app.zoom {
             500 // sidebar hidden — no eye to animate
         } else {
@@ -1415,6 +1428,9 @@ impl App {
             "block" => 1,
             "underline" => 3,
             "bar" => 5,
+            // orb/circle render via kitty graphics; this base is only the
+            // fallback shape for terminals without the protocol.
+            "orb" | "circle" => 1,
             // auto: keep the pane's shape; a default-style pane reads as
             // block, the classic terminal default.
             _ => match pane_style {
@@ -1686,7 +1702,13 @@ impl App {
         if let Some(p) = self.panes.get(self.active) {
             let screen = p.parser.screen();
             f.render_widget(TermView { screen }, main);
-            if p.scroll == 0 && !screen.hide_cursor() && matches!(self.mode, Mode::Normal) {
+            // Orb cursors hide the hardware cursor — the orb overlay marks
+            // the cell instead.
+            if p.scroll == 0
+                && !screen.hide_cursor()
+                && matches!(self.mode, Mode::Normal)
+                && !self.orb_active()
+            {
                 let (r, c) = screen.cursor_position();
                 if r < main.height && c < main.width {
                     f.set_cursor_position((main.x + c, main.y + r));
@@ -1961,6 +1983,8 @@ impl App {
                         "block" => "█",
                         "underline" => "▁",
                         "bar" => "▏",
+                        "orb" => "🔮",
+                        "circle" => "○",
                         _ => "⟳", // follows the app in the pane
                     }
                     .to_string(),
@@ -2194,6 +2218,7 @@ impl App {
                 // d=a wiped every visible placement, pane images included —
                 // drop the compositor's tracking so it re-places them.
                 self.placed_gfx.clear();
+                self.orb_placed = None;
             }
             return;
         }
@@ -2275,6 +2300,7 @@ impl App {
             let _ = crate::kitty::delete_placements(&mut out);
             self.kitty_placed.clear();
             self.placed_gfx.clear();
+            self.orb_placed = None;
         }
         // Per-placement diff: place the new image first, then drop the old
         // one, so the card never shows bare background (no flicker).
@@ -2468,6 +2494,11 @@ impl App {
         for outer in self.outer_dead.drain(..) {
             let _ = crate::kitty::delete_image(&mut buf, outer);
         }
+        if self.orb_cfg.take().is_some() {
+            for i in 0..crate::kitty::ORB_FRAMES {
+                let _ = crate::kitty::delete_image(&mut buf, crate::kitty::ORB_BASE + i);
+            }
+        }
         if !buf.is_empty() {
             let mut out = std::io::stdout();
             let _ = out.write_all(&buf);
@@ -2481,9 +2512,145 @@ impl App {
     /// terminal last had (ghostty's shell integration leaves a thin bar).
     /// While a pane is focused the cursor is also tinted zodiac's orange,
     /// so it's obvious the pane — not the outer shell — owns it.
+    /// The cursor is drawn as a kitty-graphics orb/circle instead of a
+    /// hardware cursor shape.
+    fn orb_active(&self) -> bool {
+        self.kitty_on && matches!(self.cursor_type(), "orb" | "circle")
+    }
+
+    /// Whether the orb should pulse (drives the fast animation tick).
+    fn orb_blinking(&self) -> bool {
+        match self.cursor_blink() {
+            "on" => true,
+            "off" => false,
+            _ => self
+                .panes
+                .get(self.active)
+                .map(|p| {
+                    let s = p.parser.screen().cursor_style();
+                    s != 0 && s % 2 == 1
+                })
+                .unwrap_or(false),
+        }
+    }
+
+    fn orb_color(&self) -> (u8, u8, u8) {
+        self.cursor_rgb().unwrap_or(ORB_DEFAULT_RGB)
+    }
+
+    /// Place (and animate) the orb cursor over the focused pane's cursor
+    /// cell. Frames are pre-transmitted once per (style, color, cell size);
+    /// per tick only a cheap re-place runs — or nothing, when steady and
+    /// the cursor hasn't moved.
+    fn orb_overlay(&mut self) {
+        if !self.kitty_on {
+            return;
+        }
+        use std::io::Write as _;
+        let mut buf: Vec<u8> = Vec::new();
+
+        // Where the orb should be right now, if anywhere.
+        let want: Option<(u16, u16)> = if self.orb_active()
+            && !self.home
+            && matches!(self.mode, Mode::Normal)
+        {
+            self.panes.get(self.active).and_then(|p| {
+                let screen = p.parser.screen();
+                let (r, c) = screen.cursor_position();
+                (p.scroll == 0
+                    && !screen.hide_cursor()
+                    && r < self.main_rect.height
+                    && c < self.main_rect.width)
+                    .then(|| (self.main_rect.x + c + 1, self.main_rect.y + r + 1))
+            })
+        } else {
+            None
+        };
+
+        match want {
+            None => {
+                if let Some((_, _, old)) = self.orb_placed.take() {
+                    let _ = crate::kitty::delete_placement(&mut buf, old, 1);
+                }
+            }
+            Some((x, y)) => {
+                let is_orb = self.cursor_type() == "orb";
+                let col = self.orb_color();
+                let cell = crate::kitty::cell_size().unwrap_or((10, 20));
+                let cfg = (is_orb, col, cell.0, cell.1);
+                if self.orb_cfg != Some(cfg) {
+                    // Config changed: replace the whole frame set.
+                    if self.orb_cfg.is_some() {
+                        for i in 0..crate::kitty::ORB_FRAMES {
+                            let _ = crate::kitty::delete_image(
+                                &mut buf,
+                                crate::kitty::ORB_BASE + i,
+                            );
+                        }
+                        self.orb_placed = None;
+                    }
+                    for i in 0..crate::kitty::ORB_FRAMES {
+                        let phase = i as f32 / crate::kitty::ORB_FRAMES as f32;
+                        let rgba = crate::kitty::orb_rgba(
+                            cell.0 as u32,
+                            cell.1 as u32,
+                            col,
+                            is_orb,
+                            phase,
+                        );
+                        let _ = crate::kitty::transmit(
+                            &mut buf,
+                            crate::kitty::ORB_BASE + i,
+                            cell.0 as u32,
+                            cell.1 as u32,
+                            &rgba,
+                        );
+                    }
+                    self.orb_cfg = Some(cfg);
+                }
+                let frame = if self.orb_blinking() {
+                    let t = self.anim_start.elapsed().as_millis() as u64 % ORB_PERIOD_MS;
+                    (t * crate::kitty::ORB_FRAMES as u64 / ORB_PERIOD_MS) as u32
+                } else {
+                    crate::kitty::ORB_STEADY
+                };
+                let id = crate::kitty::ORB_BASE + frame;
+                if self.orb_placed != Some((x, y, id)) {
+                    let _ = crate::kitty::place_at(
+                        &mut buf,
+                        y,
+                        x,
+                        id,
+                        1,
+                        (0, 0, 0, 0),
+                        1,
+                        1,
+                        100, // above the text — translucent, glyph shows through
+                        0,
+                        0,
+                    );
+                    if let Some((_, _, old)) = self.orb_placed {
+                        if old != id {
+                            let _ = crate::kitty::delete_placement(&mut buf, old, 1);
+                        }
+                    }
+                    self.orb_placed = Some((x, y, id));
+                }
+            }
+        }
+
+        if !buf.is_empty() {
+            let mut out = std::io::stdout();
+            let _ = out.write_all(b"\x1b7");
+            let _ = out.write_all(&buf);
+            let _ = out.write_all(b"\x1b8");
+            let _ = out.flush();
+        }
+    }
+
     fn cursor_sync(&mut self) {
         let in_pane = !self.home && matches!(self.mode, Mode::Normal);
-        let (style, tint) = if in_pane {
+        let (style, tint) = if in_pane && !self.orb_active() {
             let pane_style = self
                 .panes
                 .get(self.active)

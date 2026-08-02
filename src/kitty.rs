@@ -373,6 +373,78 @@ pub fn card_rgba(w: u32, h: u32, style: &CardStyle) -> Vec<u8> {
     px
 }
 
+/// Image-id base for the orb cursor's animation frames ("WOR\0"-ish),
+/// clear of the card range and the pane-image range.
+pub const ORB_BASE: u32 = 0x574F_5200;
+pub const ORB_FRAMES: u32 = 8;
+/// Frame index whose phase sits at the pulse peak — the steady-cursor frame.
+pub const ORB_STEADY: u32 = 2;
+
+/// Paint the orb ("palantir") or circle cursor into a cell-sized straight-
+/// alpha RGBA buffer. The body is translucent so the glyph underneath stays
+/// readable; `phase` in [0,1) drives the glow pulse.
+pub fn orb_rgba(w: u32, h: u32, col: (u8, u8, u8), orb: bool, phase: f32) -> Vec<u8> {
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    let (fw, fh) = (w as f32, h as f32);
+    let (cx, cy) = (fw / 2.0, fh / 2.0);
+    let r = (fw.min(fh)) / 2.0 - 0.6;
+    let glow = 0.5 + 0.5 * (phase * std::f32::consts::TAU).sin();
+    let (cr, cg, cb) = (col.0 as f32, col.1 as f32, col.2 as f32);
+    for y in 0..h {
+        for x in 0..w {
+            let dx = x as f32 + 0.5 - cx;
+            let dy = y as f32 + 0.5 - cy;
+            let d = (dx * dx + dy * dy).sqrt();
+            let o = ((y * w + x) * 4) as usize;
+            let (mut rr, mut gg, mut bb, mut a);
+            if orb {
+                if d <= r {
+                    let nd = d / r;
+                    // Glassy body: sparse at the core, denser at the rim,
+                    // with a breathing inner glow — the palantir's fire.
+                    let core = (1.0 - nd).powi(2) * (0.30 + 0.70 * glow);
+                    let rim = (-((d - r * 0.90) / (r * 0.18)).powi(2)).exp();
+                    a = (0.18 + 0.40 * nd * nd + 0.35 * core + 0.25 * rim).min(0.92);
+                    let lit = (core + rim * 0.8).min(1.0);
+                    rr = 18.0 + (cr - 18.0) * lit;
+                    gg = 14.0 + (cg - 14.0) * lit;
+                    bb = 30.0 + (cb - 30.0) * lit;
+                    // Specular glint, upper left — glass catching the light.
+                    let sx = dx + r * 0.35;
+                    let sy = dy + r * 0.40;
+                    let spec =
+                        (-((sx * sx + sy * sy) / (r * r * 0.06))).exp() * 0.85;
+                    rr += (255.0 - rr) * spec;
+                    gg += (255.0 - gg) * spec;
+                    bb += (255.0 - bb) * spec;
+                    a = (a + spec * 0.4).min(0.95);
+                } else {
+                    // Soft halo bleeding past the sphere, pulsing.
+                    let halo =
+                        glow * (-((d - r) / (r * 0.55)).powi(2)).exp() * 0.35;
+                    rr = cr;
+                    gg = cg;
+                    bb = cb;
+                    a = halo;
+                }
+            } else {
+                // Plain circle: an antialiased ring, gently pulsing.
+                let th = (fw * 0.13).max(1.1);
+                let ring = (th * 0.5 - (d - r).abs() + 0.7).clamp(0.0, 1.0);
+                rr = cr;
+                gg = cg;
+                bb = cb;
+                a = ring * (0.60 + 0.40 * glow);
+            }
+            px[o] = rr.min(255.0) as u8;
+            px[o + 1] = gg.min(255.0) as u8;
+            px[o + 2] = bb.min(255.0) as u8;
+            px[o + 3] = (a * 255.0).min(255.0) as u8;
+        }
+    }
+    px
+}
+
 /// Transmit image data (a=t): chunked base64 of raw RGBA. `q=2` suppresses
 /// terminal responses, which would otherwise land in the input stream.
 pub fn transmit(out: &mut impl Write, id: u32, w: u32, h: u32, rgba: &[u8]) -> std::io::Result<()> {

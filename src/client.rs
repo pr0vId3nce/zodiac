@@ -35,7 +35,8 @@ const EYE_PERIOD_MS: u64 = 4000;
 const EYE_BLINK_MS: u64 = 160;
 const SETTINGS_ROWS: usize = 20;
 
-const CURSOR_TYPES: &[&str] = &["auto", "block", "underline", "bar", "orb", "circle"];
+const CURSOR_TYPES: &[&str] =
+    &["auto", "block", "underline", "bar", "orb", "circle", "aleph"];
 const CURSOR_BLINKS: &[&str] = &["auto", "on", "off"];
 /// Orb pulse period; frames are quantized so they can be pre-transmitted.
 const ORB_PERIOD_MS: u64 = 1400;
@@ -1429,8 +1430,9 @@ impl App {
             "underline" => 3,
             "bar" => 5,
             // orb/circle render via kitty graphics; this base is only the
-            // fallback shape for terminals without the protocol.
-            "orb" | "circle" => 1,
+            // fallback shape for terminals without the protocol. (aleph
+            // never falls back — its glyph is text and always renders.)
+            "orb" | "circle" | "aleph" => 1,
             // auto: keep the pane's shape; a default-style pane reads as
             // block, the classic terminal default.
             _ => match pane_style {
@@ -1702,16 +1704,30 @@ impl App {
         if let Some(p) = self.panes.get(self.active) {
             let screen = p.parser.screen();
             f.render_widget(TermView { screen }, main);
-            // Orb cursors hide the hardware cursor — the orb overlay marks
-            // the cell instead.
-            if p.scroll == 0
-                && !screen.hide_cursor()
-                && matches!(self.mode, Mode::Normal)
-                && !self.orb_active()
-            {
+            // Orb/aleph cursors hide the hardware cursor — the overlay (or
+            // the glyph below) marks the cell instead.
+            let cursor_vis =
+                p.scroll == 0 && !screen.hide_cursor() && matches!(self.mode, Mode::Normal);
+            if cursor_vis && !self.orb_active() && !self.aleph_active() {
                 let (r, c) = screen.cursor_position();
                 if r < main.height && c < main.width {
                     f.set_cursor_position((main.x + c, main.y + r));
+                }
+            }
+            // The aleph: א in the cursor color at the cursor cell — the
+            // letter of the breath before speech, marking where the next
+            // word will come into being.
+            if cursor_vis && self.aleph_active() {
+                let (r, c) = screen.cursor_position();
+                if r < main.height && c < main.width {
+                    let (ar, ag, ab) = self.orb_color();
+                    let cell = &mut f.buffer_mut()[(main.x + c, main.y + r)];
+                    cell.set_symbol("א");
+                    cell.set_style(
+                        Style::default()
+                            .fg(Color::Rgb(ar, ag, ab))
+                            .add_modifier(Modifier::BOLD),
+                    );
                 }
             }
         }
@@ -1985,6 +2001,7 @@ impl App {
                         "bar" => "▎",
                         "orb" => "🔮",
                         "circle" => "○",
+                        "aleph" => "א",
                         _ => "⟳", // follows the app in the pane
                     }
                     .to_string(),
@@ -2514,9 +2531,17 @@ impl App {
     /// so it's obvious the pane — not the outer shell — owns it.
     /// The cursor is drawn through the graphics pipeline instead of a
     /// hardware cursor shape. "bar" included: the hardware bar's thickness
-    /// is the terminal's choice, so a properly thick one is painted.
+    /// is the terminal's choice, so a properly thick one is painted. For
+    /// "aleph" the graphics part is only the aura behind the glyph.
     fn orb_active(&self) -> bool {
-        self.kitty_on && matches!(self.cursor_type(), "orb" | "circle" | "bar")
+        self.kitty_on && matches!(self.cursor_type(), "orb" | "circle" | "bar" | "aleph")
+    }
+
+    /// The aleph cursor: א drawn as a text glyph at the cursor cell — the
+    /// silent letter, the breath before speech. Works with or without
+    /// outer-terminal graphics (the aura is graphics-only).
+    fn aleph_active(&self) -> bool {
+        self.cursor_type() == "aleph"
     }
 
     /// Whether the orb should pulse (drives the fast animation tick).
@@ -2578,8 +2603,12 @@ impl App {
                 let shape = match self.cursor_type() {
                     "orb" => crate::kitty::OrbShape::Orb,
                     "circle" => crate::kitty::OrbShape::Circle,
+                    "aleph" => crate::kitty::OrbShape::Halo,
                     _ => crate::kitty::OrbShape::Bar,
                 };
+                // The aleph's aura sits under the text so the glyph stays
+                // crisp; the other shapes float translucently above it.
+                let z = if shape == crate::kitty::OrbShape::Halo { -1 } else { 100 };
                 let col = self.orb_color();
                 let cell = crate::kitty::cell_size().unwrap_or((10, 20));
                 let cfg = (shape, col, cell.0, cell.1);
@@ -2630,7 +2659,7 @@ impl App {
                         (0, 0, 0, 0),
                         1,
                         1,
-                        100, // above the text — translucent, glyph shows through
+                        z,
                         0,
                         0,
                     );
@@ -2655,7 +2684,7 @@ impl App {
 
     fn cursor_sync(&mut self) {
         let in_pane = !self.home && matches!(self.mode, Mode::Normal);
-        let (style, tint) = if in_pane && !self.orb_active() {
+        let (style, tint) = if in_pane && !self.orb_active() && !self.aleph_active() {
             let pane_style = self
                 .panes
                 .get(self.active)

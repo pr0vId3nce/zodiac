@@ -387,6 +387,9 @@ pub enum OrbShape {
     Circle,
     /// A thicker bar than the hardware one terminals draw for DECSCUSR 5.
     Bar,
+    /// Halo only — the breathing aura behind the aleph glyph, placed under
+    /// the text layer so the letter itself stays font-crisp.
+    Halo,
 }
 
 /// Paint a graphics cursor into a cell-sized straight-alpha RGBA buffer.
@@ -406,7 +409,15 @@ pub fn orb_rgba(w: u32, h: u32, col: (u8, u8, u8), shape: OrbShape, phase: f32) 
             let d = (dx * dx + dy * dy).sqrt();
             let o = ((y * w + x) * 4) as usize;
             let (mut rr, mut gg, mut bb, mut a);
-            if shape == OrbShape::Bar {
+            if shape == OrbShape::Halo {
+                // Soft radial aura filling the cell, breathing with the
+                // pulse; densest at the center where the glyph sits.
+                let aura = (-(d / (r * 1.05)).powi(2)).exp();
+                rr = cr;
+                gg = cg;
+                bb = cb;
+                a = aura * (0.28 + 0.30 * glow);
+            } else if shape == OrbShape::Bar {
                 // Left-aligned like a hardware bar, just meatier: ~28% of
                 // the cell wide, antialiased right edge, faint rounding at
                 // the ends, alpha breathing with the pulse.

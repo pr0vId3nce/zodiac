@@ -387,8 +387,9 @@ struct App {
     cursor_applied: Option<(u8, Option<(u8, u8, u8)>)>,
     /// Orb-cursor frames transmitted for (shape, rgb, cell w, cell h).
     orb_cfg: Option<(crate::kitty::OrbShape, (u8, u8, u8), u16, u16)>,
-    /// Orb placement currently on the terminal: (cell x, cell y, image id).
-    orb_placed: Option<(u16, u16, u32)>,
+    /// Orb placement currently on the terminal:
+    /// (cell x, cell y, image id, col span, row span).
+    orb_placed: Option<(u16, u16, u32, u16, u16)>,
     sock: UnixStream,
     rx: Receiver<AppEvent>,
 }
@@ -2557,11 +2558,15 @@ impl App {
         self.cursor_type() == "aleph"
     }
 
-    /// Whether the orb should pulse (drives the fast animation tick).
+    /// Whether the orb should pulse (drives the fast animation tick). For
+    /// the aleph, "auto" means breathe — an aura that doesn't breathe is
+    /// just a stain; shells never request a blinking cursor at a prompt,
+    /// so following the pane would freeze it.
     fn orb_blinking(&self) -> bool {
         match self.cursor_blink() {
             "on" => true,
             "off" => false,
+            _ if self.aleph_active() => true,
             _ => self
                 .panes
                 .get(self.active)
@@ -2608,7 +2613,7 @@ impl App {
 
         match want {
             None => {
-                if let Some((_, _, old)) = self.orb_placed.take() {
+                if let Some((_, _, old, _, _)) = self.orb_placed.take() {
                     let _ = crate::kitty::delete_placement(&mut buf, old, 1);
                 }
             }
@@ -2621,9 +2626,15 @@ impl App {
                 };
                 // The aleph's aura sits under the text so the glyph stays
                 // crisp; the other shapes float translucently above it.
-                let z = if shape == crate::kitty::OrbShape::Halo { -1 } else { 100 };
+                let halo = shape == crate::kitty::OrbShape::Halo;
+                let z = if halo { -1 } else { 100 };
                 let col = self.orb_color();
                 let cell = crate::kitty::cell_size().unwrap_or((10, 20));
+                // The halo spans 3x3 cells so the glow can bleed past the
+                // glyph; the other shapes stay cell-sized.
+                let span: u16 = if halo { 3 } else { 1 };
+                let (img_w, img_h) =
+                    (cell.0 as u32 * span as u32, cell.1 as u32 * span as u32);
                 let cfg = (shape, col, cell.0, cell.1);
                 if self.orb_cfg != Some(cfg) {
                     // Config changed: replace the whole frame set.
@@ -2638,18 +2649,13 @@ impl App {
                     }
                     for i in 0..crate::kitty::ORB_FRAMES {
                         let phase = i as f32 / crate::kitty::ORB_FRAMES as f32;
-                        let rgba = crate::kitty::orb_rgba(
-                            cell.0 as u32,
-                            cell.1 as u32,
-                            col,
-                            shape,
-                            phase,
-                        );
+                        let rgba =
+                            crate::kitty::orb_rgba(img_w, img_h, col, shape, phase);
                         let _ = crate::kitty::transmit(
                             &mut buf,
                             crate::kitty::ORB_BASE + i,
-                            cell.0 as u32,
-                            cell.1 as u32,
+                            img_w,
+                            img_h,
                             &rgba,
                         );
                     }
@@ -2662,26 +2668,51 @@ impl App {
                     crate::kitty::ORB_STEADY
                 };
                 let id = crate::kitty::ORB_BASE + frame;
-                if self.orb_placed != Some((x, y, id)) {
-                    let _ = crate::kitty::place_at(
-                        &mut buf,
-                        y,
-                        x,
-                        id,
-                        1,
-                        (0, 0, 0, 0),
-                        1,
-                        1,
-                        z,
-                        0,
-                        0,
-                    );
-                    if let Some((_, _, old)) = self.orb_placed {
-                        if old != id {
-                            let _ = crate::kitty::delete_placement(&mut buf, old, 1);
+                // Center the (possibly multi-cell) image on the cursor and
+                // clip it to the pane rect via a source rectangle.
+                let m = self.main_rect;
+                let (left, top) = (x as i32 - span as i32 / 2, y as i32 - span as i32 / 2);
+                let lc = (m.x as i32 + 1 - left).max(0);
+                let tc = (m.y as i32 + 1 - top).max(0);
+                let rc = (left + span as i32 - 1 - (m.x + m.width) as i32).max(0);
+                let bc = (top + span as i32 - 1 - (m.y + m.height) as i32).max(0);
+                let vc = span as i32 - lc - rc;
+                let vr = span as i32 - tc - bc;
+                if vc > 0 && vr > 0 {
+                    let px = (left + lc) as u16;
+                    let py = (top + tc) as u16;
+                    let src = if span == 1 {
+                        (0, 0, 0, 0)
+                    } else {
+                        (
+                            lc as u32 * cell.0 as u32,
+                            tc as u32 * cell.1 as u32,
+                            vc as u32 * cell.0 as u32,
+                            vr as u32 * cell.1 as u32,
+                        )
+                    };
+                    if self.orb_placed != Some((px, py, id, vc as u16, vr as u16)) {
+                        let _ = crate::kitty::place_at(
+                            &mut buf,
+                            py,
+                            px,
+                            id,
+                            1,
+                            src,
+                            vc as u16,
+                            vr as u16,
+                            z,
+                            0,
+                            0,
+                        );
+                        if let Some((_, _, old, _, _)) = self.orb_placed {
+                            if old != id {
+                                let _ =
+                                    crate::kitty::delete_placement(&mut buf, old, 1);
+                            }
                         }
+                        self.orb_placed = Some((px, py, id, vc as u16, vr as u16));
                     }
-                    self.orb_placed = Some((x, y, id));
                 }
             }
         }

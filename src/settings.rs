@@ -54,6 +54,16 @@ pub struct Settings {
     /// mid-response" line — fires `--resume` immediately on sight.
     #[serde(default = "default_true")]
     pub connection_watch: bool,
+    /// Cursor shape in panes: "auto" (follow the inner app's DECSCUSR),
+    /// "block", "underline", or "bar".
+    #[serde(default)]
+    pub cursor_style: String,
+    /// Cursor blink in panes: "auto" (follow the inner app), "on", "off".
+    #[serde(default)]
+    pub cursor_blink: String,
+    /// Cursor tint while a pane is focused: a color name or "off".
+    #[serde(default)]
+    pub cursor_color: String,
     /// Ringtone played when an agent finishes (working → done). A file name
     /// inside the ringtones dir, "off" to disable, or "" for the default
     /// (first ringtone alphabetically).

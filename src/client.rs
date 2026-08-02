@@ -33,7 +33,10 @@ const RESIZE_SQUELCH: Duration = Duration::from_millis(1200);
 /// blinks (closes briefly) once per period.
 const EYE_PERIOD_MS: u64 = 4000;
 const EYE_BLINK_MS: u64 = 160;
-const SETTINGS_ROWS: usize = 17;
+const SETTINGS_ROWS: usize = 20;
+
+const CURSOR_TYPES: &[&str] = &["auto", "block", "underline", "bar"];
+const CURSOR_BLINKS: &[&str] = &["auto", "on", "off"];
 
 /// Named colors offered for the spinner and the shimmer band.
 const COLOR_CHOICES: &[(&str, Color, (u8, u8, u8))] = &[
@@ -375,8 +378,8 @@ struct App {
     pid_map: std::collections::HashMap<(u64, u64), u32>,
     /// Outer image ids whose data should be freed on the next overlay pass.
     outer_dead: Vec<u32>,
-    /// Cursor (style, orange tint) last applied to the outer terminal.
-    cursor_applied: Option<(u8, bool)>,
+    /// Cursor (style param, tint) last applied to the outer terminal.
+    cursor_applied: Option<(u8, Option<(u8, u8, u8)>)>,
     sock: UnixStream,
     rx: Receiver<AppEvent>,
 }
@@ -1376,6 +1379,58 @@ impl App {
         }
     }
 
+    fn cursor_type(&self) -> &'static str {
+        pick(CURSOR_TYPES, &self.settings.cursor_style, "auto")
+    }
+
+    fn cursor_blink(&self) -> &'static str {
+        pick(CURSOR_BLINKS, &self.settings.cursor_blink, "auto")
+    }
+
+    fn cursor_color_name(&self) -> &'static str {
+        if self.settings.cursor_color == "off" {
+            "off"
+        } else {
+            color_by_name(&self.settings.cursor_color, "orange").0
+        }
+    }
+
+    /// The pane-cursor tint, or None when tinting is off.
+    fn cursor_rgb(&self) -> Option<(u8, u8, u8)> {
+        (self.cursor_color_name() != "off")
+            .then(|| color_by_name(&self.settings.cursor_color, "orange").2)
+    }
+
+    /// Combine the cursor-type/blink settings with the pane's own DECSCUSR
+    /// into the parameter sent to the outer terminal. 0 = terminal default;
+    /// otherwise odd = blinking, even = steady (1/2 block, 3/4 underline,
+    /// 5/6 bar).
+    fn cursor_param(&self, pane_style: u8) -> u8 {
+        let ty = self.cursor_type();
+        let blink = self.cursor_blink();
+        if ty == "auto" && blink == "auto" {
+            return pane_style;
+        }
+        let base = match ty {
+            "block" => 1,
+            "underline" => 3,
+            "bar" => 5,
+            // auto: keep the pane's shape; a default-style pane reads as
+            // block, the classic terminal default.
+            _ => match pane_style {
+                3 | 4 => 3,
+                5 | 6 => 5,
+                _ => 1,
+            },
+        };
+        let blinking = match blink {
+            "on" => true,
+            "off" => false,
+            _ => pane_style % 2 == 1 && pane_style != 0,
+        };
+        base + u8::from(!blinking)
+    }
+
     fn card_icon_idx(&self) -> usize {
         CARD_ICON_SIZES
             .iter()
@@ -1483,7 +1538,20 @@ impl App {
                     cycle_pick(CLAUDE_STYLES, self.claude_style(), dir);
             }
             15 => return self.cycle_finish_sound(dir),
-            _ => self.settings.connection_watch = !self.settings.connection_watch,
+            16 => self.settings.connection_watch = !self.settings.connection_watch,
+            17 => {
+                self.settings.cursor_style = cycle_pick(CURSOR_TYPES, self.cursor_type(), dir);
+            }
+            18 => {
+                self.settings.cursor_blink =
+                    cycle_pick(CURSOR_BLINKS, self.cursor_blink(), dir);
+            }
+            _ => {
+                let mut choices: Vec<&str> = vec!["off"];
+                choices.extend(COLOR_CHOICES.iter().map(|(n, _, _)| *n));
+                self.settings.cursor_color =
+                    cycle_pick(&choices, self.cursor_color_name(), dir);
+            }
         }
         self.settings.save();
     }
@@ -1661,7 +1729,7 @@ impl App {
 
     fn draw_settings(&self, f: &mut Frame, area: Rect) {
         let w = 48.min(area.width);
-        let h = 22.min(area.height);
+        let h = 25.min(area.height);
         let rect = Rect {
             x: (area.width - w) / 2,
             y: (area.height - h) / 2,
@@ -1883,6 +1951,50 @@ impl App {
                         })
                         .bold(),
                 )],
+            ),
+            row(
+                17,
+                "Cursor type",
+                self.cursor_type(),
+                vec![Span::styled(
+                    match self.cursor_type() {
+                        "block" => "█",
+                        "underline" => "▁",
+                        "bar" => "▏",
+                        _ => "⟳", // follows the app in the pane
+                    }
+                    .to_string(),
+                    Style::default().fg(Color::Cyan).bold(),
+                )],
+            ),
+            row(
+                18,
+                "Cursor blink",
+                self.cursor_blink(),
+                vec![Span::styled(
+                    match self.cursor_blink() {
+                        "on" => "✓",
+                        "off" => "✗",
+                        _ => "⟳",
+                    }
+                    .to_string(),
+                    Style::default().fg(Color::Cyan).bold(),
+                )],
+            ),
+            row(
+                19,
+                "Cursor color",
+                self.cursor_color_name(),
+                vec![match self.cursor_rgb() {
+                    Some((r, g, b)) => Span::styled(
+                        "▆▆▆".to_string(),
+                        Style::default().fg(Color::Rgb(r, g, b)),
+                    ),
+                    None => Span::styled(
+                        "✗".to_string(),
+                        Style::default().fg(Color::DarkGray).bold(),
+                    ),
+                }],
             ),
             Line::default(),
             Line::from(Span::styled(
@@ -2371,15 +2483,17 @@ impl App {
     /// so it's obvious the pane — not the outer shell — owns it.
     fn cursor_sync(&mut self) {
         let in_pane = !self.home && matches!(self.mode, Mode::Normal);
-        let style = if in_pane {
-            self.panes
+        let (style, tint) = if in_pane {
+            let pane_style = self
+                .panes
                 .get(self.active)
                 .map(|p| p.parser.screen().cursor_style())
-                .unwrap_or(0)
+                .unwrap_or(0);
+            (self.cursor_param(pane_style), self.cursor_rgb())
         } else {
-            0
+            (0, None)
         };
-        let want = (style, in_pane);
+        let want = (style, tint);
         if self.cursor_applied == Some(want) {
             return;
         }
@@ -2387,10 +2501,9 @@ impl App {
         use std::io::Write as _;
         let mut out = std::io::stdout();
         let _ = write!(out, "\x1b[{style} q");
-        let _ = if in_pane {
-            out.write_all(b"\x1b]12;#ff8700\x07") // spinner orange
-        } else {
-            out.write_all(b"\x1b]112\x07")
+        let _ = match tint {
+            Some((r, g, b)) => write!(out, "\x1b]12;#{r:02x}{g:02x}{b:02x}\x07"),
+            None => write!(out, "\x1b]112\x07"),
         };
         let _ = out.flush();
     }

@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 
+use crate::gfx::{GfxEngine, GfxSplitter, Seg};
 use crate::query::QueryScanner;
 use crate::server::SrvEvent;
 
@@ -17,7 +18,12 @@ pub struct SrvPane {
     pub id: u64,
     pub name: String,
     pub ring: Vec<u8>,
-    parser: vt100::Parser, // bell tracking only (correct OSC handling)
+    parser: vt100::Parser, // bell/status tracking + graphics event source
+    splitter: GfxSplitter,
+    /// Kitty-graphics state for this pane (images + placements).
+    pub gfx: GfxEngine,
+    /// `gfx.version` as of the last snapshot pushed to the UI client.
+    pub gfx_pushed: u64,
     queries: QueryScanner,
     bell_count: usize,
     pub last_output: Option<Instant>,
@@ -35,6 +41,9 @@ pub struct SrvPane {
     killer: Box<dyn ChildKiller + Send + Sync>,
     pid: Option<u32>,
     size: (u16, u16),
+    /// Outer terminal cell size in px — reported to the inner PTY so apps
+    /// compute image geometry that maps 1:1 onto the outer terminal.
+    cell: (u16, u16),
 }
 
 impl SrvPane {
@@ -101,11 +110,16 @@ impl SrvPane {
         });
 
         let writer = pair.master.take_writer()?;
+        let mut parser = vt100::Parser::new(rows, cols, 0);
+        parser.enable_events();
         Ok(Self {
             id,
             name,
             ring: preload,
-            parser: vt100::Parser::new(rows, cols, 0),
+            parser,
+            splitter: GfxSplitter::new(),
+            gfx: GfxEngine::new(rows, cols),
+            gfx_pushed: 0,
             queries: QueryScanner::new(),
             bell_count: 0,
             last_output: None,
@@ -122,19 +136,55 @@ impl SrvPane {
             killer,
             pid,
             size: (rows, cols),
+            cell: (0, 0),
         })
     }
 
-    /// Feed pty output into ring buffer and bell tracker. Returns true if the
-    /// bell rang in this chunk.
-    pub fn process_output(&mut self, bytes: &[u8]) -> bool {
-        self.ring.extend_from_slice(bytes);
+    /// Feed pty output through the graphics splitter into the ring buffer,
+    /// emulator, query scanner, and graphics engine. Returns the processed
+    /// stream to forward to the UI (graphics stripped, cursor advances
+    /// synthesized) and whether the bell rang in this chunk.
+    pub fn process_output(&mut self, bytes: &[u8]) -> (Vec<u8>, bool) {
+        let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+        let mut replies: Vec<u8> = Vec::new();
+        for seg in self.splitter.split(bytes) {
+            match seg {
+                Seg::Text(t) => {
+                    self.parser.process(&t);
+                    replies.extend(self.queries.scan(&t, self.parser.screen(), self.cell));
+                    for ev in self.parser.drain_events() {
+                        self.gfx.apply_event(ev);
+                    }
+                    out.extend_from_slice(&t);
+                }
+                Seg::Cmd(cmd) => {
+                    let cursor = self.parser.screen().cursor_position();
+                    let res = self.gfx.handle(cmd, cursor);
+                    replies.extend(res.reply);
+                    if let Some((dr, dc)) = res.advance {
+                        // Synthesize the cursor move a real kitty terminal
+                        // performs after a placement, so every emulator of
+                        // this stream agrees on the cursor.
+                        let mut mv = String::new();
+                        if dr > 0 {
+                            mv.push_str(&format!("\x1b[{dr}B"));
+                        }
+                        if dc > 0 {
+                            mv.push_str(&format!("\x1b[{dc}C"));
+                        }
+                        if !mv.is_empty() {
+                            self.parser.process(mv.as_bytes());
+                            out.extend_from_slice(mv.as_bytes());
+                        }
+                    }
+                }
+            }
+        }
+        self.ring.extend_from_slice(&out);
         if self.ring.len() > RING_CAP {
             let cut = self.ring.len() - RING_CAP;
             self.ring.drain(..cut);
         }
-        self.parser.process(bytes);
-        let replies = self.queries.scan(bytes, self.parser.screen());
         if !replies.is_empty() {
             self.write_input(&replies);
         }
@@ -142,7 +192,24 @@ impl SrvPane {
         let count = self.parser.screen().audible_bell_count();
         let new = count > self.bell_count;
         self.bell_count = count;
-        new
+        (out, new)
+    }
+
+    /// Outer-terminal cell size (px) learned from the attached client:
+    /// reported to the inner PTY (SIGWINCH) and used for image geometry.
+    pub fn set_cell(&mut self, cell: (u16, u16)) {
+        if self.cell == cell || cell.0 == 0 || cell.1 == 0 {
+            return;
+        }
+        self.cell = cell;
+        self.gfx.cell = cell;
+        let (rows, cols) = self.size;
+        let _ = self.master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: cols * cell.0,
+            pixel_height: rows * cell.1,
+        });
     }
 
     pub fn title(&self) -> String {
@@ -308,10 +375,13 @@ impl SrvPane {
         let _ = self.master.resize(PtySize {
             rows,
             cols,
-            pixel_width: 0,
-            pixel_height: 0,
+            pixel_width: cols * self.cell.0,
+            pixel_height: rows * self.cell.1,
         });
         self.parser.set_size(rows, cols);
+        for ev in self.parser.drain_events() {
+            self.gfx.apply_event(ev);
+        }
     }
 
     pub fn write_input(&mut self, bytes: &[u8]) {

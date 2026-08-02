@@ -1,0 +1,13 @@
+[package]
+edition = "2021"
+name = "vt100"
+version = "0.15.2"
+authors = ["Jesse Luehrs <doy@tozt.net>"]
+description = "Library for parsing terminal data (vendored + instrumented for zodiac graphics)"
+license = "MIT"
+
+[dependencies]
+itoa = "1.0.5"
+log = "0.4.17"
+unicode-width = "0.1.10"
+vte = "0.11.0"

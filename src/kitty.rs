@@ -68,13 +68,15 @@ pub fn cell_size() -> Option<(u16, u16)> {
 
 /// Whether the outer terminal speaks the kitty graphics protocol. Detected
 /// by identity rather than probing (a probe reply would race the input
-/// parser): ghostty and kitty both support it.
+/// parser): ghostty, kitty, and wezterm all support it.
 pub fn enabled() -> bool {
     let term = std::env::var("TERM").unwrap_or_default();
     let known = term.contains("kitty")
         || term.contains("ghostty")
+        || term.contains("wezterm")
         || std::env::var_os("KITTY_WINDOW_ID").is_some()
-        || std::env::var_os("GHOSTTY_RESOURCES_DIR").is_some();
+        || std::env::var_os("GHOSTTY_RESOURCES_DIR").is_some()
+        || std::env::var("TERM_PROGRAM").is_ok_and(|p| p == "WezTerm");
     known && cell_size().is_some()
 }
 
@@ -405,6 +407,94 @@ pub fn place(out: &mut impl Write, id: u32, pid: u32, cols: u16, rows: u16) -> s
 /// Delete one placement of one image (data stays cached).
 pub fn delete_placement(out: &mut impl Write, id: u32, pid: u32) -> std::io::Result<()> {
     write!(out, "\x1b_Ga=d,d=i,i={id},p={pid},q=2\x1b\\")
+}
+
+/// Delete an image's placements *and* free its stored data.
+pub fn delete_image(out: &mut impl Write, id: u32) -> std::io::Result<()> {
+    write!(out, "\x1b_Ga=d,d=I,i={id},q=2\x1b\\")
+}
+
+/// Relay a pane image's stored payload to the outer terminal verbatim:
+/// raw RGB/RGBA (optionally zlib) with dimensions, or PNG (f=100) whose
+/// dimensions the terminal reads itself.
+pub fn transmit_data(
+    out: &mut impl Write,
+    id: u32,
+    format: u8,
+    zlib: bool,
+    w: u32,
+    h: u32,
+    data: &[u8],
+) -> std::io::Result<()> {
+    let b64 = crate::client::b64(data);
+    let mut rest = b64.as_str();
+    let mut first = true;
+    let dims = if format == 100 {
+        String::new()
+    } else {
+        format!(",s={w},v={h}")
+    };
+    let comp = if zlib { ",o=z" } else { "" };
+    loop {
+        let take = rest.len().min(4096);
+        let (chunk, tail) = rest.split_at(take);
+        rest = tail;
+        let more = if rest.is_empty() { 0 } else { 1 };
+        if first {
+            write!(
+                out,
+                "\x1b_Ga=t,t=d,f={format},i={id}{dims}{comp},q=2,m={more};{chunk}\x1b\\"
+            )?;
+            first = false;
+        } else {
+            write!(out, "\x1b_Gm={more};{chunk}\x1b\\")?;
+        }
+        if rest.is_empty() {
+            break;
+        }
+    }
+    Ok(())
+}
+
+/// Place image `id` as placement `pid` at 1-based screen cell (row, col)
+/// with an explicit source rectangle and cell span. `z`/`X`/`Y` pass the
+/// inner app's layering and pixel offsets through; `C=1` leaves the outer
+/// cursor alone (the compositor saves/restores around its writes anyway).
+#[allow(clippy::too_many_arguments)]
+pub fn place_at(
+    out: &mut impl Write,
+    row: u16,
+    col: u16,
+    id: u32,
+    pid: u32,
+    src: (u32, u32, u32, u32),
+    cols: u16,
+    rows: u16,
+    z: i32,
+    offx: u16,
+    offy: u16,
+) -> std::io::Result<()> {
+    write!(out, "\x1b[{row};{col}H\x1b_Ga=p,i={id},p={pid}")?;
+    let (x, y, w, h) = src;
+    if x > 0 {
+        write!(out, ",x={x}")?;
+    }
+    if y > 0 {
+        write!(out, ",y={y}")?;
+    }
+    if w > 0 {
+        write!(out, ",w={w}")?;
+    }
+    if h > 0 {
+        write!(out, ",h={h}")?;
+    }
+    if offx > 0 {
+        write!(out, ",X={offx}")?;
+    }
+    if offy > 0 {
+        write!(out, ",Y={offy}")?;
+    }
+    write!(out, ",c={cols},r={rows},z={z},C=1,q=2\x1b\\")
 }
 
 /// Delete every placement (image data stays cached terminal-side).

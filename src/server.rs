@@ -60,6 +60,13 @@ struct Server {
     resized_at: Option<Instant>,
     /// Agent name → first line of `--version`. None = probe in flight.
     versions: HashMap<String, Option<String>>,
+    /// Outer-terminal cell size (px) and kitty-graphics capability, as
+    /// reported by the attached client. Kept across detach so background
+    /// panes keep tracking graphics for the next attach.
+    client_cell: (u16, u16),
+    client_gfx: bool,
+    /// Image payloads already delivered this attach: (pane, image, ver).
+    gfx_sent: std::collections::HashSet<(u64, u32, u32)>,
 }
 
 /// Output arriving this soon after a resize is treated as the SIGWINCH
@@ -114,6 +121,9 @@ pub fn run(session: &str) -> Result<()> {
         quit: false,
         resized_at: None,
         versions: HashMap::new(),
+        client_cell: (0, 0),
+        client_gfx: false,
+        gfx_sent: std::collections::HashSet::new(),
     };
     srv.restore()?;
     srv.save_meta();
@@ -229,9 +239,11 @@ impl Server {
                 let squelch = self
                     .resized_at
                     .is_some_and(|t| t.elapsed() < RESIZE_SQUELCH);
+                let mut stream = Vec::new();
                 if let Some(p) = self.pane_mut(id) {
                     let prev = p.last_output;
-                    let bell = p.process_output(&bytes);
+                    let (out, bell) = p.process_output(&bytes);
+                    stream = out;
                     if squelch {
                         p.last_output = prev;
                     }
@@ -248,7 +260,10 @@ impl Server {
                         }
                     }
                 }
-                self.send_ui(T_OUTPUT, id, &bytes);
+                if !stream.is_empty() {
+                    self.send_ui(T_OUTPUT, id, &stream);
+                }
+                self.push_gfx(id);
             }
             SrvEvent::Deliver(id, bytes) => {
                 if let Some(p) = self.pane_mut(id) {
@@ -264,7 +279,17 @@ impl Server {
 
     fn client_frame(&mut self, gen: u64, f: Frame) {
         match f.typ {
-            T_ATTACH => self.attach(gen),
+            T_ATTACH => {
+                // payload (new clients): [gfx capable u8, cell w u16, cell h u16]
+                if f.data.len() >= 5 {
+                    self.client_gfx = f.data[0] != 0;
+                    self.client_cell = (
+                        u16::from_le_bytes([f.data[1], f.data[2]]),
+                        u16::from_le_bytes([f.data[3], f.data[4]]),
+                    );
+                }
+                self.attach(gen);
+            }
             T_QUERY => {
                 self.probe_versions();
                 let data = serde_json::to_vec(&self.state()).unwrap_or_default();
@@ -288,11 +313,19 @@ impl Server {
                 if f.data.len() >= 4 {
                     let rows = u16::from_le_bytes([f.data[0], f.data[1]]);
                     let cols = u16::from_le_bytes([f.data[2], f.data[3]]);
+                    if f.data.len() >= 8 {
+                        self.client_cell = (
+                            u16::from_le_bytes([f.data[4], f.data[5]]),
+                            u16::from_le_bytes([f.data[6], f.data[7]]),
+                        );
+                    }
                     if self.size != (rows, cols) {
                         self.resized_at = Some(Instant::now());
                     }
                     self.size = (rows, cols);
+                    let cell = self.client_cell;
                     for p in &mut self.panes {
+                        p.set_cell(cell);
                         p.resize(rows, cols);
                     }
                 }
@@ -413,9 +446,93 @@ impl Server {
         for (id, ring) in rings {
             self.reply(gen, T_REPLAY, id, &ring);
         }
+        // Fresh client: propagate its cell size / capability and resend
+        // graphics state from scratch (image payloads + snapshots).
+        self.gfx_sent.clear();
+        let cell = self.client_cell;
+        let gfx = self.client_gfx;
+        let ids: Vec<u64> = self.panes.iter().map(|p| p.id).collect();
+        for id in &ids {
+            if let Some(p) = self.pane_mut(*id) {
+                p.set_cell(cell);
+                p.gfx.active = gfx;
+                p.gfx_pushed = u64::MAX;
+            }
+        }
+        for id in ids {
+            self.push_gfx(id);
+        }
         let active = self.active;
         if let Some(p) = self.pane_mut(active) {
             p.clear_flags();
+        }
+    }
+
+    /// Deliver pane `id`'s graphics state to the UI when it changed: first
+    /// any image payloads the client hasn't seen this attach (chunked), then
+    /// the placement snapshot. Pixels flow only here — never in T_OUTPUT.
+    fn push_gfx(&mut self, id: u64) {
+        let Some(gen) = self.ui else { return };
+        if !self.client_gfx {
+            return;
+        }
+        let Some(p) = self.panes.iter().find(|p| p.id == id) else {
+            return;
+        };
+        if p.gfx.version == p.gfx_pushed
+            || (p.gfx_pushed == u64::MAX && p.gfx.version == 0)
+        {
+            if p.gfx.version == 0 {
+                if let Some(p) = self.pane_mut(id) {
+                    p.gfx_pushed = 0;
+                }
+            }
+            return;
+        }
+        let snap = p.gfx.snapshot();
+        let version = p.gfx.version;
+        let need: Vec<(u32, u32)> = snap
+            .images
+            .iter()
+            .copied()
+            .filter(|(img, ver)| !self.gfx_sent.contains(&(id, *img, *ver)))
+            .collect();
+        for (img_id, ver) in need {
+            let mut off = 0usize;
+            loop {
+                // re-borrow per chunk: reply() needs &mut self
+                let Some(p) = self.panes.iter().find(|p| p.id == id) else {
+                    return;
+                };
+                let Some(img) = p.gfx.image(img_id) else { break };
+                let total = img.data.len();
+                let end = (off + GFX_CHUNK).min(total);
+                let hdr = GfxImgHdr {
+                    img: img_id,
+                    ver,
+                    format: img.format,
+                    zlib: img.zlib,
+                    w: img.w,
+                    h: img.h,
+                    off: off as u32,
+                    total: total as u32,
+                }
+                .encode();
+                let mut data = Vec::with_capacity(GFX_IMG_HDR + end - off);
+                data.extend_from_slice(&hdr);
+                data.extend_from_slice(&img.data[off..end]);
+                self.reply(gen, T_GFX_IMG, id, &data);
+                off = end;
+                if off >= total {
+                    break;
+                }
+            }
+            self.gfx_sent.insert((id, img_id, ver));
+        }
+        let json = serde_json::to_vec(&snap).unwrap_or_default();
+        self.reply(gen, T_GFX_STATE, id, &json);
+        if let Some(p) = self.pane_mut(id) {
+            p.gfx_pushed = version;
         }
     }
 
@@ -482,7 +599,9 @@ impl Server {
         let id = self.next_id;
         self.next_id += 1;
         let (rows, cols) = self.size;
-        let pane = SrvPane::spawn(id, name, rows, cols, cwd, preload, self.tx.clone())?;
+        let mut pane = SrvPane::spawn(id, name, rows, cols, cwd, preload, self.tx.clone())?;
+        pane.set_cell(self.client_cell);
+        pane.gfx.active = self.client_gfx;
         let pname = pane.name.clone();
         self.panes.push(pane);
         self.dirty = true;

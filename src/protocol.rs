@@ -20,13 +20,66 @@ pub const T_AUTORESUME: u8 = 13; // payload[0]: 0 = off, 1 = on (per pane)
 
 // server -> client
 pub const T_HELLO: u8 = 20; // payload: Hello JSON
-pub const T_REPLAY: u8 = 21; // payload: raw pty backlog
-pub const T_OUTPUT: u8 = 22; // payload: raw pty bytes
+pub const T_REPLAY: u8 = 21; // payload: pty backlog (graphics stripped)
+pub const T_OUTPUT: u8 = 22; // payload: pty bytes (graphics stripped)
 pub const T_PANE_OPENED: u8 = 23; // payload: utf8 name
 pub const T_PANE_CLOSED: u8 = 24;
 pub const T_SERVER_EXIT: u8 = 25;
 pub const T_STATE: u8 = 26; // payload: SessionState JSON
 pub const T_SCREEN: u8 = 27; // payload: utf8 screen text
+pub const T_GFX_STATE: u8 = 28; // payload: GfxSnapshot JSON for pane f.id
+pub const T_GFX_IMG: u8 = 29; // payload: image data chunk, see gfx_img_*
+
+/// T_GFX_IMG payload: 26-byte header + data chunk. Images larger than
+/// GFX_CHUNK arrive as several frames distinguished by `off`; the client
+/// assembles until `off + chunk_len == total`.
+pub const GFX_IMG_HDR: usize = 26;
+pub const GFX_CHUNK: usize = 1024 * 1024;
+
+pub struct GfxImgHdr {
+    pub img: u32,
+    pub ver: u32,
+    pub format: u8,
+    pub zlib: bool,
+    pub w: u32,
+    pub h: u32,
+    pub off: u32,
+    pub total: u32,
+}
+
+impl GfxImgHdr {
+    pub fn encode(&self) -> [u8; GFX_IMG_HDR] {
+        let mut hdr = [0u8; GFX_IMG_HDR];
+        hdr[0..4].copy_from_slice(&self.img.to_le_bytes());
+        hdr[4..8].copy_from_slice(&self.ver.to_le_bytes());
+        hdr[8] = self.format;
+        hdr[9] = self.zlib as u8;
+        hdr[10..14].copy_from_slice(&self.w.to_le_bytes());
+        hdr[14..18].copy_from_slice(&self.h.to_le_bytes());
+        hdr[18..22].copy_from_slice(&self.off.to_le_bytes());
+        hdr[22..26].copy_from_slice(&self.total.to_le_bytes());
+        hdr
+    }
+
+    pub fn decode(data: &[u8]) -> Option<Self> {
+        if data.len() < GFX_IMG_HDR {
+            return None;
+        }
+        let u = |r: std::ops::Range<usize>| {
+            u32::from_le_bytes(data[r].try_into().unwrap())
+        };
+        Some(Self {
+            img: u(0..4),
+            ver: u(4..8),
+            format: data[8],
+            zlib: data[9] != 0,
+            w: u(10..14),
+            h: u(14..18),
+            off: u(18..22),
+            total: u(22..26),
+        })
+    }
+}
 
 const MAX_FRAME: usize = 8 * 1024 * 1024;
 

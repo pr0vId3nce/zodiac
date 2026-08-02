@@ -15,11 +15,18 @@ starship ✨ — and PATH are rebuilt fresh even under the long-lived server),
 with `TERM=xterm-256color` and `COLORTERM=truecolor`. Summon whatever agent
 you like inside it.
 
-Panes are text terminals: the inner emulator (vt100) does not implement the
-kitty graphics protocol or sixel, even when zodiac itself runs in a
-graphics-capable terminal like ghostty — inline images inside panes won't
-render. `TERM=xterm-256color` deliberately tells apps not to attempt it.
-Some magic is forbidden. 📜
+Panes are graphics terminals: zodiac faithfully emulates the kitty graphics
+protocol inside every pane (transmit/place/delete, chunking, PNG and raw
+formats, file/tmp/shm media, queries) and composites the images through the
+outer terminal when it speaks the protocol itself (ghostty, kitty, wezterm).
+Images scroll with their text, live in scrollback, survive detach/reattach,
+and each pane's state is isolated — id collisions between panes can't
+happen. Pane PTYs report true pixel dimensions, so `icat`, matplotlib
+backends, yazi previews and friends size images correctly. In a
+non-graphics outer terminal apps cleanly detect "unsupported" (the query
+goes unanswered, DA1 still resolves the probe). Animations and Unicode
+placeholders are politely declined with an error response. The forbidden
+magic has been learned. 🪄 (Design notes: GRAPHICS.md.)
 
 zodiac answers the terminal queries apps whisper on startup (vim's t_RV,
 nvim's background-color probe, crossterm's kitty-keyboard check): DA1/DA2,

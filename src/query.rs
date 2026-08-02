@@ -30,7 +30,9 @@ impl QueryScanner {
     }
 
     /// Scan one pty output chunk; returns reply bytes to feed back as input.
-    pub fn scan(&mut self, chunk: &[u8], screen: &Screen) -> Vec<u8> {
+    /// `cell` is the outer terminal's cell size in px (0,0 = unknown) for
+    /// the pixel-size window ops.
+    pub fn scan(&mut self, chunk: &[u8], screen: &Screen, cell: (u16, u16)) -> Vec<u8> {
         let owned;
         let buf: &[u8] = if self.carry.is_empty() {
             chunk
@@ -47,7 +49,7 @@ impl QueryScanner {
                 i += 1;
                 continue;
             }
-            match parse_seq(&buf[i..], screen, &mut out) {
+            match parse_seq(&buf[i..], screen, cell, &mut out) {
                 Parsed::Done(n) => i += n.max(1),
                 Parsed::Incomplete => {
                     let tail = &buf[i..];
@@ -62,17 +64,17 @@ impl QueryScanner {
     }
 }
 
-fn parse_seq(s: &[u8], screen: &Screen, out: &mut Vec<u8>) -> Parsed {
+fn parse_seq(s: &[u8], screen: &Screen, cell: (u16, u16), out: &mut Vec<u8>) -> Parsed {
     match s.get(1) {
         None => Parsed::Incomplete,
-        Some(b'[') => parse_csi(s, screen, out),
+        Some(b'[') => parse_csi(s, screen, cell, out),
         Some(b']') => parse_string(s, out, respond_osc),
         Some(b'P') => parse_string(s, out, respond_dcs),
         Some(_) => Parsed::Done(1),
     }
 }
 
-fn parse_csi(s: &[u8], screen: &Screen, out: &mut Vec<u8>) -> Parsed {
+fn parse_csi(s: &[u8], screen: &Screen, cell: (u16, u16), out: &mut Vec<u8>) -> Parsed {
     let mut j = 2;
     // parameter bytes (0x30–0x3f) and intermediates (0x20–0x2f)
     while j < s.len() && (0x20..=0x3f).contains(&s[j]) {
@@ -84,7 +86,7 @@ fn parse_csi(s: &[u8], screen: &Screen, out: &mut Vec<u8>) -> Parsed {
     if !(0x40..=0x7e).contains(&fin) {
         return Parsed::Done(j);
     }
-    respond_csi(&s[2..j], fin, screen, out);
+    respond_csi(&s[2..j], fin, screen, cell, out);
     Parsed::Done(j + 1)
 }
 
@@ -112,7 +114,7 @@ fn parse_string(s: &[u8], out: &mut Vec<u8>, respond: fn(&[u8], &mut Vec<u8>)) -
     }
 }
 
-fn respond_csi(body: &[u8], fin: u8, screen: &Screen, out: &mut Vec<u8>) {
+fn respond_csi(body: &[u8], fin: u8, screen: &Screen, cell: (u16, u16), out: &mut Vec<u8>) {
     match fin {
         // DA1: VT220 with ANSI color. Also what resolves crossterm's
         // keyboard-enhancement probe (kitty query + DA1; a DA1 reply with
@@ -145,6 +147,17 @@ fn respond_csi(body: &[u8], fin: u8, screen: &Screen, out: &mut Vec<u8>) {
         b't' if body == b"18" => {
             let (rows, cols) = screen.size();
             out.extend_from_slice(format!("\x1b[8;{rows};{cols}t").as_bytes());
+        }
+        // text-area size in pixels — needed by image tools to derive cell
+        // size; answered only once the attached client reported one.
+        b't' if body == b"14" && cell.0 > 0 => {
+            let (rows, cols) = screen.size();
+            let (w, h) = (cols * cell.0, rows * cell.1);
+            out.extend_from_slice(format!("\x1b[4;{h};{w}t").as_bytes());
+        }
+        // cell size in pixels
+        b't' if body == b"16" && cell.0 > 0 => {
+            out.extend_from_slice(format!("\x1b[6;{};{}t", cell.1, cell.0).as_bytes());
         }
         _ => {}
     }
@@ -195,7 +208,7 @@ mod tests {
     fn da1_and_cpr() {
         let p = screen();
         let mut q = QueryScanner::new();
-        let out = q.scan(b"\x1b[c\x1b[6n", p.screen());
+        let out = q.scan(b"\x1b[c\x1b[6n", p.screen(), (0, 0));
         assert_eq!(out, b"\x1b[?62;22c\x1b[1;1R");
     }
 
@@ -203,15 +216,15 @@ mod tests {
     fn split_across_chunks() {
         let p = screen();
         let mut q = QueryScanner::new();
-        assert!(q.scan(b"hello\x1b[", p.screen()).is_empty());
-        assert_eq!(q.scan(b">c world", p.screen()), b"\x1b[>41;354;0c");
+        assert!(q.scan(b"hello\x1b[", p.screen(), (0, 0)).is_empty());
+        assert_eq!(q.scan(b">c world", p.screen(), (0, 0)), b"\x1b[>41;354;0c");
     }
 
     #[test]
     fn osc_color_query_but_not_title_set() {
         let p = screen();
         let mut q = QueryScanner::new();
-        let out = q.scan(b"\x1b]0;my title\x07\x1b]11;?\x1b\\", p.screen());
+        let out = q.scan(b"\x1b]0;my title\x07\x1b]11;?\x1b\\", p.screen(), (0, 0));
         assert_eq!(out, b"\x1b]11;rgb:0000/0000/0000\x1b\\");
     }
 
@@ -219,7 +232,7 @@ mod tests {
     fn decrqm_known_and_unknown() {
         let p = screen();
         let mut q = QueryScanner::new();
-        let out = q.scan(b"\x1b[?2026$p\x1b[?2004$p", p.screen());
+        let out = q.scan(b"\x1b[?2026$p\x1b[?2004$p", p.screen(), (0, 0));
         assert_eq!(out, b"\x1b[?2026;0$y\x1b[?2004;2$y");
     }
 
@@ -227,7 +240,7 @@ mod tests {
     fn xtgettcap_gets_invalid_reply() {
         let p = screen();
         let mut q = QueryScanner::new();
-        let out = q.scan(b"\x1bP+q544e\x1b\\", p.screen());
+        let out = q.scan(b"\x1bP+q544e\x1b\\", p.screen(), (0, 0));
         assert_eq!(out, b"\x1bP0+r\x1b\\");
     }
 
@@ -235,7 +248,7 @@ mod tests {
     fn kitty_probe_no_reply() {
         let p = screen();
         let mut q = QueryScanner::new();
-        assert!(q.scan(b"\x1b[?u", p.screen()).is_empty());
+        assert!(q.scan(b"\x1b[?u", p.screen(), (0, 0)).is_empty());
     }
 
     #[test]
@@ -244,8 +257,8 @@ mod tests {
         let mut q = QueryScanner::new();
         let mut chunk = b"\x1b]0;".to_vec();
         chunk.extend(std::iter::repeat(b'x').take(CARRY_MAX + 10));
-        assert!(q.scan(&chunk, p.screen()).is_empty());
+        assert!(q.scan(&chunk, p.screen(), (0, 0)).is_empty());
         // the dangling title set was dropped, not carried into the next chunk
-        assert_eq!(q.scan(b"more\x07\x1b[c", p.screen()), b"\x1b[?62;22c");
+        assert_eq!(q.scan(b"more\x07\x1b[c", p.screen(), (0, 0)), b"\x1b[?62;22c");
     }
 }

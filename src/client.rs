@@ -224,6 +224,41 @@ impl Sel {
     }
 }
 
+/// A pane image mirrored from the server, plus the id it was transmitted
+/// to the outer terminal under (None until first needed on screen).
+struct CImg {
+    ver: u32,
+    format: u8,
+    zlib: bool,
+    w: u32,
+    h: u32,
+    data: Vec<u8>,
+    outer: Option<u32>,
+}
+
+/// One placement currently alive on the outer terminal.
+struct OuterPlaced {
+    pane: u64,
+    key: u64,
+    pid: u32,
+    geom: OuterGeom,
+}
+
+/// Everything that positions a placement on the outer terminal; equality
+/// means "nothing to redraw".
+#[derive(Clone, PartialEq)]
+struct OuterGeom {
+    img: u32, // outer image id
+    x: u16,   // 1-based screen cell
+    y: u16,
+    src: (u32, u32, u32, u32),
+    c: u16,
+    r: u16,
+    z: i32,
+    offx: u16,
+    offy: u16,
+}
+
 struct CPane {
     id: u64,
     name: String,
@@ -234,6 +269,11 @@ struct CPane {
     attention: bool,
     bell_count: usize,
     size: (u16, u16),
+    /// Latest graphics snapshot from the server (placements + live images).
+    gfx: crate::gfx::GfxSnapshot,
+    images: std::collections::HashMap<u32, CImg>,
+    /// Chunked T_GFX_IMG payloads still assembling.
+    partial: std::collections::HashMap<u32, Vec<u8>>,
 }
 
 impl CPane {
@@ -250,6 +290,9 @@ impl CPane {
             attention: false,
             bell_count: 0,
             size: (rows, cols),
+            gfx: crate::gfx::GfxSnapshot::default(),
+            images: std::collections::HashMap::new(),
+            partial: std::collections::HashMap::new(),
         }
     }
 
@@ -324,6 +367,14 @@ struct App {
     kitty_last_icon: String,
     /// Image data transmitted this attach: (px_w, px_h, image id).
     kitty_sent: std::collections::HashSet<(u32, u32, u32)>,
+    /// Pane-image placements currently alive on the outer terminal.
+    placed_gfx: Vec<OuterPlaced>,
+    /// Outer id allocation for pane images (namespaced away from card ids).
+    next_outer: u32,
+    next_pid: u32,
+    pid_map: std::collections::HashMap<(u64, u64), u32>,
+    /// Outer image ids whose data should be freed on the next overlay pass.
+    outer_dead: Vec<u32>,
     sock: UnixStream,
     rx: Receiver<AppEvent>,
 }
@@ -394,10 +445,25 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         kitty_placed: Vec::new(),
         kitty_last_icon: String::new(),
         kitty_sent: std::collections::HashSet::new(),
+        placed_gfx: Vec::new(),
+        next_outer: 0x5A00_0000, // 'Z' — clear of the card-art id range
+        next_pid: 0,
+        pid_map: std::collections::HashMap::new(),
+        outer_dead: Vec::new(),
         sock,
         rx,
     };
-    app.send(T_ATTACH, 0, &[]);
+    // Announce graphics capability + cell size so panes' PTYs report pixel
+    // dimensions and the server engines start answering the protocol.
+    let cell = crate::kitty::cell_size().unwrap_or((0, 0));
+    let hello = [
+        app.kitty_on as u8,
+        cell.0.to_le_bytes()[0],
+        cell.0.to_le_bytes()[1],
+        cell.1.to_le_bytes()[0],
+        cell.1.to_le_bytes()[1],
+    ];
+    app.send(T_ATTACH, 0, &hello);
     app.send_resize();
     app.send(T_QUERY, 0, &[]);
     app.home_queried = Some(Instant::now());
@@ -405,6 +471,7 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
     while !app.quit {
         terminal.draw(|f| app.draw(f))?;
         app.kitty_overlay();
+        app.pane_overlay();
         if app.main_size != app.sent_size {
             app.send_resize();
         }
@@ -450,6 +517,7 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
             Err(RecvTimeoutError::Disconnected) => break,
         }
     }
+    app.gfx_cleanup();
     Ok(app.exit_msg)
 }
 
@@ -504,9 +572,14 @@ impl App {
         let (rows, cols) = self.main_size;
         self.sent_size = self.main_size;
         self.resized_at = Some(Instant::now());
-        let mut data = [0u8; 4];
+        // Cell size rides along — it changes with font-size changes, which
+        // always arrive as a resize.
+        let cell = crate::kitty::cell_size().unwrap_or((0, 0));
+        let mut data = [0u8; 8];
         data[..2].copy_from_slice(&rows.to_le_bytes());
-        data[2..].copy_from_slice(&cols.to_le_bytes());
+        data[2..4].copy_from_slice(&cols.to_le_bytes());
+        data[4..6].copy_from_slice(&cell.0.to_le_bytes());
+        data[6..8].copy_from_slice(&cell.1.to_le_bytes());
         self.send(T_RESIZE, 0, &data.clone());
     }
 
@@ -808,8 +881,67 @@ impl App {
                 self.panes.push(CPane::new(f.id, name, rows, cols));
                 self.active = self.panes.len() - 1;
             }
+            T_GFX_STATE => {
+                if let Ok(snap) = serde_json::from_slice::<crate::gfx::GfxSnapshot>(&f.data) {
+                    let mut dead = Vec::new();
+                    if let Some(p) = self.pane_by_id(f.id) {
+                        let live: std::collections::HashSet<(u32, u32)> =
+                            snap.images.iter().copied().collect();
+                        p.images.retain(|id, img| {
+                            let keep = live.contains(&(*id, img.ver));
+                            if !keep {
+                                dead.extend(img.outer);
+                            }
+                            keep
+                        });
+                        p.gfx = snap;
+                    }
+                    self.outer_dead.extend(dead);
+                }
+            }
+            T_GFX_IMG => {
+                if let Some(hdr) = GfxImgHdr::decode(&f.data) {
+                    let chunk = &f.data[GFX_IMG_HDR..];
+                    let mut dead = Vec::new();
+                    if let Some(p) = self.pane_by_id(f.id) {
+                        let buf = p.partial.entry(hdr.img).or_default();
+                        if hdr.off == 0 {
+                            buf.clear();
+                        }
+                        buf.extend_from_slice(chunk);
+                        if buf.len() as u32 >= hdr.total {
+                            let data = std::mem::take(buf);
+                            p.partial.remove(&hdr.img);
+                            // a retransmitted image obsoletes its outer copy
+                            if let Some(old) = p.images.get(&hdr.img).and_then(|i| i.outer) {
+                                dead.push(old);
+                            }
+                            p.images.insert(
+                                hdr.img,
+                                CImg {
+                                    ver: hdr.ver,
+                                    format: hdr.format,
+                                    zlib: hdr.zlib,
+                                    w: hdr.w,
+                                    h: hdr.h,
+                                    data,
+                                    outer: None,
+                                },
+                            );
+                        }
+                    }
+                    self.outer_dead.extend(dead);
+                }
+            }
             T_PANE_CLOSED => {
                 if let Some(i) = self.panes.iter().position(|p| p.id == f.id) {
+                    let dead: Vec<u32> = self.panes[i]
+                        .images
+                        .values()
+                        .filter_map(|img| img.outer)
+                        .collect();
+                    self.outer_dead.extend(dead);
+                    self.pid_map.retain(|(pane, _), _| *pane != f.id);
                     self.panes.remove(i);
                     if self.panes.is_empty() {
                         self.exit_msg = "zodiac: session ended (last pane closed)";
@@ -1936,6 +2068,9 @@ impl App {
                 let _ = crate::kitty::delete_placements(&mut out);
                 let _ = out.flush();
                 self.kitty_placed.clear();
+                // d=a wiped every visible placement, pane images included —
+                // drop the compositor's tracking so it re-places them.
+                self.placed_gfx.clear();
             }
             return;
         }
@@ -2016,6 +2151,7 @@ impl App {
         if desired.len() != self.kitty_placed.len() {
             let _ = crate::kitty::delete_placements(&mut out);
             self.kitty_placed.clear();
+            self.placed_gfx.clear();
         }
         // Per-placement diff: place the new image first, then drop the old
         // one, so the card never shows bare background (no flicker).
@@ -2035,6 +2171,185 @@ impl App {
         }
         let _ = out.flush();
         self.kitty_placed = desired;
+    }
+
+    /// Composite the focused pane's kitty-graphics placements onto the
+    /// outer terminal. Runs after every ratatui draw: pixels are relayed
+    /// once per image, then only cheap re-place/crop/delete commands flow.
+    /// All writes are wrapped in cursor save/restore so the pane's text
+    /// cursor stays where ratatui put it.
+    fn pane_overlay(&mut self) {
+        if !self.kitty_on {
+            return;
+        }
+        use std::io::Write as _;
+        let target: Option<u64> = if self.home || matches!(self.mode, Mode::Settings) {
+            None
+        } else {
+            self.active_id()
+        };
+        let view = self.main_rect;
+        let mut buf: Vec<u8> = Vec::new();
+        let mut desired: Vec<(u64, OuterGeom)> = Vec::new();
+        let mut next_outer = self.next_outer;
+
+        if let Some(pane_id) = target {
+            if let Some(p) = self.panes.iter_mut().find(|p| p.id == pane_id) {
+                let scroll = p.scroll as i32;
+                let places = p.gfx.placements.clone();
+                for vp in places {
+                    let (vw, vh) = (view.width as i32, view.height as i32);
+                    if vw == 0 || vh == 0 || (vp.col as i32) >= vw {
+                        continue;
+                    }
+                    let vr = vp.row + scroll;
+                    let start = vr.max(0);
+                    let end = (vr + vp.rows as i32).min(vh);
+                    let vis_rows = end - start;
+                    if vis_rows <= 0 {
+                        continue;
+                    }
+                    let top_clip = (-vr).max(0);
+                    let vis_cols = (vp.cols as i32).min(vw - vp.col as i32);
+                    let Some(img) = p.images.get_mut(&vp.img) else {
+                        continue; // pixel data still in flight
+                    };
+                    if img.ver != vp.img_ver {
+                        continue;
+                    }
+                    if img.outer.is_none() {
+                        next_outer += 1;
+                        let _ = crate::kitty::transmit_data(
+                            &mut buf, next_outer, img.format, img.zlib, img.w, img.h,
+                            &img.data,
+                        );
+                        img.outer = Some(next_outer);
+                    }
+                    let outer = img.outer.unwrap();
+                    // proportional source-rect crop for partial visibility
+                    let (sx, sy, sw0, sh0) = vp.src;
+                    let sw = if sw0 > 0 { sw0 } else { img.w.saturating_sub(sx) };
+                    let sh = if sh0 > 0 { sh0 } else { img.h.saturating_sub(sy) };
+                    let full = top_clip == 0
+                        && vis_rows == vp.rows as i32
+                        && vis_cols == vp.cols as i32;
+                    let src = if full {
+                        vp.src
+                    } else {
+                        (
+                            sx,
+                            sy + (sh as i64 * top_clip as i64 / vp.rows as i64) as u32,
+                            (sw as i64 * vis_cols as i64 / vp.cols as i64).max(1) as u32,
+                            (sh as i64 * vis_rows as i64 / vp.rows as i64).max(1) as u32,
+                        )
+                    };
+                    desired.push((
+                        vp.key,
+                        OuterGeom {
+                            img: outer,
+                            x: view.x + vp.col + 1,
+                            y: (view.y as i32 + start + 1) as u16,
+                            src,
+                            c: vis_cols as u16,
+                            r: vis_rows as u16,
+                            z: vp.z,
+                            offx: vp.offx,
+                            offy: if top_clip > 0 { 0 } else { vp.offy },
+                        },
+                    ));
+                }
+            }
+        }
+        self.next_outer = next_outer;
+
+        // Diff against what's on the terminal: same key + same geometry is
+        // free; same outer image re-places atomically (no flicker); an
+        // image swap deletes the stale placement in the same write.
+        let mut existing: std::collections::HashMap<u64, OuterPlaced> =
+            std::collections::HashMap::new();
+        for pl in self.placed_gfx.drain(..) {
+            if Some(pl.pane) == target {
+                existing.insert(pl.key, pl);
+            } else {
+                let _ = crate::kitty::delete_placement(&mut buf, pl.geom.img, pl.pid);
+            }
+        }
+        let mut new_placed: Vec<OuterPlaced> = Vec::new();
+        let pane = target.unwrap_or(0);
+        for (key, geom) in desired {
+            let pid = *self.pid_map.entry((pane, key)).or_insert_with(|| {
+                self.next_pid += 1;
+                self.next_pid
+            });
+            match existing.remove(&key) {
+                Some(old) if old.geom == geom => new_placed.push(old),
+                old => {
+                    if let Some(old) = old {
+                        if old.geom.img != geom.img {
+                            let _ = crate::kitty::delete_placement(
+                                &mut buf,
+                                old.geom.img,
+                                old.pid,
+                            );
+                        }
+                    }
+                    let _ = crate::kitty::place_at(
+                        &mut buf, geom.y, geom.x, geom.img, pid, geom.src, geom.c,
+                        geom.r, geom.z, geom.offx, geom.offy,
+                    );
+                    new_placed.push(OuterPlaced {
+                        pane,
+                        key,
+                        pid,
+                        geom,
+                    });
+                }
+            }
+        }
+        for (_, old) in existing {
+            let _ = crate::kitty::delete_placement(&mut buf, old.geom.img, old.pid);
+        }
+        self.placed_gfx = new_placed;
+        for outer in self.outer_dead.drain(..) {
+            let _ = crate::kitty::delete_image(&mut buf, outer);
+        }
+
+        if !buf.is_empty() {
+            let mut out = std::io::stdout();
+            let _ = out.write_all(b"\x1b7");
+            let _ = out.write_all(&buf);
+            let _ = out.write_all(b"\x1b8");
+            let _ = out.flush();
+        }
+    }
+
+    /// Free everything this client pushed to the outer terminal — image
+    /// data outlives the alternate screen, so exiting without this would
+    /// leak pixels into the terminal's store.
+    fn gfx_cleanup(&mut self) {
+        if !self.kitty_on {
+            return;
+        }
+        use std::io::Write as _;
+        let mut buf: Vec<u8> = Vec::new();
+        for pl in &self.placed_gfx {
+            let _ = crate::kitty::delete_placement(&mut buf, pl.geom.img, pl.pid);
+        }
+        for p in &self.panes {
+            for img in p.images.values() {
+                if let Some(outer) = img.outer {
+                    let _ = crate::kitty::delete_image(&mut buf, outer);
+                }
+            }
+        }
+        for outer in self.outer_dead.drain(..) {
+            let _ = crate::kitty::delete_image(&mut buf, outer);
+        }
+        if !buf.is_empty() {
+            let mut out = std::io::stdout();
+            let _ = out.write_all(&buf);
+            let _ = out.flush();
+        }
     }
 
     fn draw_sidebar(&mut self, f: &mut Frame, area: Rect) {

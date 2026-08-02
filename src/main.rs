@@ -1,4 +1,5 @@
 mod cli;
+mod gfx;
 mod client;
 mod kitty;
 mod pane;

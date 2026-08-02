@@ -410,15 +410,19 @@ pub fn orb_rgba(w: u32, h: u32, col: (u8, u8, u8), shape: OrbShape, phase: f32) 
             let o = ((y * w + x) * 4) as usize;
             let (mut rr, mut gg, mut bb, mut a);
             if shape == OrbShape::Halo {
-                // Soft radial aura, densest behind the glyph at the center,
-                // bleeding into the neighboring cells and breathing with
-                // the pulse. The buffer spans 3x3 cells for this shape.
-                let aura = (-(d / (r * 0.85)).powi(2)).exp();
-                let inner = (-(d / (r * 0.30)).powi(2)).exp();
-                rr = cr + (255.0 - cr) * inner * 0.25;
-                gg = cg + (255.0 - cg) * inner * 0.25;
-                bb = cb + (255.0 - cb) * inner * 0.25;
-                a = (aura * (0.30 + 0.38 * glow) + inner * 0.15).min(0.85);
+                // Soft radial aura behind the glyph, breathing with the
+                // pulse. The buffer spans 3x3 cells; the falloff is a
+                // quadratic window that reaches exactly zero at the buffer
+                // edge — a gaussian would still be visible there and cut
+                // off as a hard rectangle.
+                let rmax = fw.min(fh) / 2.0 - 0.5;
+                let fall = (1.0 - d / rmax).clamp(0.0, 1.0);
+                let aura = fall * fall;
+                let inner = (-(d / (rmax * 0.22)).powi(2)).exp();
+                rr = cr + (255.0 - cr) * inner * 0.15;
+                gg = cg + (255.0 - cg) * inner * 0.15;
+                bb = cb + (255.0 - cb) * inner * 0.15;
+                a = (aura * (0.16 + 0.20 * glow) + inner * 0.10).min(0.55);
             } else if shape == OrbShape::Bar {
                 // Left-aligned like a hardware bar, just meatier: ~28% of
                 // the cell wide, antialiased right edge, faint rounding at

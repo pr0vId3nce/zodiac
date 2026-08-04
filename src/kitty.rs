@@ -103,6 +103,7 @@ fn stamp(px: &mut [u8], w: u32, h: u32, x: f32, y: f32, r: f32, col: (u8, u8, u8
                 px[o] = (px[o] as f32 + (col.0 as f32 - px[o] as f32) * a) as u8;
                 px[o + 1] = (px[o + 1] as f32 + (col.1 as f32 - px[o + 1] as f32) * a) as u8;
                 px[o + 2] = (px[o + 2] as f32 + (col.2 as f32 - px[o + 2] as f32) * a) as u8;
+                px[o + 3] = px[o + 3].max((a * 255.0) as u8);
             }
         }
     }
@@ -246,82 +247,7 @@ pub fn card_rgba(w: u32, h: u32, style: &CardStyle) -> Vec<u8> {
             }
         }
         CardMark::ClaudeRun(frame) => {
-            // Clawd mid-bounce: coral rounded blob, dark eyes, ground
-            // shadow. phase 0 = top of the arc, 1 = squashed on the ground.
-            let coral = (222.0f32, 122.0f32, 88.0f32);
-            let eye = (46u8, 26u8, 22u8);
-            let phase = [0.15f32, 0.55, 1.0, 0.55][frame as usize % 4];
-            let amp = s * 1.1;
-            let (bw0, bh0) = (s * 1.5, s * 1.25);
-            let (bw2, bh2) = (bw0 * (1.0 + 0.22 * phase), bh0 * (1.10 - 0.32 * phase));
-            let base_y = my + amp;
-            let cy = base_y - bh2 - amp * (1.0 - phase);
-            // Ground shadow first, body over it.
-            let (srx, sry) = (bw0 * (0.55 + 0.45 * phase), (fh * 0.006).max(1.5));
-            let sa = 0.20 + 0.25 * phase;
-            for y in (base_y - sry * 3.0).max(0.0) as u32..((base_y + sry * 3.0) as u32).min(h) {
-                for x in (mx - srx - 2.0).max(0.0) as u32..((mx + srx + 2.0) as u32).min(w) {
-                    let ex = (x as f32 - mx) / srx;
-                    let ey = (y as f32 - (base_y + sry)) / sry;
-                    let a = ((1.0 - (ex * ex + ey * ey)).max(0.0)).sqrt() * sa;
-                    if a > 0.01 {
-                        let o = ((y * w + x) * 4) as usize;
-                        px[o] = (px[o] as f32 * (1.0 - a)) as u8;
-                        px[o + 1] = (px[o + 1] as f32 * (1.0 - a)) as u8;
-                        px[o + 2] = (px[o + 2] as f32 * (1.0 - a)) as u8;
-                    }
-                }
-            }
-            // Legs before the body so the joints hide under it; arms after
-            // so they overlap the body edge. Legs tuck as he lands, arms
-            // fly up while airborne.
-            let coral8 = (222u8, 122u8, 88u8);
-            let limb_th = (s * 0.16).max(1.0);
-            let leg_l = s * 0.55 * (1.0 - 0.6 * phase);
-            for side in [-1.0f32, 1.0] {
-                let x0 = mx + side * bw2 * 0.45;
-                let y0 = cy + bh2 * 0.85;
-                seg(&mut px, w, h, (x0, y0), (x0, y0 + leg_l + bh2 * 0.15), limb_th, coral8);
-            }
-            let rad = bh2 * if style.mascot_soft { 0.55 } else { 0.20 };
-            for y in (cy - bh2 - 2.0).max(0.0) as u32..((cy + bh2 + 2.0) as u32).min(h) {
-                for x in (mx - bw2 - 2.0).max(0.0) as u32..((mx + bw2 + 2.0) as u32).min(w) {
-                    let qx = (x as f32 - mx).abs() - (bw2 - rad);
-                    let qy = (y as f32 - cy).abs() - (bh2 - rad);
-                    let d = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt()
-                        + qx.max(qy).min(0.0)
-                        - rad;
-                    let a = (-d + 0.7).clamp(0.0, 1.0);
-                    if a > 0.01 {
-                        let o = ((y * w + x) * 4) as usize;
-                        px[o] = (px[o] as f32 + (coral.0 - px[o] as f32) * a) as u8;
-                        px[o + 1] = (px[o + 1] as f32 + (coral.1 - px[o + 1] as f32) * a) as u8;
-                        px[o + 2] = (px[o + 2] as f32 + (coral.2 - px[o + 2] as f32) * a) as u8;
-                    }
-                }
-            }
-            // Arms: stubby segments angled up while airborne, level on
-            // the squash.
-            let arm_l = s * 0.7;
-            let lift = 1.0 - phase;
-            for side in [-1.0f32, 1.0] {
-                let x0 = mx + side * bw2 * 0.92;
-                let y0 = cy - bh2 * 0.05;
-                let x1 = x0 + side * arm_l * 0.9;
-                let y1 = y0 - arm_l * (0.85 * lift - 0.15);
-                seg(&mut px, w, h, (x0, y0), (x1, y1), limb_th, coral8);
-            }
-            // Eyes: two vertical ovals (stacked stamps), squashing with the
-            // body so the bounce reads.
-            let er = (bh2 * 0.16).max(1.0);
-            for side in [-1.0f32, 1.0] {
-                let ex = mx + side * bw2 * 0.40;
-                let ey0 = cy - bh2 * 0.12;
-                let stretch = bh2 * 0.14 * (1.0 - 0.5 * phase);
-                stamp(&mut px, w, h, ex, ey0 - stretch, er, eye);
-                stamp(&mut px, w, h, ex, ey0, er, eye);
-                stamp(&mut px, w, h, ex, ey0 + stretch, er, eye);
-            }
+            draw_clawd(&mut px, w, h, mx, my, s, fh, frame, style.mascot_soft)
         }
     }
     // Selection outline hugging the outer edge, so the highlight genuinely
@@ -478,6 +404,431 @@ pub fn orb_rgba(w: u32, h: u32, col: (u8, u8, u8), shape: OrbShape, phase: f32) 
             px[o + 1] = gg.min(255.0) as u8;
             px[o + 2] = bb.min(255.0) as u8;
             px[o + 3] = (a * 255.0).min(255.0) as u8;
+        }
+    }
+    px
+}
+
+/// Image-id base for the Wizard chat panel's portrait ("WIZ\0"), clear of
+/// the card, orb, and pane-image ranges.
+pub const WIZ_BASE: u32 = 0x5749_5A00;
+/// Pulse frames for the awake (streaming) and waking portraits; the other
+/// states are still images (frame 0).
+pub const WIZ_FRAMES: u32 = 6;
+/// The frame whose pulse phase peaks — used as the steady awake portrait.
+pub const WIZ_STEADY: u32 = 2;
+
+pub fn wizard_id(status_idx: usize, frame: u32) -> u32 {
+    WIZ_BASE + status_idx as u32 * 16 + frame
+}
+
+/// Paint the Wizard's portrait card: the same night-sky treatment as the
+/// tarot cards, with a robed figure, staff and orb whose mood tracks the
+/// model's status. `status_idx`: 0 awake, 1 waking, 2 sleeping, 3 away.
+/// Draw the hopping Clawd mascot into an RGBA buffer. Shared between the
+/// painted cards (opaque night sky) and the standalone transparent sprite
+/// used by the blocks home view — every write also raises alpha so it
+/// composites cleanly over the terminal background.
+fn draw_clawd(px: &mut [u8], w: u32, h: u32, mx: f32, my: f32, s: f32, fh: f32, frame: u8, soft: bool) {
+
+    // Clawd mid-bounce: coral rounded blob, dark eyes, ground
+    // shadow. phase 0 = top of the arc, 1 = squashed on the ground.
+    let coral = (222.0f32, 122.0f32, 88.0f32);
+    let eye = (46u8, 26u8, 22u8);
+    let phase = [0.15f32, 0.55, 1.0, 0.55][frame as usize % 4];
+    let amp = s * 1.1;
+    let (bw0, bh0) = (s * 1.5, s * 1.25);
+    let (bw2, bh2) = (bw0 * (1.0 + 0.22 * phase), bh0 * (1.10 - 0.32 * phase));
+    let base_y = my + amp;
+    let cy = base_y - bh2 - amp * (1.0 - phase);
+    // Ground shadow first, body over it.
+    let (srx, sry) = (bw0 * (0.55 + 0.45 * phase), (fh * 0.006).max(1.5));
+    let sa = 0.20 + 0.25 * phase;
+    for y in (base_y - sry * 3.0).max(0.0) as u32..((base_y + sry * 3.0) as u32).min(h) {
+        for x in (mx - srx - 2.0).max(0.0) as u32..((mx + srx + 2.0) as u32).min(w) {
+            let ex = (x as f32 - mx) / srx;
+            let ey = (y as f32 - (base_y + sry)) / sry;
+            let a = ((1.0 - (ex * ex + ey * ey)).max(0.0)).sqrt() * sa;
+            if a > 0.01 {
+                let o = ((y * w + x) * 4) as usize;
+                px[o] = (px[o] as f32 * (1.0 - a)) as u8;
+                px[o + 1] = (px[o + 1] as f32 * (1.0 - a)) as u8;
+                px[o + 2] = (px[o + 2] as f32 * (1.0 - a)) as u8;
+                px[o + 3] = px[o + 3].max((a * 255.0) as u8);
+            }
+        }
+    }
+    // Legs before the body so the joints hide under it; arms after
+    // so they overlap the body edge. Legs tuck as he lands, arms
+    // fly up while airborne.
+    let coral8 = (222u8, 122u8, 88u8);
+    let limb_th = (s * 0.16).max(1.0);
+    let leg_l = s * 0.55 * (1.0 - 0.6 * phase);
+    for side in [-1.0f32, 1.0] {
+        let x0 = mx + side * bw2 * 0.45;
+        let y0 = cy + bh2 * 0.85;
+        seg(px, w, h, (x0, y0), (x0, y0 + leg_l + bh2 * 0.15), limb_th, coral8);
+    }
+    let rad = bh2 * if soft { 0.55 } else { 0.20 };
+    for y in (cy - bh2 - 2.0).max(0.0) as u32..((cy + bh2 + 2.0) as u32).min(h) {
+        for x in (mx - bw2 - 2.0).max(0.0) as u32..((mx + bw2 + 2.0) as u32).min(w) {
+            let qx = (x as f32 - mx).abs() - (bw2 - rad);
+            let qy = (y as f32 - cy).abs() - (bh2 - rad);
+            let d = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt()
+                + qx.max(qy).min(0.0)
+                - rad;
+            let a = (-d + 0.7).clamp(0.0, 1.0);
+            if a > 0.01 {
+                let o = ((y * w + x) * 4) as usize;
+                px[o] = (px[o] as f32 + (coral.0 - px[o] as f32) * a) as u8;
+                px[o + 1] = (px[o + 1] as f32 + (coral.1 - px[o + 1] as f32) * a) as u8;
+                px[o + 2] = (px[o + 2] as f32 + (coral.2 - px[o + 2] as f32) * a) as u8;
+                px[o + 3] = px[o + 3].max((a * 255.0) as u8);
+            }
+        }
+    }
+    // Arms: stubby segments angled up while airborne, level on
+    // the squash.
+    let arm_l = s * 0.7;
+    let lift = 1.0 - phase;
+    for side in [-1.0f32, 1.0] {
+        let x0 = mx + side * bw2 * 0.92;
+        let y0 = cy - bh2 * 0.05;
+        let x1 = x0 + side * arm_l * 0.9;
+        let y1 = y0 - arm_l * (0.85 * lift - 0.15);
+        seg(px, w, h, (x0, y0), (x1, y1), limb_th, coral8);
+    }
+    // Eyes: two vertical ovals (stacked stamps), squashing with the
+    // body so the bounce reads.
+    let er = (bh2 * 0.16).max(1.0);
+    for side in [-1.0f32, 1.0] {
+        let ex = mx + side * bw2 * 0.40;
+        let ey0 = cy - bh2 * 0.12;
+        let stretch = bh2 * 0.14 * (1.0 - 0.5 * phase);
+        stamp(px, w, h, ex, ey0 - stretch, er, eye);
+        stamp(px, w, h, ex, ey0, er, eye);
+        stamp(px, w, h, ex, ey0 + stretch, er, eye);
+    }
+}
+
+/// Image ids for the standalone mascot sprite (4 bounce frames x 2 body
+/// styles).
+pub const CLAWD_BASE: u32 = 0x434C_5700;
+
+pub fn clawd_id(frame: u8, soft: bool) -> u32 {
+    CLAWD_BASE + if soft { 16 } else { 0 } + (frame as u32 % 4)
+}
+
+/// The hopping mascot alone on a transparent background, sized to fill the
+/// given pixel box (the blocks view places it beside active claude panes).
+pub fn clawd_rgba(w: u32, h: u32, frame: u8, soft: bool) -> Vec<u8> {
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    let (fw, fh) = (w as f32, h as f32);
+    let s = (fh / 4.2).min(fw / 5.0);
+    draw_clawd(&mut px, w, h, fw / 2.0, fh - 1.6 * s, s, fh, frame, soft);
+    px
+}
+
+/// Image ids for the HAL 9000 chat portrait (status x blink frame).
+pub fn hal_id(status_idx: usize, frame: u32) -> u32 {
+    WIZ_BASE + 0x80 + status_idx as u32 * 8 + frame
+}
+
+/// HAL 9000: a red camera eye in a metal bezel on a dark faceplate.
+/// `open` is eyelid openness (1 = wide, 0 = shut) for the blink frames;
+/// status dims the lamp when the model is sleeping or away.
+pub fn hal_rgba(w: u32, h: u32, status_idx: usize, open: f32) -> Vec<u8> {
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    let (fw, fh) = (w as f32, h as f32);
+    let (cx, cy) = (fw / 2.0, fh / 2.0);
+    let r = fw.min(fh) * 0.34;
+    let lvl: f32 = match status_idx {
+        0 => 1.0,
+        1 => 0.75,
+        2 => 0.45,
+        _ => 0.25,
+    };
+    let bez_in = r * 1.04;
+    let bez_out = r * 1.18;
+    for y in 0..h {
+        for x in 0..w {
+            let (xf, yf) = (x as f32, y as f32);
+            let (dx, dy) = (xf - cx, yf - cy);
+            let d = (dx * dx + dy * dy).sqrt();
+            // Brushed faceplate, a touch lighter up top.
+            let base = 16.0 + 12.0 * (1.0 - yf / fh);
+            let (mut rr, mut gg, mut bb) = (base, base, base + 2.0);
+            if d <= bez_out && d >= bez_in {
+                // Metallic bezel with a top-left shine.
+                let shine = ((-dx - dy) / d.max(1.0)).max(0.0);
+                let m = 70.0 + 110.0 * shine;
+                rr = m;
+                gg = m;
+                bb = m + 6.0;
+            } else if d < bez_in {
+                // Eyelid: a dark shutter closing in from above and below.
+                let lid =
+                    1.0 - ((dy.abs() - open * bez_in) / (r * 0.10)).clamp(0.0, 1.0) * 0.95;
+                let glow = (-(d / (r * 0.62)).powi(2) * 1.8).exp();
+                let core = (-(d / (r * 0.15)).powi(2)).exp();
+                rr = 10.0 + (225.0 * glow * lvl + 45.0 * core) * lid;
+                gg = 5.0 + (26.0 * glow * lvl + 205.0 * core * lvl) * lid;
+                bb = 7.0 + (16.0 * glow * lvl + 110.0 * core * lvl) * lid;
+                // Specular glint on the upper-left of the lens.
+                let gd = ((dx + r * 0.38).powi(2) + (dy + r * 0.42).powi(2)).sqrt();
+                let glint = (-(gd / (r * 0.10)).powi(2)).exp() * 0.85 * lid;
+                rr += 200.0 * glint;
+                gg += 200.0 * glint;
+                bb += 200.0 * glint;
+            }
+            let o = ((y * w + x) * 4) as usize;
+            px[o] = rr.min(255.0) as u8;
+            px[o + 1] = gg.min(255.0) as u8;
+            px[o + 2] = bb.min(255.0) as u8;
+            px[o + 3] = 255;
+        }
+    }
+    px
+}
+
+/// `phase` in [0,1) drives the orb's glow pulse.
+pub fn wizard_rgba(w: u32, h: u32, status_idx: usize, phase: f32) -> Vec<u8> {
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    let (fw, fh) = (w as f32, h as f32);
+    let pulse = 0.5 + 0.5 * (phase * std::f32::consts::TAU).sin();
+    // Palette per status: bottom glow accent, robe, trim, orb core.
+    let (accent, robe, trim, orb): (
+        (u8, u8, u8),
+        (f32, f32, f32),
+        (u8, u8, u8),
+        (f32, f32, f32),
+    ) = match status_idx {
+        0 => ((150, 110, 235), (88.0, 62.0, 168.0), (186, 154, 82), (190.0, 225.0, 255.0)),
+        1 => ((255, 180, 60), (104.0, 72.0, 150.0), (186, 154, 82), (255.0, 205.0, 120.0)),
+        2 => ((60, 80, 180), (46.0, 40.0, 92.0), (110, 100, 80), (78.0, 88.0, 128.0)),
+        _ => ((120, 60, 70), (55.0, 58.0, 78.0), (90, 92, 104), (86.0, 92.0, 112.0)),
+    };
+    let bw = (w / 220).max(1);
+
+    for y in 0..h {
+        for x in 0..w {
+            let (xf, yf) = (x as f32, y as f32);
+            let t = yf / fh;
+            let mut r = 22.0 + 26.0 * (1.0 - t);
+            let mut g = 17.0 + 19.0 * (1.0 - t);
+            let mut b = 44.0 + 46.0 * (1.0 - t);
+            // Away: the sky itself goes gray and thin.
+            if status_idx == 3 {
+                let avg = (r + g + b) / 3.0;
+                r = r * 0.4 + avg * 0.6;
+                g = g * 0.4 + avg * 0.6;
+                b = b * 0.4 + avg * 0.6;
+            }
+            let dx = (xf / fw - 0.5).abs() * 2.0;
+            let vig = 1.0 - 0.30 * dx * dx;
+            r *= vig;
+            g *= vig;
+            b *= vig;
+            let gx = xf / fw - 0.5;
+            let gy = yf / fh - 1.08;
+            let d = (gx * gx * 1.7 + gy * gy).sqrt();
+            let glow = (1.0 - d / 0.60).max(0.0);
+            let glow = glow * glow * 0.40;
+            r += accent.0 as f32 * glow;
+            g += accent.1 as f32 * glow;
+            b += accent.2 as f32 * glow;
+            // Single gold frame ring, as on the cards.
+            let (i, o) = (2 + bw, 2 + 2 * bw);
+            let hx = (x >= i && x < o) || (x >= w.saturating_sub(o) && x < w - i);
+            let hy = (y >= i && y < o) || (y >= h.saturating_sub(o) && y < h - i);
+            if (hx && y >= i && y < h - i) || (hy && x >= i && x < w - i) {
+                r = r * 0.25 + trim.0 as f32 * 0.75;
+                g = g * 0.25 + trim.1 as f32 * 0.75;
+                b = b * 0.25 + trim.2 as f32 * 0.75;
+            }
+            let off = ((y * w + x) * 4) as usize;
+            px[off] = r.min(255.0) as u8;
+            px[off + 1] = g.min(255.0) as u8;
+            px[off + 2] = b.min(255.0) as u8;
+            px[off + 3] = 255;
+        }
+    }
+
+    // Stars, sparse, kept away from the figure.
+    let cx = fw / 2.0;
+    let stars = (w * h / 2600).max(6);
+    for k in 0..stars {
+        let hx = hash(k as u64 * 6271 + 5);
+        let sx = (hx % w as u64) as f32;
+        let sy = (hash(hx) % (h as u64 * 3 / 4)) as f32;
+        if (sx - cx).abs() < fh * 0.40 && sy > fh * 0.18 {
+            continue;
+        }
+        let bright = 110 + (hash(hx ^ 0xfeed) % 110) as u8;
+        stamp(&mut px, w, h, sx, sy, 0.7, (bright, bright, bright));
+    }
+
+    // Sleeping: a crescent moon in the corner.
+    if status_idx == 2 {
+        let (mx, my, mr) = (fw * 0.16, fh * 0.24, fh * 0.10);
+        stamp(&mut px, w, h, mx, my, mr, (222, 214, 178));
+        stamp(&mut px, w, h, mx + mr * 0.55, my - mr * 0.25, mr * 0.95, (24, 20, 48));
+    }
+
+    // The figure. All proportions hang off the canvas height.
+    let base_y = fh * 0.92;
+    let sh_y = base_y - fh * 0.40;
+    let head = (cx, sh_y - fh * 0.085);
+    let head_r = fh * 0.095;
+    let robe8 = (robe.0 as u8, robe.1 as u8, robe.2 as u8);
+
+    // Robe: a shaded triangle from shoulders to hem.
+    for y in sh_y as u32..(base_y as u32).min(h) {
+        let t = (y as f32 - sh_y) / (base_y - sh_y);
+        let hw = fh * (0.07 + 0.11 * t);
+        let shade = 1.0 - 0.30 * t;
+        for x in ((cx - hw).max(0.0)) as u32..((cx + hw) as u32).min(w) {
+            let edge = (hw - (x as f32 - cx).abs()).clamp(0.0, 1.0);
+            let o = ((y * w + x) * 4) as usize;
+            px[o] = (px[o] as f32 + (robe.0 * shade - px[o] as f32) * edge) as u8;
+            px[o + 1] = (px[o + 1] as f32 + (robe.1 * shade - px[o + 1] as f32) * edge) as u8;
+            px[o + 2] = (px[o + 2] as f32 + (robe.2 * shade - px[o + 2] as f32) * edge) as u8;
+        }
+    }
+    // Hood + face shadow.
+    stamp(&mut px, w, h, head.0, head.1, head_r, robe8);
+    stamp(
+        &mut px,
+        w,
+        h,
+        head.0,
+        head.1 + head_r * 0.15,
+        head_r * 0.62,
+        (22, 18, 38),
+    );
+    // Beard.
+    seg(
+        &mut px,
+        w,
+        h,
+        (head.0, head.1 + head_r * 0.55),
+        (head.0, head.1 + head_r * 1.45),
+        head_r * 0.34,
+        (198, 198, 210),
+    );
+    // Hat: brim line + leaning cone.
+    let brim_y = head.1 - head_r * 0.45;
+    let apex = (cx + fh * 0.055, brim_y - fh * 0.26);
+    seg(
+        &mut px,
+        w,
+        h,
+        (cx - fh * 0.155, brim_y),
+        (cx + fh * 0.155, brim_y),
+        fh * 0.016,
+        robe8,
+    );
+    let steps = (fh * 0.26) as u32;
+    for i in 0..=steps {
+        let t = i as f32 / steps.max(1) as f32;
+        let y = brim_y + (apex.1 - brim_y) * t;
+        let xm = cx + (apex.0 - cx) * t;
+        let hw = fh * 0.11 * (1.0 - t);
+        seg(&mut px, w, h, (xm - hw, y), (xm + hw, y), 1.0, robe8);
+    }
+    // Trim band where the hat meets the brim.
+    seg(
+        &mut px,
+        w,
+        h,
+        (cx - fh * 0.10, brim_y - fh * 0.02),
+        (cx + fh * 0.10, brim_y - fh * 0.02),
+        fh * 0.012,
+        trim,
+    );
+    // Eyes: bright when awake/waking, closed dashes asleep, none when away.
+    match status_idx {
+        0 | 1 => {
+            for side in [-1.0f32, 1.0] {
+                stamp(
+                    &mut px,
+                    w,
+                    h,
+                    head.0 + side * head_r * 0.32,
+                    head.1 + head_r * 0.05,
+                    head_r * 0.11,
+                    (255, 226, 150),
+                );
+            }
+        }
+        2 => {
+            for side in [-1.0f32, 1.0] {
+                let ex = head.0 + side * head_r * 0.32;
+                let ey = head.1 + head_r * 0.08;
+                seg(
+                    &mut px,
+                    w,
+                    h,
+                    (ex - head_r * 0.14, ey),
+                    (ex + head_r * 0.14, ey),
+                    head_r * 0.06,
+                    (170, 170, 190),
+                );
+            }
+        }
+        _ => {}
+    }
+    // Staff and its orb.
+    let stx = cx + fh * 0.26;
+    let top = (stx + fh * 0.035, base_y - fh * 0.64);
+    seg(
+        &mut px,
+        w,
+        h,
+        (stx, base_y),
+        top,
+        fh * 0.018,
+        (116, 88, 60),
+    );
+    let orb_r = fh * 0.055;
+    let lit = match status_idx {
+        0 => 0.55 + 0.45 * pulse,
+        1 => 0.30 + 0.45 * pulse,
+        _ => 0.25,
+    };
+    // Halo first, then the core.
+    let halo_r = orb_r * (2.2 + 1.3 * lit);
+    for y in ((top.1 - halo_r).max(0.0)) as u32..((top.1 + halo_r) as u32 + 1).min(h) {
+        for x in ((top.0 - halo_r).max(0.0)) as u32..((top.0 + halo_r) as u32 + 1).min(w) {
+            let d = ((x as f32 - top.0).powi(2) + (y as f32 - top.1).powi(2)).sqrt();
+            let a = (1.0 - d / halo_r).clamp(0.0, 1.0);
+            let a = a * a * 0.55 * lit;
+            if a > 0.01 {
+                let o = ((y * w + x) * 4) as usize;
+                px[o] = (px[o] as f32 + (orb.0 - px[o] as f32) * a) as u8;
+                px[o + 1] = (px[o + 1] as f32 + (orb.1 - px[o + 1] as f32) * a) as u8;
+                px[o + 2] = (px[o + 2] as f32 + (orb.2 - px[o + 2] as f32) * a) as u8;
+            }
+        }
+    }
+    let core = (
+        (orb.0 * (0.5 + 0.5 * lit)).min(255.0) as u8,
+        (orb.1 * (0.5 + 0.5 * lit)).min(255.0) as u8,
+        (orb.2 * (0.5 + 0.5 * lit)).min(255.0) as u8,
+    );
+    stamp(&mut px, w, h, top.0, top.1, orb_r, core);
+
+    // Sleeping: drifting z's rising from the hood.
+    if status_idx == 2 {
+        let gold = (210, 200, 160);
+        for (i, k) in [0.024f32, 0.034, 0.046].iter().enumerate() {
+            let s = fh * k;
+            let zx = head.0 + fh * (0.16 + 0.05 * i as f32);
+            let zy = head.1 - fh * (0.10 + 0.11 * i as f32);
+            let th = (s * 0.22).max(0.8);
+            seg(&mut px, w, h, (zx - s, zy - s), (zx + s, zy - s), th, gold);
+            seg(&mut px, w, h, (zx + s, zy - s), (zx - s, zy + s), th, gold);
+            seg(&mut px, w, h, (zx - s, zy + s), (zx + s, zy + s), th, gold);
         }
     }
     px

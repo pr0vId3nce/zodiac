@@ -36,6 +36,18 @@ pub struct SrvPane {
     stall_since: Option<Instant>,
     stall_fired: Option<Instant>,
     stall_latched: bool,
+    /// Headless background sentinel bookkeeping (see `familiar.rs`) — purely
+    /// server-side tracking, not part of the wire protocol.
+    pub wizard_screen_hash: Option<u64>,
+    pub wizard_screen_since: Option<Instant>,
+    pub wizard_checked_at: Option<Instant>,
+    pub wizard_last_reason: Option<String>,
+    /// Tier 3.1 card subtitle bookkeeping — same idea, separate cadence and
+    /// cache key from the sentinel above (a subtitle refreshes on any screen
+    /// change, not just stalls).
+    pub subtitle: Option<String>,
+    pub subtitle_hash: Option<u64>,
+    pub subtitle_checked_at: Option<Instant>,
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     killer: Box<dyn ChildKiller + Send + Sync>,
@@ -131,6 +143,13 @@ impl SrvPane {
             stall_since: None,
             stall_fired: None,
             stall_latched: false,
+            wizard_screen_hash: None,
+            wizard_screen_since: None,
+            wizard_checked_at: None,
+            wizard_last_reason: None,
+            subtitle: None,
+            subtitle_hash: None,
+            subtitle_checked_at: None,
             master: pair.master,
             writer,
             killer,
@@ -218,6 +237,51 @@ impl SrvPane {
 
     pub fn screen_text(&self) -> String {
         self.parser.screen().contents()
+    }
+
+    /// The tail of the current screen as plain text, trailing blank rows
+    /// dropped — a compact excerpt for the background classifier. `None` if
+    /// the tail is blank. The server-side parser keeps no scrollback, so
+    /// this only ever sees what's currently visible.
+    pub fn tail_text(&self, want: usize) -> Option<String> {
+        let screen = self.parser.screen();
+        let (_, cols) = screen.size();
+        let rows: Vec<String> = screen.rows(0, cols).map(|r| r.trim_end().to_string()).collect();
+        let end = rows.iter().rposition(|r| !r.is_empty()).map_or(0, |i| i + 1);
+        let start = end.saturating_sub(want);
+        let text = rows[start..end].join("\n");
+        (!text.trim().is_empty()).then_some(text)
+    }
+
+    /// Cheap fingerprint of the current screen, for noticing a "working"
+    /// pane whose output has actually gone quiet (stalled or looping).
+    pub fn screen_hash(&self) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        self.screen_text().hash(&mut h);
+        h.finish()
+    }
+
+    /// The agent's most recent transcript bullet: the lowest on-screen line
+    /// starting with "⏺"/"●" (Claude Code's response/tool markers). Shells
+    /// get None, as does an agent screen with no bullet in view.
+    pub fn recap(&self) -> Option<String> {
+        self.agent()?;
+        for line in self.screen_text().lines().rev() {
+            let t = line.trim_start();
+            if let Some(rest) = t.strip_prefix('⏺').or_else(|| t.strip_prefix('●')) {
+                let text = rest.split_whitespace().collect::<Vec<_>>().join(" ");
+                if text.is_empty() {
+                    continue;
+                }
+                let mut out: String = text.chars().take(120).collect();
+                if text.chars().nth(120).is_some() {
+                    out.push('…');
+                }
+                return Some(out);
+            }
+        }
+        None
     }
 
     /// Semantic agent status, herdr-style. A braille title frame means

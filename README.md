@@ -217,6 +217,16 @@ needs_input,idle` is the building block for "tell me when the agent is
 done" scripting; agents can drive other agents with
 `zodiac prompt`/`zodiac read`.
 
+## 🔭 scry (phone web UI)
+
+`scry/` holds a companion web UI for your phone, served over Tailscale: a
+herd view of every pane's status (needs-input panes pulse at the top), a
+colored live terminal mirror per pane (searchable scrollback), a
+slash-command palette, a special-keys pad, and a plain reply box your
+phone's voice dictation works in. It rides a read-only observer mode in the
+server (`T_WATCH`): observers get state + replay + live output without
+disturbing the attached UI. See `scry/README.md`.
+
 ## ⚙️ The grimoire (settings)
 
 `Ctrl+S` opens the settings page. `↑`/`↓` select a setting, `←`/`→` change
@@ -280,6 +290,52 @@ to `~/.config/zodiac/config.json` and apply to all sessions.
   above). Default on. Like Finish sound, this is read by the server and
   re-checked every second, so toggling it applies to running sessions
   right away.
+
+### 🔮 The Wizard's keys
+
+The chat panel on the home page (`Alt+G`) talks to a llama-server over the
+tailnet. It has no row on the settings page — these live in
+`~/.config/zodiac/config.json` directly:
+
+| key | default | what |
+| --- | --- | --- |
+| `wizard_chat` | `true` | show the panel at all |
+| `wizard_endpoint` | `http://bigbox:8091` | OpenAI-compatible endpoint |
+| `wizard_model` | `qwen3.6-35b-a3b` | model name sent with each request |
+| `wizard_ssh` | `des@bigbox` | where `/wake` and `/dispell` ssh to |
+| `wizard_service` | `llama-server` | the systemd --user unit they start/stop |
+| `wizard_width` | `40` | panel width in cells |
+| `wizard_search_url` | *(empty)* | where `web_search` looks — see below |
+| `wizard_search_key` | *(empty)* | API key, if the backend wants one |
+
+He is a general familiar, not a card-reader: ask him about braising short
+ribs and he will tell you about braising short ribs. The spread is not fed
+to him by default — it rides along only when the question sounds like it
+concerns the session, plus one turn of momentum afterwards so follow-ups
+("is that safe?") still land. When the guess is wrong he fixes it himself:
+`read_spread` is a tool, and reaching for it shows up in the transcript as
+`turning over the cards…`. `/why <n>` always attaches it outright.
+
+He can also reach past the tower — `web_search` and `fetch_url`, called when
+a question turns on facts he doesn't hold, shown as `scrying the aether —
+"…"` and `reading example.com…`. Three tool rounds per question, then the
+tools answer him with a refusal and he must speak.
+
+Where `web_search` looks depends on `wizard_search_url`:
+
+- **empty** — Wikipedia's API. Keyless and always available, but it knows
+  nothing of news, prices or this week's releases; he'll say so rather than
+  guess.
+- **a SearXNG base URL** (e.g. `http://bigbox:8888`) — the whole web,
+  keyless, over your own tailnet. The instance must have `json` in its
+  `search.formats`, or the request comes back as HTML and he'll tell you the
+  tower answered in the wrong tongue.
+- **`https://api.search.brave.com`** — Brave's API, with the key in
+  `wizard_search_key`.
+
+Searching goes out through `curl` (the wider world speaks TLS; zodiac's own
+little HTTP client does not), so `curl` must be on the PATH of whatever
+machine runs the client. 🌐
 
 ## 🖱️ Mouse
 

@@ -28,6 +28,21 @@ pub struct Settings {
     pub sidebar_weight: String,
     #[serde(default)]
     pub sidebar_color: String,
+    /// Home page layout: "cards" (tarot grid) or "list" (stacked blocks).
+    #[serde(default)]
+    pub home_view: String,
+    /// Home-page card dimensions: small/medium/large/huge.
+    #[serde(default)]
+    pub card_size: String,
+    /// Cards per row on the home page: "auto" (fill the width) or "1".."6".
+    #[serde(default)]
+    pub card_columns: String,
+    /// Color of the line separators in the blocks home view.
+    #[serde(default)]
+    pub home_sep_color: String,
+    /// Chat panel persona: "wizard", "oracle" (ascii orb), or "hal".
+    #[serde(default)]
+    pub chat_face: String,
     /// Size of the emblem painted on home-page cards: small/medium/large/huge.
     #[serde(default)]
     pub card_icon: String,
@@ -73,6 +88,40 @@ pub struct Settings {
     /// (first ringtone alphabetically).
     #[serde(default)]
     pub finish_sound: String,
+    /// The Wizard chat panel on the home page (talks to a llama-server
+    /// endpoint over the tailnet).
+    #[serde(default = "default_true")]
+    pub wizard_chat: bool,
+    /// OpenAI-compatible endpoint, e.g. "http://bigbox:8091" (the default).
+    #[serde(default)]
+    pub wizard_endpoint: String,
+    /// Model name sent in completion requests ("" = qwen3.6-35b-a3b).
+    #[serde(default)]
+    pub wizard_model: String,
+    /// ssh destination used to wake/dispell the model ("" = des@bigbox).
+    #[serde(default)]
+    pub wizard_ssh: String,
+    /// systemd --user unit started/stopped over ssh ("" = llama-server).
+    #[serde(default)]
+    pub wizard_service: String,
+    /// Where the wizard's `web_search` tool looks. Empty = Wikipedia only
+    /// (keyless, works anywhere). A SearXNG base URL, e.g.
+    /// "http://bigbox:8888", uses its JSON API. "https://api.search.brave.com"
+    /// uses Brave's API and needs `wizard_search_key`.
+    #[serde(default)]
+    pub wizard_search_url: String,
+    /// API key for the search endpoint, when it wants one (Brave).
+    #[serde(default)]
+    pub wizard_search_key: String,
+    /// Chat panel width in cells ("" = 40).
+    #[serde(default)]
+    pub wizard_width: String,
+    /// Headless background sentinel: classifies stuck/needs-input panes
+    /// against a local policy file and notifies with the reason. Advisory
+    /// only — it never touches a pane. Runs server-side against a separate
+    /// CPU-only model, independent of the wizard chat panel above.
+    #[serde(default = "default_true")]
+    pub wizard_watch: bool,
 }
 
 /// Audio files with these extensions in the ringtones dir are offered as

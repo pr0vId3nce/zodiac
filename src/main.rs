@@ -1,4 +1,5 @@
 mod cli;
+mod familiar;
 mod gfx;
 mod client;
 mod kitty;
@@ -8,6 +9,7 @@ mod query;
 mod server;
 mod settings;
 mod term;
+mod wizard;
 
 use anyhow::{Context, Result};
 use crossterm::event::{

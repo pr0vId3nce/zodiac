@@ -1,5 +1,5 @@
 use std::os::unix::net::UnixStream;
-use std::sync::mpsc::{channel, Receiver, RecvTimeoutError};
+use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
 use anyhow::{bail, Result};
@@ -19,6 +19,13 @@ const SIDEBAR_WIDTH: u16 = 24;
 const SIDEBAR_COLLAPSED: u16 = 4;
 const CLIENT_SCROLLBACK: usize = 10_000;
 
+/// How much terminal text the wizard's digest may carry, and how many rows
+/// each card contributes. The cap keeps a spread of busy panes from eating
+/// the model's context; the tail of a screen is where the answer lives.
+const EXCERPT_BUDGET: usize = 4000;
+const EXCERPT_FOCUSED: usize = 30;
+const EXCERPT_OTHER: usize = 15;
+
 /// How recently a background pane must have produced output to count as
 /// "in progress" (orange) rather than "finished" (green).
 const IN_PROGRESS_WINDOW: Duration = Duration::from_secs(5);
@@ -33,7 +40,7 @@ const RESIZE_SQUELCH: Duration = Duration::from_millis(1200);
 /// blinks (closes briefly) once per period.
 const EYE_PERIOD_MS: u64 = 4000;
 const EYE_BLINK_MS: u64 = 160;
-const SETTINGS_ROWS: usize = 21;
+const SETTINGS_ROWS: usize = 26;
 
 /// The key reference pinned to the settings page's Controls column — the
 /// same bindings the bottom bar hints at (hideable there).
@@ -49,9 +56,16 @@ const CONTROLS: &[(&str, &str)] = &[
     ("Alt+~", "home page"),
     ("⇧PgUp/Dn", "scroll"),
     ("Ctrl+S", "settings"),
+    ("Alt+G", "wizard chat"),
     ("Alt+Q", "detach"),
     ("Alt+⇧Q", "kill session"),
 ];
+
+/// Wizard transcript roles.
+const WIZ_USER: u8 = 0;
+const WIZ_WIZARD: u8 = 1;
+const WIZ_NOTE: u8 = 2;
+const WIZ_ERROR: u8 = 3;
 
 const CURSOR_TYPES: &[&str] =
     &["auto", "block", "underline", "bar", "orb", "circle", "aleph"];
@@ -139,8 +153,19 @@ fn cycle_color_name(cur: &str, dir: isize) -> String {
 }
 
 // Home-page tarot cards.
-const HOME_CARD_W: u16 = 26;
-const HOME_CARD_H: u16 = 13;
+/// Card footprint in cells (name, width, height); medium is the default.
+const CARD_SIZES: &[(&str, u16, u16)] = &[
+    ("small", 20, 10),
+    ("medium", 26, 13),
+    ("large", 32, 16),
+    ("huge", 40, 20),
+];
+/// Column cap for the home grid; "auto" packs as many as fit.
+const CARD_COLUMNS: &[&str] = &["auto", "1", "2", "3", "4", "5", "6"];
+const HOME_VIEWS: &[&str] = &["cards", "list", "blocks"];
+/// Chat panel personas: the robed Wizard portrait, an ascii Oracle orb, or
+/// HAL 9000's red eye.
+const CHAT_FACES: &[&str] = &["wizard", "oracle", "hal"];
 const HOME_GAP_X: u16 = 3;
 const HOME_GAP_Y: u16 = 1;
 /// Card-art glow colors by accent index: needs approval, thinking,
@@ -223,6 +248,7 @@ enum AppEvent {
     Term(Event),
     Srv(SrvFrame),
     SrvGone,
+    Wizard(crate::wizard::WizardEvent),
 }
 
 enum Mode {
@@ -386,6 +412,9 @@ struct App {
     home_queried: Option<Instant>,
     /// Card layout from the last home draw: (rect, pane id, accent index).
     home_cards: Vec<(Rect, u64, usize, bool)>,
+    /// Cells reserved beside active claude blocks (blocks view) where the
+    /// hopping mascot sprite is placed by kitty_overlay.
+    home_mascots: Vec<Rect>,
     kitty_on: bool,
     /// Card placements currently alive terminal-side (kitty graphics).
     kitty_placed: Vec<(Rect, u32)>,
@@ -408,6 +437,25 @@ struct App {
     /// Orb placement currently on the terminal:
     /// (cell x, cell y, image id, col span, row span).
     orb_placed: Option<(u16, u16, u32, u16, u16)>,
+    // The Wizard chat panel (home page, right side).
+    wiz_tx: Option<Sender<crate::wizard::WizardCmd>>,
+    wiz_status: Option<crate::wizard::WizardStatus>,
+    /// Transcript: (role, text) — see the WIZ_* role constants.
+    wiz_log: Vec<(u8, String)>,
+    /// The reply currently streaming in, not yet committed to the log.
+    wiz_stream: String,
+    wiz_streaming: bool,
+    wiz_input: String,
+    wiz_focus: bool,
+    /// Transcript scroll offset in wrapped lines, from the bottom.
+    wiz_scroll: usize,
+    chat_rect: Rect,
+    /// Where the portrait image goes (inside the chat panel).
+    wiz_art_rect: Rect,
+    /// Portrait image data transmitted this attach: (px_w, px_h, image id).
+    wiz_sent: std::collections::HashSet<(u32, u32, u32)>,
+    /// Portrait placement currently alive terminal-side.
+    wiz_placed: Option<(Rect, u32)>,
     sock: UnixStream,
     rx: Receiver<AppEvent>,
 }
@@ -432,6 +480,19 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
             }
         });
     }
+    // The Wizard's network worker reports through the same channel.
+    let settings = Settings::load();
+    let wiz_tx = if settings.wizard_chat {
+        let txw = tx.clone();
+        Some(crate::wizard::spawn(
+            crate::wizard::WizardCfg::from_settings(&settings),
+            move |ev| {
+                let _ = txw.send(AppEvent::Wizard(ev));
+            },
+        ))
+    } else {
+        None
+    };
     std::thread::spawn(move || loop {
         match crossterm::event::read() {
             Ok(ev) => {
@@ -465,7 +526,7 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         selection: None,
         selecting: false,
         copied_at: None,
-        settings: Settings::load(),
+        settings,
         settings_row: 0,
         resized_at: None,
         home: true, // always open to the home page
@@ -474,6 +535,7 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         home_state: None,
         home_queried: None,
         home_cards: Vec::new(),
+        home_mascots: Vec::new(),
         kitty_on: crate::kitty::enabled(),
         kitty_placed: Vec::new(),
         kitty_last_icon: String::new(),
@@ -486,6 +548,18 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         cursor_applied: None,
         orb_cfg: None,
         orb_placed: None,
+        wiz_tx,
+        wiz_status: None,
+        wiz_log: Vec::new(),
+        wiz_stream: String::new(),
+        wiz_streaming: false,
+        wiz_input: String::new(),
+        wiz_focus: false,
+        wiz_scroll: 0,
+        chat_rect: Rect::default(),
+        wiz_art_rect: Rect::default(),
+        wiz_sent: std::collections::HashSet::new(),
+        wiz_placed: None,
         sock,
         rx,
     };
@@ -509,6 +583,7 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         app.kitty_overlay();
         app.pane_overlay();
         app.orb_overlay();
+        app.wizard_overlay();
         app.cursor_sync();
         if app.main_size != app.sent_size {
             app.send_resize();
@@ -525,7 +600,13 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         // Fast ticks only while an animation is on screen (working panes or
         // the settings preview); otherwise wake for the next eye blink.
         let tick = if app.home {
-            250
+            if app.wiz_streaming {
+                50 // keep streamed tokens flowing onto the screen
+            } else if app.wiz_status == Some(crate::wizard::WizardStatus::Waking) {
+                120 // waking portrait pulse
+            } else {
+                250
+            }
         } else if app.any_working() || matches!(app.mode, Mode::Settings) {
             50
         } else if app.orb_active() && app.orb_blinking() {
@@ -656,10 +737,20 @@ impl App {
                 }
             }
             AppEvent::Srv(f) => self.handle_frame(f),
+            AppEvent::Wizard(ev) => self.handle_wizard(ev),
             AppEvent::Term(event) => match event {
                 Event::Key(key) => self.handle_key(key),
                 Event::Mouse(m) => self.handle_mouse(m),
                 Event::Paste(text) => {
+                    if self.home && self.wiz_focus {
+                        for c in text.chars() {
+                            if self.wiz_input.chars().count() >= 500 {
+                                break;
+                            }
+                            self.wiz_input.push(if c == '\n' { ' ' } else { c });
+                        }
+                        return;
+                    }
                     if let Some(id) = self.active_id() {
                         let bracketed = self
                             .pane_by_id(id)
@@ -691,8 +782,19 @@ impl App {
             return;
         }
         if self.home {
+            let pos = Position::new(m.column, m.row);
+            // Chat panel: click focuses, wheel scrolls the transcript.
+            if self.chat_rect.width > 0 && self.chat_rect.contains(pos) {
+                match m.kind {
+                    K::Down(MouseButton::Left) => self.wiz_focus = true,
+                    K::ScrollUp => self.wiz_scroll_by(3),
+                    K::ScrollDown => self.wiz_scroll_by(-3),
+                    _ => {}
+                }
+                return;
+            }
             if let K::Down(MouseButton::Left) = m.kind {
-                let pos = Position::new(m.column, m.row);
+                self.wiz_focus = false;
                 if let Some(i) = self
                     .home_cards
                     .iter()
@@ -1074,6 +1176,39 @@ impl App {
             self.toggle_home();
             return;
         }
+        // Alt+G: speak with the wizard (jumps to the home page if needed).
+        if alt && !ctrl && matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G')) {
+            if self.wiz_tx.is_some() {
+                if !self.home {
+                    self.toggle_home();
+                    self.wiz_focus = true;
+                } else {
+                    self.wiz_focus = !self.wiz_focus;
+                }
+            }
+            return;
+        }
+        // A focused chatbox swallows all plain keys.
+        if self.home && self.wiz_focus && !alt {
+            match key.code {
+                KeyCode::Esc => self.wiz_focus = false,
+                KeyCode::Enter => self.wizard_submit(),
+                KeyCode::Backspace => {
+                    self.wiz_input.pop();
+                }
+                KeyCode::Up => self.wiz_scroll_by(1),
+                KeyCode::Down => self.wiz_scroll_by(-1),
+                KeyCode::PageUp => self.wiz_scroll_by(10),
+                KeyCode::PageDown => self.wiz_scroll_by(-10),
+                KeyCode::Char(c) if !ctrl => {
+                    if self.wiz_input.chars().count() < 500 {
+                        self.wiz_input.push(c);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
         if self.home {
             if self.handle_home_key(key) {
                 return;
@@ -1260,6 +1395,7 @@ impl App {
     fn leave_home(&mut self) {
         self.home = false;
         self.selection = None;
+        self.wiz_focus = false;
     }
 
     /// Home-page navigation. Returns true when the key was consumed.
@@ -1298,6 +1434,271 @@ impl App {
             _ => return false,
         }
         true
+    }
+
+    // ------------------------------------------------------------------
+    // The Wizard chat panel.
+
+    fn wiz_note(&mut self, role: u8, text: impl Into<String>) {
+        self.wiz_log.push((role, text.into()));
+        if self.wiz_log.len() > 400 {
+            self.wiz_log.drain(..self.wiz_log.len() - 400);
+        }
+        self.wiz_scroll = 0;
+    }
+
+    fn handle_wizard(&mut self, ev: crate::wizard::WizardEvent) {
+        use crate::wizard::{WizardEvent as E, WizardStatus as S};
+        match ev {
+            E::Status(s) => {
+                let old = self.wiz_status;
+                self.wiz_status = Some(s);
+                // The status line above the transcript already shows the
+                // current state, so waking up is silent there too — only
+                // sleeping/away get a note, since those explain why a
+                // message didn't go out.
+                if old.is_some() && old != Some(s) {
+                    let note = match s {
+                        S::Awake => None,
+                        S::Waking => Some("the wizard stirs…"),
+                        S::Sleeping => Some("the wizard sleeps"),
+                        S::Away => Some("the wizard has gone away"),
+                    };
+                    if let Some(note) = note {
+                        self.wiz_note(WIZ_NOTE, note);
+                    }
+                }
+            }
+            E::Token(t) => {
+                self.wiz_stream.push_str(&t);
+                self.wiz_scroll = 0;
+            }
+            E::Done => {
+                self.wiz_streaming = false;
+                if !self.wiz_stream.is_empty() {
+                    let t = std::mem::take(&mut self.wiz_stream);
+                    self.wiz_note(WIZ_WIZARD, t);
+                }
+            }
+            E::Note(t) => self.wiz_note(WIZ_NOTE, t),
+            E::Error(t) => {
+                self.wiz_streaming = false;
+                self.wiz_note(WIZ_ERROR, t);
+            }
+        }
+    }
+
+    /// The tail of a pane's visible screen as plain text, trailing blank
+    /// rows dropped. This is what lets the wizard advise on the actual
+    /// command a card is blocked on rather than on its status label.
+    fn pane_excerpt(&self, id: u64, want: usize) -> Option<String> {
+        let p = self.panes.iter().find(|p| p.id == id)?;
+        let screen = p.parser.screen();
+        let (_, cols) = screen.size();
+        let rows: Vec<String> = screen
+            .rows(0, cols)
+            .map(|r| r.trim_end().to_string())
+            .collect();
+        let end = rows.iter().rposition(|r| !r.is_empty()).map_or(0, |i| i + 1);
+        let start = end.saturating_sub(want);
+        let text = rows[start..end].join("\n");
+        (!text.trim().is_empty()).then_some(text)
+    }
+
+    /// Card number (1-based, as shown on the spread) → pane id and name.
+    fn card_pane(&self, n: usize) -> Option<(u64, String)> {
+        let state = self.home_state.as_ref()?;
+        let p = state.panes.iter().find(|p| p.index == n)?;
+        Some((p.id, p.name.clone()))
+    }
+
+    /// A compact live description of the card spread for the model, with
+    /// screen excerpts from the cards worth reading. `force` (a 1-based card
+    /// number) always gets a generous excerpt — used by `/why`, where one
+    /// card is the whole question.
+    fn wizard_digest_with(&self, force: Option<usize>) -> String {
+        let Some(state) = &self.home_state else {
+            return "(no card data yet)".into();
+        };
+        let mut s = format!(
+            "session '{}': {} cards\n",
+            state.session,
+            state.panes.len()
+        );
+        for p in &state.panes {
+            let agent = match (&p.agent, &p.version) {
+                (Some(a), Some(v)) => format!("{a} {}", version_token(v)),
+                (Some(a), None) => a.clone(),
+                (None, _) => "shell".into(),
+            };
+            s.push_str(&format!(
+                "card {}: '{}' — {agent} — {}{} — up {}{}\n",
+                p.index,
+                p.name,
+                p.status,
+                if p.thinking { " (thinking now)" } else { "" },
+                fmt_uptime(p.uptime_ms),
+                p.cwd
+                    .as_deref()
+                    .map(|d| format!(" — {}", short_dir(d, 40)))
+                    .unwrap_or_default(),
+            ));
+        }
+
+        // Screen excerpts, most useful first, until the budget runs out: the
+        // card in question (if any), then whatever you're looking at, then
+        // anything blocked or freshly finished.
+        let mut picks: Vec<(usize, usize)> = Vec::new(); // (slot in state.panes, rows wanted)
+        for (i, p) in state.panes.iter().enumerate() {
+            let want = if force.is_some_and(|n| p.index == n) {
+                EXCERPT_FOCUSED * 2
+            } else if p.focused {
+                EXCERPT_FOCUSED
+            } else if p.status == "needs_input" || p.status == "done" {
+                EXCERPT_OTHER
+            } else {
+                continue;
+            };
+            picks.push((i, want));
+        }
+        // Widest excerpt first, so the budget goes to the card that matters.
+        picks.sort_by(|a, b| b.1.cmp(&a.1));
+
+        let mut used = 0usize;
+        for (slot, want) in picks {
+            let p = &state.panes[slot];
+            let left = EXCERPT_BUDGET.saturating_sub(used);
+            // Not enough room left to say anything worth reading.
+            if left < 200 {
+                break;
+            }
+            let Some(text) = self.pane_excerpt(p.id, want) else {
+                continue;
+            };
+            let head = format!("\n--- card {} '{}' — screen ---\n", p.index, p.name);
+            let room = left.saturating_sub(head.len());
+            // Keep the tail; the newest output is the part that matters.
+            let text = if text.len() > room {
+                let mut cut = text.len() - room;
+                while cut < text.len() && !text.is_char_boundary(cut) {
+                    cut += 1;
+                }
+                &text[cut..]
+            } else {
+                &text[..]
+            };
+            used += head.len() + text.len();
+            s.push_str(&head);
+            s.push_str(text);
+            s.push('\n');
+        }
+        s
+    }
+
+    fn wizard_submit(&mut self) {
+        use crate::wizard::{WizardCmd, WizardStatus as S};
+        let text = std::mem::take(&mut self.wiz_input).trim().to_string();
+        if text.is_empty() {
+            return;
+        }
+        self.wiz_scroll = 0;
+        let Some(tx) = self.wiz_tx.clone() else {
+            self.wiz_note(WIZ_ERROR, "the wizard is not configured");
+            return;
+        };
+        let lower = text.to_ascii_lowercase();
+        let (verb, rest) = match lower.split_once(char::is_whitespace) {
+            Some((v, r)) => (v, r.trim()),
+            None => (lower.as_str(), ""),
+        };
+        match verb {
+            "/wake" | "/rise" => {
+                let _ = tx.send(WizardCmd::Wake);
+            }
+            "/dispell" | "/dispel" | "/banish" | "/sleep" => {
+                let _ = tx.send(WizardCmd::Dispell);
+            }
+            "/clear" => {
+                self.wiz_log.clear();
+                self.wiz_stream.clear();
+            }
+            // Scry a card into the transcript — purely local, no model.
+            "/read" | "/scry" => {
+                self.wiz_note(WIZ_USER, text.clone());
+                match rest.parse::<usize>().ok().and_then(|n| self.card_pane(n)) {
+                    Some((id, name)) => match self.pane_excerpt(id, EXCERPT_FOCUSED) {
+                        Some(t) => self.wiz_note(WIZ_NOTE, format!("card '{name}':\n{t}")),
+                        None => self.wiz_note(WIZ_NOTE, format!("card '{name}' is blank")),
+                    },
+                    None => self.wiz_note(WIZ_ERROR, "no such card — try /read 3"),
+                }
+            }
+            _ => {
+                // `/why <n>` asks about one card, so force its screen in.
+                let force = (verb == "/why")
+                    .then(|| rest.parse::<usize>().ok())
+                    .flatten()
+                    .filter(|n| self.card_pane(*n).is_some());
+                let text = match force {
+                    Some(n) => format!("What is card {n} doing, and what should I do about it?"),
+                    None => text,
+                };
+                if verb == "/why" && force.is_none() {
+                    self.wiz_note(WIZ_ERROR, "no such card — try /why 3");
+                    return;
+                }
+                self.wiz_note(WIZ_USER, text.clone());
+                match self.wiz_status {
+                    Some(S::Awake) => {
+                        self.wiz_streaming = true;
+                        let digest = self.wizard_digest_with(force);
+                        // `/why` is a card question by construction; anything
+                        // else has to earn the spread.
+                        let _ = tx.send(WizardCmd::Chat {
+                            text,
+                            digest,
+                            force_spread: force.is_some(),
+                            face: self.chat_face().to_string(),
+                        });
+                    }
+                    Some(S::Waking) => {
+                        self.wiz_note(WIZ_NOTE, "the wizard is still waking — a moment…")
+                    }
+                    Some(S::Sleeping) => self
+                        .wiz_note(WIZ_NOTE, "the wizard is sleeping — cast /wake to rouse him"),
+                    Some(S::Away) | None => self
+                        .wiz_note(WIZ_NOTE, "the wizard is away — the tower does not answer"),
+                }
+            }
+        }
+    }
+
+    fn wiz_scroll_by(&mut self, delta: isize) {
+        self.wiz_scroll = if delta > 0 {
+            // Clamped against the transcript length at draw time.
+            self.wiz_scroll.saturating_add(delta as usize)
+        } else {
+            self.wiz_scroll.saturating_sub(delta.unsigned_abs())
+        };
+    }
+
+    /// Panel width for the current terminal width; 0 hides the panel.
+    fn wizard_panel_width(&self, body_w: u16) -> u16 {
+        if self.wiz_tx.is_none() {
+            return 0;
+        }
+        let pref: u16 = self
+            .settings
+            .wizard_width
+            .parse()
+            .unwrap_or(40)
+            .clamp(28, 70);
+        // Keep at least one card column plus breathing room.
+        if body_w < pref + self.card_dims().0 + 8 {
+            0
+        } else {
+            pref
+        }
     }
 
     fn eye_def(&self) -> &'static EyeDef {
@@ -1475,6 +1876,35 @@ impl App {
             .unwrap_or(1) // medium
     }
 
+    fn card_size_idx(&self) -> usize {
+        CARD_SIZES
+            .iter()
+            .position(|(n, _, _)| *n == self.settings.card_size)
+            .unwrap_or(1) // medium
+    }
+
+    /// Card footprint in cells per the card-size setting.
+    fn card_dims(&self) -> (u16, u16) {
+        let (_, w, h) = CARD_SIZES[self.card_size_idx()];
+        (w, h)
+    }
+
+    fn card_columns_name(&self) -> &'static str {
+        pick(CARD_COLUMNS, &self.settings.card_columns, "auto")
+    }
+
+    fn home_view(&self) -> &'static str {
+        pick(HOME_VIEWS, &self.settings.home_view, "cards")
+    }
+
+    fn home_sep_color(&self) -> Color {
+        color_by_name(&self.settings.home_sep_color, "dark").1
+    }
+
+    fn chat_face(&self) -> &'static str {
+        pick(CHAT_FACES, &self.settings.chat_face, "wizard")
+    }
+
     /// The sidebar's Block per the frame/weight/color settings. Rounding
     /// only exists for normal-weight corners (Unicode has no thick or
     /// double rounded corners), so thick/double render square either way.
@@ -1541,55 +1971,76 @@ impl App {
                 self.settings.sidebar_color = cycle_color_name(cur, dir);
             }
             8 => {
+                self.settings.home_view = cycle_pick(HOME_VIEWS, self.home_view(), dir);
+            }
+            9 => {
+                let i = self.card_size_idx() as isize;
+                self.settings.card_size = CARD_SIZES
+                    [(i + dir).rem_euclid(CARD_SIZES.len() as isize) as usize]
+                    .0
+                    .to_string();
+            }
+            10 => {
+                self.settings.card_columns =
+                    cycle_pick(CARD_COLUMNS, self.card_columns_name(), dir);
+            }
+            11 => {
+                let cur = color_by_name(&self.settings.home_sep_color, "dark").0;
+                self.settings.home_sep_color = cycle_color_name(cur, dir);
+            }
+            12 => {
                 let i = self.card_icon_idx() as isize;
                 self.settings.card_icon = CARD_ICON_SIZES
                     [(i + dir).rem_euclid(CARD_ICON_SIZES.len() as isize) as usize]
                     .0
                     .to_string();
             }
-            9 => {
+            13 => {
                 self.settings.card_outline =
                     cycle_pick(CARD_OUTLINES, self.card_outline(), dir);
             }
-            10 => {
+            14 => {
                 let cur = color_by_name(&self.settings.select_color, "gold").0;
                 self.settings.select_color = cycle_color_name(cur, dir);
             }
-            11 => {
+            15 => {
                 let i = self.select_weight_idx() as isize;
                 self.settings.select_weight = SELECT_WEIGHTS
                     [(i + dir).rem_euclid(SELECT_WEIGHTS.len() as isize) as usize]
                     .0
                     .to_string();
             }
-            12 => {
+            16 => {
                 self.settings.select_style =
                     cycle_pick(SELECT_STYLES, self.select_style(), dir);
             }
-            13 => {
+            17 => {
                 self.settings.card_numeral =
                     cycle_pick(CARD_NUMERALS, self.card_numeral_style(), dir);
             }
-            14 => {
+            18 => {
                 self.settings.claude_style =
                     cycle_pick(CLAUDE_STYLES, self.claude_style(), dir);
             }
-            15 => return self.cycle_finish_sound(dir),
-            16 => self.settings.connection_watch = !self.settings.connection_watch,
-            17 => {
+            19 => return self.cycle_finish_sound(dir),
+            20 => self.settings.connection_watch = !self.settings.connection_watch,
+            21 => {
                 self.settings.cursor_style = cycle_pick(CURSOR_TYPES, self.cursor_type(), dir);
             }
-            18 => {
+            22 => {
                 self.settings.cursor_blink =
                     cycle_pick(CURSOR_BLINKS, self.cursor_blink(), dir);
             }
-            19 => {
+            23 => {
                 let mut choices: Vec<&str> = vec!["off"];
                 choices.extend(COLOR_CHOICES.iter().map(|(n, _, _)| *n));
                 self.settings.cursor_color =
                     cycle_pick(&choices, self.cursor_color_name(), dir);
             }
-            _ => self.settings.hide_controls = !self.settings.hide_controls,
+            24 => self.settings.hide_controls = !self.settings.hide_controls,
+            _ => {
+                self.settings.chat_face = cycle_pick(CHAT_FACES, self.chat_face(), dir);
+            }
         }
         self.settings.save();
     }
@@ -1708,7 +2159,18 @@ impl App {
         if self.home {
             self.sidebar_rect = Rect::default();
             self.main_rect = Rect::default();
-            self.draw_home(f, body);
+            let chat_w = self.wizard_panel_width(body.width);
+            if chat_w > 0 {
+                let [cards, chat] =
+                    Layout::horizontal([Constraint::Min(1), Constraint::Length(chat_w)])
+                        .areas(body);
+                self.draw_home(f, cards);
+                self.draw_chat(f, chat);
+            } else {
+                self.chat_rect = Rect::default();
+                self.wiz_art_rect = Rect::default();
+                self.draw_home(f, body);
+            }
             self.draw_status(f, status);
             if let Mode::Settings = self.mode {
                 self.draw_settings(f, area);
@@ -1803,7 +2265,7 @@ impl App {
         // always visible here even when the bottom-bar hints are hidden.
         let two_col = area.width >= 80;
         let w = if two_col { 78 } else { 48.min(area.width) };
-        let h = 26.min(area.height);
+        let h = 31.min(area.height);
         let rect = Rect {
             x: (area.width - w) / 2,
             y: (area.height - h) / 2,
@@ -1947,6 +2409,53 @@ impl App {
             ),
             row(
                 8,
+                "Home view",
+                self.home_view(),
+                vec![Span::styled(
+                    match self.home_view() {
+                        "list" => "≡",
+                        "blocks" => "▥",
+                        _ => "▦",
+                    }
+                    .to_string(),
+                    Style::default().fg(Color::Indexed(179)).bold(),
+                )],
+            ),
+            row(
+                9,
+                "Card size",
+                CARD_SIZES[self.card_size_idx()].0,
+                vec![Span::styled(
+                    {
+                        let (_, w, h) = CARD_SIZES[self.card_size_idx()];
+                        format!("{w}×{h}")
+                    },
+                    Style::default().fg(Color::Indexed(246)),
+                )],
+            ),
+            row(
+                10,
+                "Cards per row",
+                self.card_columns_name(),
+                vec![Span::styled(
+                    match self.card_columns_name().parse::<usize>() {
+                        Ok(n) => "▯".repeat(n),
+                        Err(_) => "⟳".to_string(),
+                    },
+                    Style::default().fg(Color::Indexed(179)),
+                )],
+            ),
+            row(
+                11,
+                "Separator color",
+                color_by_name(&self.settings.home_sep_color, "dark").0,
+                vec![Span::styled(
+                    "─│─".to_string(),
+                    Style::default().fg(self.home_sep_color()),
+                )],
+            ),
+            row(
+                12,
                 "Card icon",
                 CARD_ICON_SIZES[self.card_icon_idx()].0,
                 vec![Span::styled(
@@ -1955,7 +2464,7 @@ impl App {
                 )],
             ),
             row(
-                9,
+                13,
                 "Card outline",
                 self.card_outline(),
                 vec![Span::styled(
@@ -1969,7 +2478,7 @@ impl App {
                 )],
             ),
             row(
-                10,
+                14,
                 "Select color",
                 color_by_name(&self.settings.select_color, "gold").0,
                 vec![Span::styled(
@@ -1978,7 +2487,7 @@ impl App {
                 )],
             ),
             row(
-                11,
+                15,
                 "Select weight",
                 SELECT_WEIGHTS[self.select_weight_idx()].0,
                 vec![Span::styled(
@@ -1993,7 +2502,7 @@ impl App {
                 )],
             ),
             row(
-                12,
+                16,
                 "Select style",
                 self.select_style(),
                 vec![Span::styled(
@@ -2002,7 +2511,7 @@ impl App {
                 )],
             ),
             row(
-                13,
+                17,
                 "Card numeral",
                 self.card_numeral_style(),
                 vec![Span::styled(
@@ -2017,7 +2526,7 @@ impl App {
                 )],
             ),
             row(
-                14,
+                18,
                 "Claude style",
                 self.claude_style(),
                 vec![Span::styled(
@@ -2026,7 +2535,7 @@ impl App {
                 )],
             ),
             row(
-                15,
+                19,
                 "Finish sound",
                 &self.finish_sound_name(),
                 vec![Span::styled(
@@ -2041,7 +2550,7 @@ impl App {
                 )],
             ),
             row(
-                16,
+                20,
                 "Conn-error resume",
                 if self.settings.connection_watch { "on" } else { "off" },
                 vec![Span::styled(
@@ -2056,7 +2565,7 @@ impl App {
                 )],
             ),
             row(
-                17,
+                21,
                 "Cursor type",
                 self.cursor_type(),
                 vec![Span::styled(
@@ -2074,7 +2583,7 @@ impl App {
                 )],
             ),
             row(
-                18,
+                22,
                 "Cursor blink",
                 self.cursor_blink(),
                 vec![Span::styled(
@@ -2088,7 +2597,7 @@ impl App {
                 )],
             ),
             row(
-                19,
+                23,
                 "Cursor color",
                 self.cursor_color_name(),
                 vec![match self.cursor_rgb() {
@@ -2103,7 +2612,7 @@ impl App {
                 }],
             ),
             row(
-                20,
+                24,
                 "Bottom controls",
                 if self.settings.hide_controls { "hidden" } else { "shown" },
                 vec![Span::styled(
@@ -2116,6 +2625,25 @@ impl App {
                         })
                         .bold(),
                 )],
+            ),
+            row(
+                25,
+                "Chat character",
+                self.chat_face(),
+                vec![match self.chat_face() {
+                    "oracle" => Span::styled(
+                        "(*)".to_string(),
+                        Style::default().fg(Color::Indexed(135)).bold(),
+                    ),
+                    "hal" => Span::styled(
+                        "◉".to_string(),
+                        Style::default().fg(Color::Indexed(196)).bold(),
+                    ),
+                    _ => Span::styled(
+                        "🧙".to_string(),
+                        Style::default().fg(Color::Indexed(135)),
+                    ),
+                }],
             ),
             Line::default(),
             Line::from(Span::styled(
@@ -2131,6 +2659,7 @@ impl App {
     /// snapshot (refreshed ~1/s while the page is open).
     fn draw_home(&mut self, f: &mut Frame, area: Rect) {
         self.home_cards.clear();
+        self.home_mascots.clear();
         let Some(state) = self.home_state.clone() else {
             let mid = Rect {
                 x: area.x,
@@ -2151,19 +2680,28 @@ impl App {
             return;
         }
         self.home_sel = self.home_sel.min(n - 1);
-        let cols = (((area.width.saturating_sub(2) + HOME_GAP_X) / (HOME_CARD_W + HOME_GAP_X))
+        match self.home_view() {
+            "list" => return self.draw_home_list(f, area, &state),
+            "blocks" => return self.draw_home_blocks(f, area, &state),
+            _ => {}
+        }
+        let (card_w, card_h) = self.card_dims();
+        let mut cols = (((area.width.saturating_sub(2) + HOME_GAP_X) / (card_w + HOME_GAP_X))
             as usize)
             .clamp(1, n);
+        if let Ok(cap) = self.card_columns_name().parse::<usize>() {
+            cols = cols.min(cap);
+        }
         self.home_cols = cols;
         let rows = n.div_ceil(cols);
         let vis_rows = (((area.height.saturating_sub(1) + HOME_GAP_Y)
-            / (HOME_CARD_H + HOME_GAP_Y)) as usize)
+            / (card_h + HOME_GAP_Y)) as usize)
             .max(1);
         let sel_row = self.home_sel / cols;
         let row_off = sel_row.saturating_sub(vis_rows - 1);
         let shown = rows.min(vis_rows) as u16;
-        let grid_w = cols as u16 * HOME_CARD_W + (cols as u16 - 1) * HOME_GAP_X;
-        let grid_h = shown * HOME_CARD_H + shown.saturating_sub(1) * HOME_GAP_Y;
+        let grid_w = cols as u16 * card_w + (cols as u16 - 1) * HOME_GAP_X;
+        let grid_h = shown * card_h + shown.saturating_sub(1) * HOME_GAP_Y;
         let x0 = area.x + area.width.saturating_sub(grid_w) / 2;
         let y0 = area.y + area.height.saturating_sub(grid_h) / 2;
         for (i, p) in state.panes.iter().enumerate() {
@@ -2172,10 +2710,10 @@ impl App {
                 continue;
             }
             let rect = Rect {
-                x: x0 + (i % cols) as u16 * (HOME_CARD_W + HOME_GAP_X),
-                y: y0 + (r - row_off) as u16 * (HOME_CARD_H + HOME_GAP_Y),
-                width: HOME_CARD_W,
-                height: HOME_CARD_H,
+                x: x0 + (i % cols) as u16 * (card_w + HOME_GAP_X),
+                y: y0 + (r - row_off) as u16 * (card_h + HOME_GAP_Y),
+                width: card_w,
+                height: card_h,
             };
             if rect.right() > area.right() || rect.bottom() > area.bottom() {
                 continue;
@@ -2188,6 +2726,302 @@ impl App {
                 p.agent.as_deref() == Some("claude"),
             ));
         }
+    }
+
+    /// List view of the home page: one compact block per pane, stacked and
+    /// centered, sharing the cards' selection/outline settings. Painted art
+    /// stays out of this view — kitty_overlay skips it entirely.
+    fn draw_home_list(&mut self, f: &mut Frame, area: Rect, state: &SessionState) {
+        let n = state.panes.len();
+        self.home_cols = 1;
+        const ITEM_H: u16 = 4; // bordered block: 2 content lines
+        const STRIDE: u16 = ITEM_H + 1;
+        let w = area.width.saturating_sub(4).clamp(24, 76);
+        let vis = (((area.height + STRIDE - ITEM_H) / STRIDE) as usize).max(1);
+        let off = self.home_sel.saturating_sub(vis - 1);
+        let shown = n.min(vis) as u16;
+        let x0 = area.x + area.width.saturating_sub(w) / 2;
+        let y0 = area.y
+            + area
+                .height
+                .saturating_sub(shown * STRIDE - (STRIDE - ITEM_H))
+                / 2;
+        for (i, p) in state.panes.iter().enumerate() {
+            if i < off || i >= off + vis {
+                continue;
+            }
+            let rect = Rect {
+                x: x0,
+                y: y0 + (i - off) as u16 * STRIDE,
+                width: w,
+                height: ITEM_H,
+            };
+            if rect.bottom() > area.bottom() {
+                continue;
+            }
+            self.draw_list_block(f, rect, i + 1, p, i == self.home_sel);
+            self.home_cards.push((
+                rect,
+                p.id,
+                card_status(p).3,
+                p.agent.as_deref() == Some("claude"),
+            ));
+        }
+    }
+
+    fn draw_list_block(&self, f: &mut Frame, rect: Rect, num: usize, p: &PaneState, selected: bool) {
+        let (label, glyph, scolor, _) = card_status(p);
+        f.render_widget(Clear, rect);
+        let bt = if selected {
+            match SELECT_WEIGHTS[self.select_weight_idx()].0 {
+                "thick" => BorderType::Thick,
+                "heavy" => BorderType::Double,
+                _ => BorderType::Rounded,
+            }
+        } else if self.card_outline() == "double" {
+            BorderType::Double
+        } else {
+            BorderType::Rounded
+        };
+        let border_style = if selected {
+            Style::default()
+                .fg(self.select_color())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::Indexed(101))
+        };
+        let title_style = if selected {
+            Style::default()
+                .fg(Color::Indexed(220))
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(Color::Indexed(230))
+                .add_modifier(Modifier::BOLD)
+        };
+        let name = truncate(&p.name, rect.width.saturating_sub(14) as usize);
+        let block = Block::bordered()
+            .border_type(bt)
+            .border_style(border_style)
+            .title_top(
+                Line::from(Span::styled(
+                    format!(" {} · {} ", self.card_numeral(num), name),
+                    title_style,
+                ))
+                .left_aligned(),
+            )
+            .title_top(
+                Line::from(Span::styled(
+                    format!(" {glyph} {label} "),
+                    Style::default().fg(scolor).add_modifier(Modifier::BOLD),
+                ))
+                .right_aligned(),
+            );
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+        let gold = Style::default().fg(Color::Indexed(179));
+        let dim = Style::default().fg(Color::Indexed(246));
+        let faint = Style::default().fg(Color::Indexed(243));
+        let agent_line = match (&p.agent, &p.version) {
+            (Some(a), Some(v)) => format!("{a} {}", version_token(v)),
+            (Some(a), None) => a.clone(),
+            (None, _) => "shell".into(),
+        };
+        let dir = p
+            .cwd
+            .as_deref()
+            .map(|d| short_dir(d, inner.width.saturating_sub(14) as usize))
+            .unwrap_or_default();
+        let left = vec![
+            Line::from(Span::styled(format!(" {agent_line}"), gold)),
+            Line::from(Span::styled(format!(" {dir}"), faint)),
+        ];
+        let right = vec![
+            Line::from(Span::styled(format!("{} ", fmt_uptime(p.uptime_ms)), dim)),
+            Line::default(),
+        ];
+        f.render_widget(Paragraph::new(left), inner);
+        f.render_widget(Paragraph::new(right).alignment(Alignment::Right), inner);
+    }
+
+    /// Blocks view: two flat columns divided by rules — shells on the left,
+    /// agents on the right — filling top-down as panes open. No borders,
+    /// only line separators in the configured color; active claude blocks
+    /// get the hopping mascot sprite (placed by kitty_overlay).
+    fn draw_home_blocks(&mut self, f: &mut Frame, area: Rect, state: &SessionState) {
+        self.home_cols = 2;
+        let sep = Style::default().fg(self.home_sep_color());
+        // 4 info rows, extra breathing room with bigger card sizes, then
+        // the rule underneath.
+        let stride = (5 + self.card_size_idx()) as u16;
+        if area.width < 20 || area.height < stride + 2 {
+            return;
+        }
+        let col_w = area.width.saturating_sub(5) / 2;
+        let lx = area.x + 1;
+        let sx = lx + col_w + 1;
+        let rx = sx + 2;
+        let shells: Vec<usize> = (0..state.panes.len())
+            .filter(|&i| state.panes[i].agent.is_none())
+            .collect();
+        let agents: Vec<usize> = (0..state.panes.len())
+            .filter(|&i| state.panes[i].agent.is_some())
+            .collect();
+        // Visual order interleaves the columns row by row, so the stock
+        // grid navigation (home_cols = 2) works unchanged.
+        let mut order: Vec<(usize, u16)> = Vec::new(); // (pane idx, row)
+        for r in 0..shells.len().max(agents.len()) {
+            if let Some(&i) = shells.get(r) {
+                order.push((i, r as u16));
+            }
+            if let Some(&i) = agents.get(r) {
+                order.push((i, r as u16));
+            }
+        }
+        // Column headers + the rule under them.
+        let hdr = Style::default().fg(Color::Indexed(246)).bold();
+        let buf = f.buffer_mut();
+        buf.set_string(lx, area.y, "Shells", hdr);
+        buf.set_string(rx, area.y, "Agents", hdr);
+        let rule: String = "─".repeat(area.width.saturating_sub(2) as usize);
+        buf.set_string(area.x + 1, area.y + 1, &rule, sep);
+        // Vertical rule between the columns, full height.
+        for y in area.y..area.bottom() {
+            let g = if y == area.y + 1 { "┼" } else { "│" };
+            buf.set_string(sx, y, g, sep);
+        }
+        let y0 = area.y + 2;
+        let vis = ((area.height.saturating_sub(2)) / stride).max(1) as usize;
+        let sel_row = order
+            .get(self.home_sel)
+            .map(|&(_, r)| r as usize)
+            .unwrap_or(0);
+        let off = sel_row.saturating_sub(vis - 1);
+        let hsep: String = "─".repeat(col_w as usize);
+        for (vi, &(pi, row)) in order.iter().enumerate() {
+            let r = row as usize;
+            if r < off || r >= off + vis {
+                continue;
+            }
+            let p = &state.panes[pi];
+            let left = p.agent.is_none();
+            let rect = Rect {
+                x: if left { lx } else { rx },
+                y: y0 + ((r - off) as u16) * stride,
+                width: col_w,
+                height: stride - 1,
+            };
+            if rect.bottom() + 1 > area.bottom() {
+                continue;
+            }
+            let selected = vi == self.home_sel;
+            let (_, _, _, accent) = card_status(p);
+            let claude = p.agent.as_deref() == Some("claude");
+            let active = claude && (accent == 1 || accent == 2);
+            let mascot_w: u16 = if active && self.kitty_on && col_w > 24 { 6 } else { 0 };
+            self.draw_block(f, rect, pi + 1, p, selected, mascot_w);
+            if mascot_w > 0 {
+                self.home_mascots.push(Rect {
+                    x: rect.x + rect.width - mascot_w,
+                    y: rect.y + 1,
+                    width: mascot_w,
+                    height: 2.min(rect.height),
+                });
+            }
+            // The rule under the block; the selected block's rule glows in
+            // the select color so the highlight reads without any border.
+            let st = if selected {
+                Style::default().fg(self.select_color())
+            } else {
+                sep
+            };
+            f.buffer_mut().set_string(rect.x, rect.bottom(), &hsep, st);
+            self.home_cards.push((rect, p.id, accent, claude));
+        }
+    }
+
+    /// One pane block in the blocks view: title/status, agent · uptime,
+    /// cwd, and the agent's latest transcript recap.
+    fn draw_block(
+        &self,
+        f: &mut Frame,
+        rect: Rect,
+        num: usize,
+        p: &PaneState,
+        selected: bool,
+        mascot_w: u16,
+    ) {
+        let (label, glyph, scolor, _) = card_status(p);
+        f.render_widget(Clear, rect);
+        let gold = Style::default().fg(Color::Indexed(179));
+        let dim = Style::default().fg(Color::Indexed(246));
+        let faint = Style::default().fg(Color::Indexed(243));
+        let title_style = if selected {
+            Style::default()
+                .fg(self.select_color())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(Color::Indexed(230))
+                .add_modifier(Modifier::BOLD)
+        };
+        let marker = if selected { "›" } else { " " };
+        let tw = rect.width.saturating_sub(mascot_w) as usize;
+        let name = truncate(&p.name, tw.saturating_sub(12));
+        let agent_line = match (&p.agent, &p.version) {
+            (Some(a), Some(v)) => format!("{a} {}", version_token(v)),
+            (Some(a), None) => a.clone(),
+            (None, _) => "shell".into(),
+        };
+        let recap_line = match &p.recap {
+            Some(r) => Line::from(vec![
+                Span::styled("  ⏺ ".to_string(), Style::default().fg(scolor)),
+                Span::styled(
+                    truncate(r, tw.saturating_sub(5)),
+                    Style::default()
+                        .fg(Color::Indexed(246))
+                        .add_modifier(Modifier::ITALIC),
+                ),
+            ]),
+            None => Line::default(),
+        };
+        let left = vec![
+            Line::from(Span::styled(
+                format!("{marker} {} · {}", self.card_numeral(num), name),
+                title_style,
+            )),
+            Line::from(vec![
+                Span::styled(format!("  {agent_line}"), gold),
+                Span::styled(format!(" · {}", fmt_uptime(p.uptime_ms)), dim),
+            ]),
+            Line::from(Span::styled(
+                format!(
+                    "  {}",
+                    p.cwd
+                        .as_deref()
+                        .map(|d| short_dir(d, tw.saturating_sub(3)))
+                        .unwrap_or_default()
+                ),
+                faint,
+            )),
+            recap_line,
+        ];
+        f.render_widget(Paragraph::new(left), rect);
+        // Status pinned to the block's top-right, clear of the mascot zone.
+        let srect = Rect {
+            x: rect.x,
+            y: rect.y,
+            width: tw as u16,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(Line::from(Span::styled(
+                format!("{glyph} {label}"),
+                Style::default().fg(scolor).add_modifier(Modifier::BOLD),
+            )))
+            .alignment(Alignment::Right),
+            srect,
+        );
     }
 
     fn draw_card(&self, f: &mut Frame, rect: Rect, num: usize, p: &PaneState, selected: bool) {
@@ -2249,51 +3083,280 @@ impl App {
             .as_deref()
             .map(|d| short_dir(d, inner.width.saturating_sub(2) as usize))
             .unwrap_or_default();
-        // Text ornaments only in the fallback — the painted card already
-        // has the emblem and stars there.
-        let orn = |s: &str| {
-            if self.kitty_on {
-                Line::default()
-            } else {
-                Line::from(Span::styled(s.to_string(), gold))
-            }
-        };
-        // Emblem: Claude's ✳ in coral for claude panes, a `>_` prompt
-        // otherwise (mirrors the painted card art).
-        let emblem = if self.kitty_on {
-            Line::default()
+        // Layout adapts to the card-size setting: the header sits just
+        // below the emblem zone (painted art anchors it near the top), a
+        // breathing row appears when there's room, and the fallback's
+        // ornament only renders when it fits.
+        let ih = inner.height as usize;
+        let mut lines: Vec<Line> = Vec::new();
+        if self.kitty_on {
+            // Keep clear of the painted emblem (top ~27% of the card).
+            let pad = ((rect.height as f32 * 0.27) as usize)
+                .saturating_sub(1)
+                .clamp(1, ih.saturating_sub(6));
+            lines.resize_with(pad, Line::default);
         } else if p.agent.as_deref() == Some("claude") {
-            Line::from(vec![
+            // Emblem: Claude's ✳ in coral for claude panes, a `>_` prompt
+            // otherwise (mirrors the painted card art).
+            lines.push(Line::from(vec![
                 Span::styled("✦  ".to_string(), gold),
                 Span::styled(
                     "✳".to_string(),
                     Style::default().fg(Color::Indexed(209)).bold(),
                 ),
                 Span::styled("  ✦".to_string(), gold),
+            ]));
+            lines.push(Line::default());
+        } else {
+            lines.push(Line::from(Span::styled(">_".to_string(), gold.bold())));
+            lines.push(Line::default());
+        }
+        lines.push(Line::from(Span::styled(
+            format!("{} · {}", self.card_numeral(num), name),
+            title_style,
+        )));
+        lines.push(Line::from(Span::styled("──────────", faint)));
+        if ih >= lines.len() + 6 {
+            lines.push(Line::default());
+        }
+        lines.push(Line::from(Span::styled(agent_line, gold)));
+        lines.push(Line::from(Span::styled(fmt_uptime(p.uptime_ms), dim)));
+        lines.push(Line::from(Span::styled(
+            format!("{glyph} {label}"),
+            Style::default().fg(scolor).add_modifier(Modifier::BOLD),
+        )));
+        if let Some(sub) = &p.subtitle {
+            if ih >= lines.len() + 3 {
+                lines.push(Line::from(Span::styled(
+                    truncate(sub, inner.width.saturating_sub(2) as usize),
+                    Style::default().fg(Color::Indexed(246)).add_modifier(Modifier::ITALIC),
+                )));
+            }
+        }
+        lines.push(Line::from(Span::styled(dir, faint)));
+        if !self.kitty_on && ih >= lines.len() + 2 {
+            lines.push(Line::default());
+            lines.push(Line::from(Span::styled("✦  ·  ✦".to_string(), gold)));
+        }
+        f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
+    }
+
+    /// The Wizard's chat panel on the right edge of the home page:
+    /// portrait (kitty image), status line, transcript, input box.
+    fn draw_chat(&mut self, f: &mut Frame, area: Rect) {
+        use crate::wizard::WizardStatus as S;
+        self.chat_rect = area;
+        let violet = Color::Indexed(135);
+        let gold = Color::Indexed(179);
+        let border_style = if self.wiz_focus {
+            Style::default().fg(violet)
+        } else {
+            Style::default().fg(Color::Indexed(60))
+        };
+        let title_style = if self.wiz_status == Some(S::Awake) {
+            Style::default().fg(Color::Indexed(220)).bold()
+        } else {
+            Style::default().fg(Color::Indexed(246)).bold()
+        };
+        f.render_widget(Clear, area);
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .border_style(border_style)
+            .title(match self.chat_face() {
+                "oracle" => " ✦ The Oracle ✦ ",
+                "hal" => " ◉ HAL 9000 ◉ ",
+                _ => " ✦ The Wizard ✦ ",
+            })
+            .title_alignment(Alignment::Center)
+            .title_style(title_style);
+        let inner = block.inner(area);
+        f.render_widget(block, area);
+        if inner.width < 10 || inner.height < 6 {
+            self.wiz_art_rect = Rect::default();
+            return;
+        }
+        let mut y = inner.y;
+        // Portrait zone — the wizard/HAL images are painted by
+        // wizard_overlay; the Oracle is pure text and needs no kitty.
+        let face = self.chat_face();
+        let art_h: u16 = if (self.kitty_on || face == "oracle") && inner.height >= 20 {
+            9
+        } else {
+            0
+        };
+        if art_h > 0 {
+            self.wiz_art_rect = Rect {
+                x: inner.x + 1,
+                y,
+                width: inner.width.saturating_sub(2),
+                height: art_h,
+            };
+            if face == "oracle" {
+                self.draw_oracle(f, self.wiz_art_rect);
+            }
+            y += art_h;
+        } else {
+            self.wiz_art_rect = Rect::default();
+            let glyph = match self.wiz_status {
+                Some(S::Awake) => "✦",
+                Some(S::Waking) => "☀",
+                Some(S::Sleeping) => "☾",
+                Some(S::Away) => "✧",
+                None => "·",
+            };
+            f.render_widget(
+                Paragraph::new(glyph)
+                    .alignment(Alignment::Center)
+                    .style(Style::default().fg(violet)),
+                Rect { x: inner.x, y, width: inner.width, height: 1 },
+            );
+            y += 1;
+        }
+        let who = match face {
+            "oracle" => "the oracle",
+            "hal" => "HAL",
+            _ => "the wizard",
+        };
+        let (stxt, scol) = match self.wiz_status {
+            Some(S::Awake) => (format!("{who} is awake"), violet),
+            Some(S::Waking) => (format!("{who} is waking…"), Color::Indexed(220)),
+            Some(S::Sleeping) => (format!("{who} is sleeping"), Color::Indexed(68)),
+            Some(S::Away) => (format!("{who} is away"), Color::Indexed(203)),
+            None => (format!("seeking {who}…"), Color::DarkGray),
+        };
+        f.render_widget(
+            Paragraph::new(stxt)
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(scol).italic()),
+            Rect { x: inner.x, y, width: inner.width, height: 1 },
+        );
+        y += 1;
+        f.render_widget(
+            Paragraph::new("─".repeat(inner.width as usize))
+                .style(Style::default().fg(Color::Indexed(238))),
+            Rect { x: inner.x, y, width: inner.width, height: 1 },
+        );
+        y += 1;
+
+        // Input pinned to the bottom; the transcript fills the middle.
+        let input_y = inner.y + inner.height - 1;
+        let rows = input_y.saturating_sub(y) as usize;
+        let wrapw = inner.width.saturating_sub(1).max(8) as usize;
+        let mut lines: Vec<Line> = Vec::new();
+        let msg_styles = |role: u8| -> (&'static str, Style, Style) {
+            if role == WIZ_USER {
+                (
+                    "❯ ",
+                    Style::default().fg(gold).bold(),
+                    Style::default().fg(Color::Indexed(252)),
+                )
+            } else {
+                (
+                    "✦ ",
+                    Style::default().fg(violet).bold(),
+                    Style::default().fg(Color::Indexed(189)),
+                )
+            }
+        };
+        for (role, text) in &self.wiz_log {
+            match *role {
+                WIZ_NOTE | WIZ_ERROR => {
+                    let st = if *role == WIZ_ERROR {
+                        Style::default().fg(Color::Indexed(203)).italic()
+                    } else {
+                        Style::default().fg(Color::Indexed(245)).italic()
+                    };
+                    for l in wrap_text(text, wrapw) {
+                        lines.push(
+                            Line::from(Span::styled(l, st)).alignment(Alignment::Center),
+                        );
+                    }
+                }
+                r => {
+                    let (pfx, pst, st) = msg_styles(r);
+                    for (i, l) in
+                        wrap_text(text, wrapw.saturating_sub(2)).into_iter().enumerate()
+                    {
+                        if i == 0 {
+                            lines.push(Line::from(vec![
+                                Span::styled(pfx, pst),
+                                Span::styled(l, st),
+                            ]));
+                        } else {
+                            lines.push(Line::from(vec![
+                                Span::raw("  "),
+                                Span::styled(l, st),
+                            ]));
+                        }
+                    }
+                    lines.push(Line::default());
+                }
+            }
+        }
+        if self.wiz_streaming {
+            if self.wiz_stream.is_empty() {
+                let pondering = match face {
+                    "oracle" => "✦ the oracle is divining…",
+                    "hal" => "◉ HAL computes…",
+                    _ => "✦ the wizard ponders…",
+                };
+                lines.push(Line::from(Span::styled(
+                    pondering,
+                    Style::default().fg(violet).italic(),
+                )));
+            } else {
+                let (pfx, pst, st) = msg_styles(WIZ_WIZARD);
+                let text = format!("{}▌", self.wiz_stream);
+                for (i, l) in
+                    wrap_text(&text, wrapw.saturating_sub(2)).into_iter().enumerate()
+                {
+                    let head = if i == 0 {
+                        Span::styled(pfx, pst)
+                    } else {
+                        Span::raw("  ")
+                    };
+                    lines.push(Line::from(vec![head, Span::styled(l, st)]));
+                }
+            }
+        } else if lines.last().is_some_and(|l| l.spans.is_empty()) {
+            lines.pop(); // no trailing blank against the input line
+        }
+        let max = lines.len().saturating_sub(rows);
+        self.wiz_scroll = self.wiz_scroll.min(max);
+        let end = lines.len() - self.wiz_scroll;
+        let start = end.saturating_sub(rows);
+        let shown = (end - start) as u16;
+        if shown > 0 {
+            f.render_widget(
+                Paragraph::new(lines[start..end].to_vec()),
+                Rect {
+                    x: inner.x,
+                    y: y + rows as u16 - shown, // bottom-anchored
+                    width: inner.width,
+                    height: shown,
+                },
+            );
+        }
+
+        let input_line = if self.wiz_focus {
+            let budget = inner.width.saturating_sub(4) as usize;
+            let cs: Vec<char> = self.wiz_input.chars().collect();
+            let tail: String = cs[cs.len().saturating_sub(budget)..].iter().collect();
+            Line::from(vec![
+                Span::styled("❯ ", Style::default().fg(gold).bold()),
+                Span::styled(tail, Style::default().fg(Color::Indexed(252))),
+                Span::styled("\u{2588}", Style::default().fg(Color::Yellow)),
             ])
         } else {
-            Line::from(Span::styled(">_".to_string(), gold.bold()))
+            Line::from(Span::styled(
+                "❯ Alt+G · /wake · /dispell",
+                Style::default().fg(Color::Indexed(240)),
+            ))
         };
-        let lines = vec![
-            emblem,
-            Line::default(),
-            Line::from(Span::styled(
-                format!("{} · {}", self.card_numeral(num), name),
-                title_style,
-            )),
-            Line::from(Span::styled("──────────", faint)),
-            Line::default(),
-            Line::from(Span::styled(agent_line, gold)),
-            Line::from(Span::styled(fmt_uptime(p.uptime_ms), dim)),
-            Line::from(Span::styled(
-                format!("{glyph} {label}"),
-                Style::default().fg(scolor).add_modifier(Modifier::BOLD),
-            )),
-            Line::from(Span::styled(dir, faint)),
-            Line::default(),
-            orn("✦  ·  ✦"),
-        ];
-        f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
+        f.render_widget(
+            Paragraph::new(input_line),
+            Rect { x: inner.x, y: input_y, width: inner.width, height: 1 },
+        );
     }
 
     /// Paint/refresh the kitty-graphics card art under the text layer.
@@ -2306,8 +3369,9 @@ impl App {
         use std::io::Write as _;
         let mut out = std::io::stdout();
         // Card art hides while the settings popup covers the page (z=-1
-        // images would bleed through its background) and off home entirely.
-        if !self.home || matches!(self.mode, Mode::Settings) {
+        // images would bleed through its background), in list view, and
+        // off home entirely.
+        if !self.home || matches!(self.mode, Mode::Settings) || self.home_view() == "list" {
             if !self.kitty_placed.is_empty() {
                 let _ = crate::kitty::delete_placements(&mut out);
                 let _ = out.flush();
@@ -2316,6 +3380,7 @@ impl App {
                 // drop the compositor's tracking so it re-places them.
                 self.placed_gfx.clear();
                 self.orb_placed = None;
+                self.wiz_placed = None;
             }
             return;
         }
@@ -2338,55 +3403,75 @@ impl App {
             self.kitty_last_icon = style_key;
         }
 
-        // Desired placements: one per card, keyed by (rect, image id).
-        let (size_idx, (_, scale)) = (self.card_icon_idx(), CARD_ICON_SIZES[self.card_icon_idx()]);
-        let cards = self.home_cards.clone();
-        let mut desired: Vec<(Rect, u32)> = Vec::with_capacity(cards.len());
-        for (i, &(rect, _, accent, claude)) in cards.iter().enumerate() {
-            let selected = i == self.home_sel;
-            // Working/thinking claude gets the bouncing mascot (frame from
-            // the shared animation clock — placement swaps animate it);
-            // idle claude keeps the ✳ star.
-            let mark = if claude {
-                if accent == 1 || accent == 2 {
-                    crate::kitty::CardMark::ClaudeRun(
-                        ((self.anim_start.elapsed().as_millis() / 250) % 4) as u8,
-                    )
-                } else {
-                    crate::kitty::CardMark::Claude
+        // Desired placements: mascot sprites beside active claude blocks
+        // in the blocks view, otherwise one painted card per pane.
+        let desired: Vec<(Rect, u32)> = if self.home_view() == "blocks" {
+            let frame = ((self.anim_start.elapsed().as_millis() / 250) % 4) as u8;
+            let soft = self.claude_style() == "soft";
+            let mut v = Vec::with_capacity(self.home_mascots.len());
+            for rect in self.home_mascots.clone() {
+                let id = crate::kitty::clawd_id(frame, soft);
+                let (pw, ph) = (rect.width as u32 * cw as u32, rect.height as u32 * ch as u32);
+                if !self.kitty_sent.contains(&(pw, ph, id)) {
+                    self.kitty_sent.retain(|&(_, _, i2)| i2 != id);
+                    let rgba = crate::kitty::clawd_rgba(pw, ph, frame, soft);
+                    let _ = crate::kitty::transmit(&mut out, id, pw, ph, &rgba);
+                    self.kitty_sent.insert((pw, ph, id));
                 }
-            } else {
-                crate::kitty::CardMark::Terminal
-            };
-            let id = crate::kitty::image_id(accent, mark, size_idx, selected);
-            let (pw, ph) = (rect.width as u32 * cw as u32, rect.height as u32 * ch as u32);
-            // Transmit up front so placement swaps below are instant.
-            if !self.kitty_sent.contains(&(pw, ph, id)) {
-                self.kitty_sent.retain(|&(_, _, i2)| i2 != id);
-                let style = crate::kitty::CardStyle {
-                    accent: ACCENT_RGB[accent],
-                    mark,
-                    icon_scale: scale,
-                    rings: match self.card_outline() {
-                        "single" => 1,
-                        "none" => 0,
-                        _ => 2,
-                    },
-                    sel: selected.then(|| {
-                        (
-                            self.select_rgb(),
-                            (ph as f32 * SELECT_WEIGHTS[self.select_weight_idx()].1).max(1.5),
-                        )
-                    }),
-                    sel_glow: self.select_style() == "glow",
-                    mascot_soft: self.claude_style() == "soft",
-                };
-                let rgba = crate::kitty::card_rgba(pw, ph, &style);
-                let _ = crate::kitty::transmit(&mut out, id, pw, ph, &rgba);
-                self.kitty_sent.insert((pw, ph, id));
+                v.push((rect, id));
             }
-            desired.push((rect, id));
-        }
+            v
+        } else {
+            let (size_idx, (_, scale)) = (self.card_icon_idx(), CARD_ICON_SIZES[self.card_icon_idx()]);
+            let cards = self.home_cards.clone();
+            let mut desired: Vec<(Rect, u32)> = Vec::with_capacity(cards.len());
+            for (i, &(rect, _, accent, claude)) in cards.iter().enumerate() {
+                let selected = i == self.home_sel;
+                // Working/thinking claude gets the bouncing mascot (frame from
+                // the shared animation clock — placement swaps animate it);
+                // idle claude keeps the ✳ star.
+                let mark = if claude {
+                    if accent == 1 || accent == 2 {
+                        crate::kitty::CardMark::ClaudeRun(
+                            ((self.anim_start.elapsed().as_millis() / 250) % 4) as u8,
+                        )
+                    } else {
+                        crate::kitty::CardMark::Claude
+                    }
+                } else {
+                    crate::kitty::CardMark::Terminal
+                };
+                let id = crate::kitty::image_id(accent, mark, size_idx, selected);
+                let (pw, ph) = (rect.width as u32 * cw as u32, rect.height as u32 * ch as u32);
+                // Transmit up front so placement swaps below are instant.
+                if !self.kitty_sent.contains(&(pw, ph, id)) {
+                    self.kitty_sent.retain(|&(_, _, i2)| i2 != id);
+                    let style = crate::kitty::CardStyle {
+                        accent: ACCENT_RGB[accent],
+                        mark,
+                        icon_scale: scale,
+                        rings: match self.card_outline() {
+                            "single" => 1,
+                            "none" => 0,
+                            _ => 2,
+                        },
+                        sel: selected.then(|| {
+                            (
+                                self.select_rgb(),
+                                (ph as f32 * SELECT_WEIGHTS[self.select_weight_idx()].1).max(1.5),
+                            )
+                        }),
+                        sel_glow: self.select_style() == "glow",
+                        mascot_soft: self.claude_style() == "soft",
+                    };
+                    let rgba = crate::kitty::card_rgba(pw, ph, &style);
+                    let _ = crate::kitty::transmit(&mut out, id, pw, ph, &rgba);
+                    self.kitty_sent.insert((pw, ph, id));
+                }
+                desired.push((rect, id));
+            }
+            desired
+        };
 
         if desired == self.kitty_placed {
             let _ = out.flush();
@@ -2398,6 +3483,7 @@ impl App {
             self.kitty_placed.clear();
             self.placed_gfx.clear();
             self.orb_placed = None;
+            self.wiz_placed = None;
         }
         // Per-placement diff: place the new image first, then drop the old
         // one, so the card never shows bare background (no flicker).
@@ -2596,6 +3682,11 @@ impl App {
                 let _ = crate::kitty::delete_image(&mut buf, crate::kitty::ORB_BASE + i);
             }
         }
+        let wiz_ids: std::collections::HashSet<u32> =
+            self.wiz_sent.drain().map(|(_, _, i)| i).collect();
+        for id in wiz_ids {
+            let _ = crate::kitty::delete_image(&mut buf, id);
+        }
         if !buf.is_empty() {
             let mut out = std::io::stdout();
             let _ = out.write_all(&buf);
@@ -2652,6 +3743,168 @@ impl App {
     /// cell. Frames are pre-transmitted once per (style, color, cell size);
     /// per tick only a cheap re-place runs — or nothing, when steady and
     /// the cursor hasn't moved.
+    /// Paint/refresh the Wizard's portrait inside the chat panel. Modeled
+    /// on the card overlay: transmit each (size, state, frame) image once,
+    /// then cheap place/delete swaps.
+    /// The Oracle: an animated ascii crystal orb on a black field. Pure
+    /// text, so it works even when the outer terminal has no kitty
+    /// graphics. Bands of light drift through the glass; the palette
+    /// follows the model's status.
+    fn draw_oracle(&self, f: &mut Frame, rect: Rect) {
+        use crate::wizard::WizardStatus as S;
+        let t = self.anim_start.elapsed().as_millis() as f32 / 1000.0;
+        let ((br, bg, bb), (hr, hg, hb)): ((f32, f32, f32), (f32, f32, f32)) =
+            match self.wiz_status {
+                Some(S::Awake) => ((96.0, 62.0, 190.0), (140.0, 235.0, 255.0)),
+                Some(S::Waking) => ((150.0, 96.0, 40.0), (255.0, 226.0, 140.0)),
+                Some(S::Sleeping) => ((52.0, 52.0, 110.0), (110.0, 116.0, 190.0)),
+                _ => ((70.0, 70.0, 80.0), (128.0, 130.0, 140.0)),
+            };
+        let (cx, cy) = (rect.width as f32 / 2.0, rect.height as f32 / 2.0 - 0.1);
+        let ry = rect.height as f32 * 0.48;
+        let rx = ry * 2.05; // terminal cells are ~2:1
+        let ramp: &[char] = &[' ', '·', ':', '≈', '∗', 'o', 'O', '@'];
+        let mut lines = Vec::with_capacity(rect.height as usize);
+        for yy in 0..rect.height {
+            let mut spans = Vec::with_capacity(rect.width as usize);
+            for xx in 0..rect.width {
+                let dx = (xx as f32 - cx) / rx;
+                let dy = (yy as f32 - cy) / ry;
+                let d = (dx * dx + dy * dy).sqrt();
+                if d > 1.0 {
+                    spans.push(Span::styled(" ", Style::default().bg(Color::Black)));
+                    continue;
+                }
+                let ang = dy.atan2(dx);
+                // Drifting interference bands make the glass swirl.
+                let v = ((d * 6.0 - t * 1.6).sin()
+                    + (ang * 3.0 + t * 0.8).sin()
+                    + (dx * 5.0 + dy * 2.0 + t * 1.1).cos())
+                    / 3.0;
+                let v = ((v * 0.5 + 0.5) * (1.0 - d * 0.45)).clamp(0.0, 1.0);
+                let (ch, boost) = if d > 0.92 {
+                    ('∘', 0.35) // glass rim
+                } else if v > 0.96 {
+                    ('✦', 1.0) // a glint in the depths
+                } else {
+                    (ramp[((v * ramp.len() as f32) as usize).min(ramp.len() - 1)], v)
+                };
+                let col = Color::Rgb(
+                    (br + (hr - br) * boost).min(255.0) as u8,
+                    (bg + (hg - bg) * boost).min(255.0) as u8,
+                    (bb + (hb - bb) * boost).min(255.0) as u8,
+                );
+                spans.push(Span::styled(
+                    ch.to_string(),
+                    Style::default().fg(col).bg(Color::Black),
+                ));
+            }
+            lines.push(Line::from(spans));
+        }
+        f.render_widget(
+            Paragraph::new(lines).style(Style::default().bg(Color::Black)),
+            rect,
+        );
+    }
+
+    fn wizard_overlay(&mut self) {
+        if !self.kitty_on {
+            return;
+        }
+        use crate::wizard::WizardStatus as S;
+        use std::io::Write as _;
+        let mut out = std::io::stdout();
+        let rect = self.wiz_art_rect;
+        let want = self.home
+            && !matches!(self.mode, Mode::Settings)
+            && self.chat_rect.width > 0
+            && rect.width >= 8
+            && rect.height >= 4
+            // The Oracle is drawn as text by draw_chat — no image to place.
+            && self.chat_face() != "oracle";
+        if !want {
+            if let Some((_, id)) = self.wiz_placed.take() {
+                let _ = crate::kitty::delete_placement(&mut out, id, 1);
+                let _ = out.flush();
+            }
+            return;
+        }
+        let Some((cw, ch)) = crate::kitty::cell_size() else {
+            return;
+        };
+        let sidx = match self.wiz_status {
+            Some(S::Awake) => 0,
+            Some(S::Waking) => 1,
+            Some(S::Sleeping) => 2,
+            Some(S::Away) | None => 3,
+        };
+        let (pw, ph) = (rect.width as u32 * cw as u32, rect.height as u32 * ch as u32);
+        let mut buf: Vec<u8> = Vec::new();
+        let id = if self.chat_face() == "hal" {
+            // HAL idles with a slow blink: ~3.2s of steady red, then a
+            // 400ms shutter sweep (close, shut, open).
+            let t = self.anim_start.elapsed().as_millis() as u64 % 3600;
+            let frame = if t < 3200 { 0 } else { (((t - 3200) / 100) % 4).min(3) as u32 };
+            let open = [1.0f32, 0.45, 0.05, 0.45][frame as usize];
+            let id = crate::kitty::hal_id(sidx, frame);
+            if !self.wiz_sent.contains(&(pw, ph, id)) {
+                self.wiz_sent.retain(|&(_, _, i)| i != id);
+                let rgba = crate::kitty::hal_rgba(pw, ph, sidx, open);
+                let _ = crate::kitty::transmit(&mut buf, id, pw, ph, &rgba);
+                self.wiz_sent.insert((pw, ph, id));
+            }
+            id
+        } else {
+            let pulse = matches!(self.wiz_status, Some(S::Waking))
+                || (sidx == 0 && self.wiz_streaming);
+            let frame = if pulse {
+                let per = (ORB_PERIOD_MS / crate::kitty::WIZ_FRAMES as u64).max(1);
+                ((self.anim_start.elapsed().as_millis() as u64 / per)
+                    % crate::kitty::WIZ_FRAMES as u64) as u32
+            } else if sidx == 0 {
+                crate::kitty::WIZ_STEADY
+            } else {
+                0
+            };
+            let id = crate::kitty::wizard_id(sidx, frame);
+            if !self.wiz_sent.contains(&(pw, ph, id)) {
+                self.wiz_sent.retain(|&(_, _, i)| i != id);
+                let phase = frame as f32 / crate::kitty::WIZ_FRAMES as f32;
+                let rgba = crate::kitty::wizard_rgba(pw, ph, sidx, phase);
+                let _ = crate::kitty::transmit(&mut buf, id, pw, ph, &rgba);
+                self.wiz_sent.insert((pw, ph, id));
+            }
+            id
+        };
+        if self.wiz_placed != Some((rect, id)) {
+            let _ = crate::kitty::place_at(
+                &mut buf,
+                rect.y + 1,
+                rect.x + 1,
+                id,
+                1,
+                (0, 0, 0, 0),
+                rect.width,
+                rect.height,
+                -1,
+                0,
+                0,
+            );
+            if let Some((_, old)) = self.wiz_placed {
+                if old != id {
+                    let _ = crate::kitty::delete_placement(&mut buf, old, 1);
+                }
+            }
+            self.wiz_placed = Some((rect, id));
+        }
+        if !buf.is_empty() {
+            let _ = out.write_all(b"\x1b7");
+            let _ = out.write_all(&buf);
+            let _ = out.write_all(b"\x1b8");
+            let _ = out.flush();
+        }
+    }
+
     fn orb_overlay(&mut self) {
         if !self.kitty_on {
             return;
@@ -2928,9 +4181,14 @@ impl App {
             ));
             let hints = if self.settings.hide_controls {
                 format!(" · {} panes", self.panes.len())
+            } else if self.wiz_focus {
+                format!(
+                    " · {} panes · wizard: Enter send · Esc leave · /wake /dispell",
+                    self.panes.len()
+                )
             } else {
                 format!(
-                    " · {} panes · ←↑↓→ select · Enter open · Alt+~ close",
+                    " · {} panes · ←↑↓→ select · Enter open · Alt+G wizard · Alt+~ close",
                     self.panes.len()
                 )
             };
@@ -3105,6 +4363,56 @@ pub fn b64(data: &[u8]) -> String {
         s.push(if chunk.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
     }
     s
+}
+
+/// Greedy word wrap by char count — close enough for the chat panel
+/// (terminal-width glyphs only get approximated).
+fn wrap_text(s: &str, width: usize) -> Vec<String> {
+    let width = width.max(4);
+    let mut out = Vec::new();
+    for para in s.split('\n') {
+        let mut cur = String::new();
+        let mut len = 0usize;
+        let hard_break = |word: &str, out: &mut Vec<String>, cur: &mut String, len: &mut usize| {
+            let mut cs = word.chars().peekable();
+            while cs.peek().is_some() {
+                let chunk: String = cs.by_ref().take(width).collect();
+                let cl = chunk.chars().count();
+                if cl == width {
+                    out.push(chunk);
+                } else {
+                    *cur = chunk;
+                    *len = cl;
+                }
+            }
+        };
+        for word in para.split(' ') {
+            let wl = word.chars().count();
+            if len == 0 {
+                if wl <= width {
+                    cur = word.into();
+                    len = wl;
+                } else {
+                    hard_break(word, &mut out, &mut cur, &mut len);
+                }
+            } else if len + 1 + wl <= width {
+                cur.push(' ');
+                cur.push_str(word);
+                len += 1 + wl;
+            } else {
+                out.push(std::mem::take(&mut cur));
+                len = 0;
+                if wl <= width {
+                    cur = word.into();
+                    len = wl;
+                } else {
+                    hard_break(word, &mut out, &mut cur, &mut len);
+                }
+            }
+        }
+        out.push(cur);
+    }
+    out
 }
 
 fn truncate(s: &str, max: usize) -> String {

@@ -21,6 +21,12 @@ pub enum SrvEvent {
     Deliver(u64, Vec<u8>),
     /// Result of an async `<agent> --version` probe (agent name, first line).
     AgentVersion(String, String),
+    /// Result of an async background classification (pane id, pane name at
+    /// the time it was sent, the model's verdict). See `familiar.rs`.
+    WizardVerdict(u64, String, crate::familiar::Verdict),
+    /// Result of an async background subtitle summarization (pane id, the
+    /// ≤6-word summary). See `familiar.rs`.
+    WizardSubtitle(u64, String),
     Exited(u64),
 }
 
@@ -36,14 +42,27 @@ struct SavedPane {
     cwd: Option<String>,
     #[serde(default = "default_true")]
     auto_resume: bool,
+    /// Agent running here at the last save, if any — decides whether the
+    /// restore banner is worth showing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    agent: Option<String>,
 }
 
 fn default_true() -> bool {
     true
 }
 
-const RESTORE_BANNER: &[u8] =
-    b"\r\n\x1b[0m\x1b[?1049l\x1b[?25h\x1b[7m zodiac: restored session \xe2\x80\x94 processes were not preserved \x1b[0m\r\n";
+/// Tail of every restored pane's replayed scrollback. The recorded bytes can
+/// end mid-alt-screen (vim, less, an agent TUI), and the client's parser would
+/// otherwise stay there and paint the new shell's prompt over the old frame.
+const RESTORE_RESET: &[u8] = b"\r\n\x1b[0m\x1b[?1049l\x1b[?25h";
+
+/// Only panes that were running an agent get a visible banner: a restored
+/// shell reads as a fresh shell anyway, but a restored agent looks exactly
+/// like one still sitting at its transcript, waiting for input.
+fn restore_banner(agent: &str) -> Vec<u8> {
+    format!("\x1b[7m zodiac: restored session — {agent} was not preserved \x1b[0m\r\n").into_bytes()
+}
 
 struct Server {
     session: String,
@@ -53,6 +72,9 @@ struct Server {
     size: (u16, u16),
     conns: HashMap<u64, UnixStream>,
     ui: Option<u64>,
+    /// Read-only observers (T_WATCH): they receive replay + live output +
+    /// pane open/close, but never graphics, and attach never kicks them.
+    watchers: std::collections::HashSet<u64>,
     next_gen: u64,
     tx: Sender<SrvEvent>,
     dirty: bool,
@@ -115,6 +137,7 @@ pub fn run(session: &str) -> Result<()> {
         size: (24, 80),
         conns: HashMap::new(),
         ui: None,
+        watchers: std::collections::HashSet::new(),
         next_gen: 0,
         tx,
         dirty: false,
@@ -152,12 +175,18 @@ pub fn run(session: &str) -> Result<()> {
             last_stall_check = Instant::now();
             srv.autoresume_tick();
             srv.finish_tick();
+            srv.wizard_tick();
+            srv.subtitle_tick();
         }
         if srv.dirty {
             srv.save_meta();
         }
         if last_ring_save.elapsed() > Duration::from_secs(60) {
             srv.save_rings();
+            // Re-save meta alongside the rings: `dirty` only tracks pane
+            // add/remove/rename, so an agent launched inside an existing pane
+            // would otherwise be missing from state.json if we died hard.
+            srv.save_meta();
             last_ring_save = Instant::now();
         }
     }
@@ -165,6 +194,7 @@ pub fn run(session: &str) -> Result<()> {
     srv.save_meta();
     srv.save_rings();
     srv.send_ui(T_SERVER_EXIT, 0, &[]);
+    srv.send_watchers(T_SERVER_EXIT, 0, &[]);
     for p in &mut srv.panes {
         p.kill();
     }
@@ -188,6 +218,7 @@ impl Server {
         if self.ui == Some(gen) {
             self.ui = None;
         }
+        self.watchers.remove(&gen);
     }
 
     fn reply(&mut self, gen: u64, typ: u8, id: u64, data: &[u8]) {
@@ -202,6 +233,12 @@ impl Server {
 
     fn send_ui(&mut self, typ: u8, id: u64, data: &[u8]) {
         if let Some(gen) = self.ui {
+            self.reply(gen, typ, id, data);
+        }
+    }
+
+    fn send_watchers(&mut self, typ: u8, id: u64, data: &[u8]) {
+        for gen in self.watchers.iter().copied().collect::<Vec<_>>() {
             self.reply(gen, typ, id, data);
         }
     }
@@ -262,6 +299,7 @@ impl Server {
                 }
                 if !stream.is_empty() {
                     self.send_ui(T_OUTPUT, id, &stream);
+                    self.send_watchers(T_OUTPUT, id, &stream);
                 }
                 self.push_gfx(id);
             }
@@ -272,6 +310,14 @@ impl Server {
             }
             SrvEvent::AgentVersion(agent, version) => {
                 self.versions.insert(agent, Some(version));
+            }
+            SrvEvent::WizardVerdict(id, name, verdict) => {
+                self.handle_wizard_verdict(id, name, verdict)
+            }
+            SrvEvent::WizardSubtitle(id, subtitle) => {
+                if let Some(p) = self.pane_mut(id) {
+                    p.subtitle = Some(subtitle);
+                }
             }
             SrvEvent::Exited(id) => self.remove_pane(id),
         }
@@ -294,6 +340,20 @@ impl Server {
                 self.probe_versions();
                 let data = serde_json::to_vec(&self.state()).unwrap_or_default();
                 self.reply(gen, T_STATE, 0, &data);
+            }
+            T_WATCH => {
+                // Observer hello, mirroring attach(): state, then every
+                // pane's replay ring. No graphics, no flag clearing, and
+                // the connection stays alongside the attached UI.
+                self.watchers.insert(gen);
+                self.probe_versions();
+                let data = serde_json::to_vec(&self.state()).unwrap_or_default();
+                self.reply(gen, T_STATE, 0, &data);
+                let rings: Vec<(u64, Vec<u8>)> =
+                    self.panes.iter().map(|p| (p.id, p.ring.clone())).collect();
+                for (id, ring) in rings {
+                    self.reply(gen, T_REPLAY, id, &ring);
+                }
             }
             T_READ_SCREEN => {
                 let text = self
@@ -414,6 +474,110 @@ impl Server {
             if let Some(path) = crate::settings::Settings::load().finish_sound_path() {
                 play_sound(&path);
             }
+        }
+    }
+
+    /// Headless sentinel: notice panes that are stuck (needs_input, or
+    /// "working" with a screen that hasn't actually moved in a while) and
+    /// kick off a background classification for each. Advisory only — this
+    /// never writes to a pane, only logs and notifies. Re-read from settings
+    /// every tick so the on/off toggle applies live.
+    fn wizard_tick(&mut self) {
+        if !crate::settings::Settings::load().wizard_watch {
+            return;
+        }
+        let now = Instant::now();
+        let policy = crate::familiar::policy_text();
+        let session = self.session.clone();
+        let tx = self.tx.clone();
+        for p in &mut self.panes {
+            let status = p.status();
+            let hash = p.screen_hash();
+            let stable_since = match p.wizard_screen_hash {
+                Some(h) if h == hash => p.wizard_screen_since,
+                _ => {
+                    p.wizard_screen_hash = Some(hash);
+                    p.wizard_screen_since = Some(now);
+                    Some(now)
+                }
+            };
+            let stalled_working = status == "working"
+                && stable_since.is_some_and(|t| now.duration_since(t) >= crate::familiar::STALL_WORKING_AFTER);
+            if status != "needs_input" && !stalled_working {
+                continue;
+            }
+            if p.wizard_checked_at
+                .is_some_and(|t| now.duration_since(t) < crate::familiar::RECHECK_INTERVAL)
+            {
+                continue;
+            }
+            let Some(screen) = p.tail_text(20) else { continue };
+            p.wizard_checked_at = Some(now);
+            crate::familiar::classify_async(
+                tx.clone(),
+                session.clone(),
+                p.id,
+                p.name.clone(),
+                screen,
+                policy.clone(),
+            );
+        }
+    }
+
+    /// A background classification came back: log already happened on the
+    /// worker thread (see `familiar::classify_async`); here we just decide
+    /// whether it's worth interrupting you about, deduping on the pane's
+    /// last reason so a still-stuck pane doesn't renotify every 90s with the
+    /// same text.
+    fn handle_wizard_verdict(&mut self, id: u64, name: String, v: crate::familiar::Verdict) {
+        if matches!(v.classification.as_str(), "actually_working" | "finished") {
+            return;
+        }
+        let quiet = self
+            .pane_mut(id)
+            .is_some_and(|p| p.wizard_last_reason.as_deref() == Some(v.reason.as_str()));
+        if quiet {
+            return;
+        }
+        if let Some(p) = self.pane_mut(id) {
+            p.wizard_last_reason = Some(v.reason.clone());
+        }
+        let body = match v.policy_verdict.as_str() {
+            "safe" => format!("{} — matches your policy: {}", v.reason, v.policy_reason),
+            "unsafe" => format!("{} — NOT on your safe list: {}", v.reason, v.policy_reason),
+            _ => v.reason.clone(),
+        };
+        notify(&format!("{name}: {}", v.classification), &body);
+    }
+
+    /// Tier 3.1: keep each active pane's card subtitle fresh. Only panes
+    /// running an agent get one; a pane's screen hash is cached so an idle
+    /// pane costs nothing beyond a local hash compute once every
+    /// `SUBTITLE_INTERVAL` — no request goes out unless the screen actually
+    /// changed since the last summarize.
+    fn subtitle_tick(&mut self) {
+        if !crate::settings::Settings::load().wizard_watch {
+            return;
+        }
+        let now = Instant::now();
+        let tx = self.tx.clone();
+        for p in &mut self.panes {
+            if p.agent().is_none() {
+                continue;
+            }
+            if p.subtitle_checked_at
+                .is_some_and(|t| now.duration_since(t) < crate::familiar::SUBTITLE_INTERVAL)
+            {
+                continue;
+            }
+            p.subtitle_checked_at = Some(now);
+            let hash = p.screen_hash();
+            if p.subtitle_hash == Some(hash) {
+                continue;
+            }
+            p.subtitle_hash = Some(hash);
+            let Some(screen) = p.tail_text(20) else { continue };
+            crate::familiar::summarize_async(tx.clone(), p.id, screen);
         }
     }
 
@@ -564,6 +728,8 @@ impl Server {
         SessionState {
             session: self.session.clone(),
             attached: self.ui.is_some(),
+            rows: self.size.0,
+            cols: self.size.1,
             panes: self
                 .panes
                 .iter()
@@ -584,6 +750,8 @@ impl Server {
                         .and_then(|a| self.versions.get(&a).cloned().flatten())
                         .filter(|v| !v.is_empty()),
                     thinking: p.thinking(),
+                    recap: p.recap(),
+                    subtitle: p.subtitle.clone(),
                 })
                 .collect(),
         }
@@ -608,6 +776,7 @@ impl Server {
         if announce {
             self.active = id;
             self.send_ui(T_PANE_OPENED, id, pname.as_bytes());
+            self.send_watchers(T_PANE_OPENED, id, &pname.clone().into_bytes());
         }
         Ok(id)
     }
@@ -617,6 +786,7 @@ impl Server {
             self.panes.remove(i);
             self.dirty = true;
             self.send_ui(T_PANE_CLOSED, id, &[]);
+            self.send_watchers(T_PANE_CLOSED, id, &[]);
             if self.panes.is_empty() {
                 self.quit = true;
             }
@@ -633,7 +803,10 @@ impl Server {
             let mut preload = std::fs::read(dir.join("scrollback").join(format!("{i}.bin")))
                 .unwrap_or_default();
             if !preload.is_empty() {
-                preload.extend_from_slice(RESTORE_BANNER);
+                preload.extend_from_slice(RESTORE_RESET);
+                if let Some(agent) = sp.agent.as_deref() {
+                    preload.extend_from_slice(&restore_banner(agent));
+                }
             }
             if let Ok(id) = self.new_pane(
                 Some(sp.name.clone()),
@@ -667,6 +840,7 @@ impl Server {
                     name: p.name.clone(),
                     cwd: p.cwd(),
                     auto_resume: p.auto_resume,
+                    agent: p.agent(),
                 })
                 .collect(),
         };

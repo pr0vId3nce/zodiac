@@ -17,6 +17,7 @@ pub const T_ATTACH: u8 = 10; // become the UI client (hello + replay follow)
 pub const T_QUERY: u8 = 11; // request SessionState JSON
 pub const T_READ_SCREEN: u8 = 12; // request rendered screen text of pane id
 pub const T_AUTORESUME: u8 = 13; // payload[0]: 0 = off, 1 = on (per pane)
+pub const T_WATCH: u8 = 14; // become a read-only observer (state + replay + live output)
 
 // server -> client
 pub const T_HELLO: u8 = 20; // payload: Hello JSON
@@ -124,12 +125,27 @@ pub struct PaneState {
     /// Claude's live "esc to interrupt" spinner row is on screen.
     #[serde(default)]
     pub thinking: bool,
+    /// The agent's most recent transcript bullet ("⏺ …"), for the home
+    /// page's blocks view. None for shells or when nothing matched.
+    #[serde(default)]
+    pub recap: Option<String>,
+    /// A ≤6-word LLM summary of what the pane is doing right now, painted
+    /// on the tarot card under the status line. None for shells, panes with
+    /// no agent, or before the first summarization pass completes.
+    #[serde(default)]
+    pub subtitle: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SessionState {
     pub session: String,
     pub attached: bool,
+    /// Pane grid size (all panes share it) — lets observers (the scry web
+    /// mirror) size their emulator to match the byte stream exactly.
+    #[serde(default)]
+    pub rows: u16,
+    #[serde(default)]
+    pub cols: u16,
     pub panes: Vec<PaneState>,
 }
 

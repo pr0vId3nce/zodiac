@@ -324,6 +324,13 @@ impl SrvPane {
         self.pid.and_then(detect_agent_process)
     }
 
+    /// The host this pane's shell is `ssh`'d into, if any — a /proc walk
+    /// over its descendants, same shape as `agent()` but for a live `ssh`
+    /// client process instead of a known agent binary.
+    pub fn ssh_target(&self) -> Option<String> {
+        self.pid.and_then(detect_ssh_process)
+    }
+
     /// API-stall watchdog: true when this pane should be auto-resumed now.
     /// Call roughly once per second. A stall phrase must sit in the bottom
     /// rows of the screen for its dwell time (the "Waiting" phrase also shows
@@ -592,9 +599,127 @@ fn detect_agent_process(root: u32) -> Option<String> {
     None
 }
 
+/// Same /proc walk as `detect_agent_process`, but for a live `ssh` client
+/// process — returns the destination host it's connecting to.
+fn detect_ssh_process(root: u32) -> Option<String> {
+    let mut children: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    let entries = std::fs::read_dir("/proc").ok()?;
+    for entry in entries.flatten() {
+        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
+            continue;
+        };
+        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
+            continue;
+        };
+        let Some(rest) = stat.rfind(')').map(|i| &stat[i + 1..]) else {
+            continue;
+        };
+        if let Some(ppid) = rest.split_whitespace().nth(1).and_then(|s| s.parse().ok()) {
+            children.entry(ppid).or_default().push(pid);
+        }
+    }
+    let mut queue = vec![root];
+    while let Some(pid) = queue.pop() {
+        if pid != root {
+            if let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) {
+                let args: Vec<String> = cmdline
+                    .split(|b| *b == 0)
+                    .filter(|a| !a.is_empty())
+                    .map(|a| String::from_utf8_lossy(a).into_owned())
+                    .collect();
+                let base = args.first().map(|a| a.rsplit('/').next().unwrap_or(a));
+                if base == Some("ssh") {
+                    if let Some(dest) = ssh_destination(&args[1..]) {
+                        return Some(dest);
+                    }
+                }
+            }
+        }
+        if let Some(kids) = children.get(&pid) {
+            queue.extend(kids);
+        }
+    }
+    None
+}
+
+/// ssh's destination is its first non-flag argument. Flags that take a
+/// separate value (`-p 2222`, `-o Foo=bar`, ...) have that value skipped
+/// too; inline forms (`-p2222`, `-oFoo=bar`) are already a single argv
+/// entry and need no special handling. Strips `ssh://`, `user@` and a
+/// URI-style `:port` suffix from whatever's left.
+fn ssh_destination(args: &[String]) -> Option<String> {
+    const VALUE_FLAGS: &str = "BbcDEeFIiJLlmOopQRSWw";
+    let mut i = 0;
+    while i < args.len() {
+        let arg = &args[i];
+        if arg == "--" {
+            i += 1;
+            break;
+        }
+        let Some(flag) = arg.strip_prefix('-') else { break };
+        i += if flag.len() == 1 && VALUE_FLAGS.contains(flag) { 2 } else { 1 };
+    }
+    let dest = args.get(i)?;
+    let dest = dest.strip_prefix("ssh://").unwrap_or(dest);
+    let dest = dest.rsplit('@').next().unwrap_or(dest);
+    let host = match dest.split_once(':') {
+        Some((h, port)) if !port.is_empty() && port.chars().all(|c| c.is_ascii_digit()) => h,
+        _ => dest,
+    };
+    (!host.is_empty()).then(|| host.to_string())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn args(s: &str) -> Vec<String> {
+        s.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn ssh_destination_plain_host() {
+        assert_eq!(ssh_destination(&args("bigbox")), Some("bigbox".into()));
+    }
+
+    #[test]
+    fn ssh_destination_strips_user() {
+        assert_eq!(ssh_destination(&args("des@bigbox")), Some("bigbox".into()));
+    }
+
+    #[test]
+    fn ssh_destination_strips_uri_scheme_and_port() {
+        assert_eq!(
+            ssh_destination(&args("ssh://des@bigbox:2222")),
+            Some("bigbox".into())
+        );
+    }
+
+    #[test]
+    fn ssh_destination_skips_value_taking_flags() {
+        assert_eq!(
+            ssh_destination(&args("-p 2222 -o StrictHostKeyChecking=no bigbox")),
+            Some("bigbox".into())
+        );
+    }
+
+    #[test]
+    fn ssh_destination_skips_flag_only_options() {
+        assert_eq!(ssh_destination(&args("-tt -v des@bigbox")), Some("bigbox".into()));
+    }
+
+    #[test]
+    fn ssh_destination_ignores_a_trailing_remote_command() {
+        assert_eq!(
+            ssh_destination(&args("bigbox zodiac main")),
+            Some("bigbox".into())
+        );
+    }
+
+    #[test]
+    fn ssh_destination_none_when_only_flags() {
+        assert_eq!(ssh_destination(&args("-p 2222")), None);
+    }
 
     fn feed(lines: &[&str]) -> vt100::Parser {
         let mut p = vt100::Parser::new(24, 100, 0);

@@ -134,6 +134,9 @@ pub struct PaneState {
     /// no agent, or before the first summarization pass completes.
     #[serde(default)]
     pub subtitle: Option<String>,
+    /// The host this pane's shell is `ssh`'d into, if any.
+    #[serde(default)]
+    pub ssh: Option<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

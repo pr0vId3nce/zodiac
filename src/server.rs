@@ -752,6 +752,7 @@ impl Server {
                     thinking: p.thinking(),
                     recap: p.recap(),
                     subtitle: p.subtitle.clone(),
+                    ssh: p.ssh_target(),
                 })
                 .collect(),
         }

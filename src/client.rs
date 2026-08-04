@@ -618,12 +618,12 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         if app.main_size != app.sent_size {
             app.send_resize();
         }
-        // Refresh home-page data ~1/s while it's open.
-        if app.home
-            && app
-                .home_queried
-                .is_none_or(|t| t.elapsed() > Duration::from_secs(1))
-        {
+        // Refresh pane metadata ~1/s while the home page is open (it wants
+        // to feel live), and a slow trickle otherwise — just enough that
+        // the sidebar's ssh tag doesn't sit stale for minutes on end.
+        let query_every =
+            if app.home { Duration::from_secs(1) } else { Duration::from_secs(4) };
+        if app.home_queried.is_none_or(|t| t.elapsed() > query_every) {
             app.send(T_QUERY, 0, &[]);
             app.home_queried = Some(Instant::now());
         }
@@ -1460,8 +1460,15 @@ impl App {
                 }
             }
             KeyCode::Down => {
-                if self.home_sel + cols < n {
-                    self.home_sel += cols;
+                // The last row is often shorter than `cols` — jump into
+                // whatever card is there instead of refusing to move just
+                // because there's nothing in the exact same column.
+                if n > 0 {
+                    let total_rows = n.div_ceil(cols);
+                    let sel_row = self.home_sel / cols;
+                    if sel_row + 1 < total_rows {
+                        self.home_sel = (self.home_sel + cols).min(n - 1);
+                    }
                 }
             }
             KeyCode::Enter => {
@@ -1551,6 +1558,20 @@ impl App {
         let state = self.home_state.as_ref()?;
         let p = state.panes.iter().find(|p| p.index == n)?;
         Some((p.id, p.name.clone()))
+    }
+
+    /// The host a pane is ssh'd into, from the last `T_QUERY` snapshot —
+    /// the sidebar has no server-polled data of its own (it's built from
+    /// the client's local terminal state), so it borrows this one field
+    /// from the same snapshot the home page uses.
+    fn ssh_tag(&self, id: u64) -> Option<&str> {
+        self.home_state
+            .as_ref()?
+            .panes
+            .iter()
+            .find(|p| p.id == id)?
+            .ssh
+            .as_deref()
     }
 
     /// A compact live description of the card spread for the model, with
@@ -3008,7 +3029,9 @@ impl App {
         };
         let marker = if selected { "›" } else { " " };
         let tw = rect.width.saturating_sub(mascot_w) as usize;
-        let name = truncate(&p.name, tw.saturating_sub(12));
+        let ssh_suffix = p.ssh.as_deref().map(|h| format!(" — SSH: {h}"));
+        let ssh_len = ssh_suffix.as_deref().map_or(0, |s| s.chars().count());
+        let name = truncate(&p.name, tw.saturating_sub(12 + ssh_len));
         let agent_line = match (&p.agent, &p.version) {
             (Some(a), Some(v)) => format!("{a} {}", version_token(v)),
             (Some(a), None) => a.clone(),
@@ -3026,11 +3049,15 @@ impl App {
             ]),
             None => Line::default(),
         };
+        let mut title_spans = vec![Span::styled(
+            format!("{marker} {} · {}", self.card_numeral(num), name),
+            title_style,
+        )];
+        if let Some(sfx) = &ssh_suffix {
+            title_spans.push(Span::styled(sfx.clone(), Style::default().fg(Color::Indexed(108))));
+        }
         let left = vec![
-            Line::from(Span::styled(
-                format!("{marker} {} · {}", self.card_numeral(num), name),
-                title_style,
-            )),
+            Line::from(title_spans),
             Line::from(vec![
                 Span::styled(format!("  {agent_line}"), gold),
                 Span::styled(format!(" · {}", fmt_uptime(p.uptime_ms)), dim),
@@ -3113,7 +3140,9 @@ impl App {
                 .fg(Color::Indexed(230))
                 .add_modifier(Modifier::BOLD)
         };
-        let name = truncate(&p.name, inner.width.saturating_sub(6) as usize);
+        let ssh_suffix = p.ssh.as_deref().map(|h| format!(" — SSH: {h}"));
+        let ssh_len = ssh_suffix.as_deref().map_or(0, |s| s.chars().count());
+        let name = truncate(&p.name, (inner.width as usize).saturating_sub(6 + ssh_len));
         let agent_line = match (&p.agent, &p.version) {
             (Some(a), Some(v)) => format!("{a} {}", version_token(v)),
             (Some(a), None) => a.clone(),
@@ -3152,10 +3181,14 @@ impl App {
             lines.push(Line::from(Span::styled(">_".to_string(), gold.bold())));
             lines.push(Line::default());
         }
-        lines.push(Line::from(Span::styled(
+        let mut title_spans = vec![Span::styled(
             format!("{} · {}", self.card_numeral(num), name),
             title_style,
-        )));
+        )];
+        if let Some(sfx) = &ssh_suffix {
+            title_spans.push(Span::styled(sfx.clone(), Style::default().fg(Color::Indexed(108))));
+        }
+        lines.push(Line::from(title_spans));
         lines.push(Line::from(Span::styled("──────────", faint)));
         if ih >= lines.len() + 6 {
             lines.push(Line::default());
@@ -4157,6 +4190,11 @@ impl App {
             let anim_style = Style::default()
                 .fg(self.spinner_color())
                 .add_modifier(Modifier::BOLD);
+            let ssh_tag_style = Style::default().fg(Color::Indexed(108));
+            // Reserved whenever this pane is ssh'd somewhere — kept out of
+            // the collapsed (numbers-only) row, where there's no room.
+            let ssh = self.ssh_tag(p.id);
+            let ssh_len: usize = if ssh.is_some() { 4 } else { 0 };
             let line = if self.collapsed {
                 if active {
                     if working {
@@ -4194,18 +4232,26 @@ impl App {
                         String::new()
                     };
                     let aw = anim.chars().count();
-                    let name =
-                        truncate(&p.name, (inner.width as usize).saturating_sub(4 + aw));
+                    let name = truncate(
+                        &p.name,
+                        (inner.width as usize).saturating_sub(4 + aw + ssh_len),
+                    );
                     let mut spans = vec![Span::styled(format!(" {} ", self.eye()), style)];
                     let name_style = style.add_modifier(Modifier::UNDERLINED);
                     if working {
                         spans.extend(self.shimmer_spans(&name, name_style));
+                        if ssh.is_some() {
+                            spans.push(Span::styled("-SSH", ssh_tag_style));
+                        }
                         let pad = (inner.width as usize)
-                            .saturating_sub(3 + name.chars().count() + aw);
+                            .saturating_sub(3 + name.chars().count() + ssh_len + aw);
                         spans.push(Span::raw(" ".repeat(pad)));
                         spans.push(Span::styled(anim, anim_style));
                     } else {
                         spans.push(Span::styled(name.clone(), name_style));
+                        if ssh.is_some() {
+                            spans.push(Span::styled("-SSH", ssh_tag_style));
+                        }
                     }
                     Line::from(spans)
                 }
@@ -4214,16 +4260,26 @@ impl App {
                 // name itself shimmers while the spinner runs.
                 let anim = self.working_anim(false);
                 let aw = anim.chars().count() as u16;
-                let w = inner.width.saturating_sub(3 + aw) as usize;
+                let w = inner.width.saturating_sub(3 + aw + ssh_len as u16) as usize;
                 let name = truncate(&p.name, w.saturating_sub(1));
                 let mut spans = vec![Span::styled(format!("{:>2} ", i + 1), style)];
                 spans.extend(self.shimmer_spans(&name, style));
+                if ssh.is_some() {
+                    spans.push(Span::styled("-SSH", ssh_tag_style));
+                }
                 spans.push(Span::raw(" ".repeat(w.saturating_sub(name.chars().count()))));
                 spans.push(Span::styled(anim, anim_style));
                 Line::from(spans)
             } else {
-                let name = truncate(&p.name, inner.width.saturating_sub(4) as usize);
-                Line::from(Span::styled(format!("{:>2} {name}", i + 1), style))
+                let name = truncate(&p.name, inner.width.saturating_sub(4 + ssh_len as u16) as usize);
+                if ssh.is_some() {
+                    Line::from(vec![
+                        Span::styled(format!("{:>2} {name}", i + 1), style),
+                        Span::styled("-SSH", ssh_tag_style),
+                    ])
+                } else {
+                    Line::from(Span::styled(format!("{:>2} {name}", i + 1), style))
+                }
             };
             lines.push(line);
         }

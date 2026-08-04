@@ -439,6 +439,8 @@ struct App {
     orb_placed: Option<(u16, u16, u32, u16, u16)>,
     // The Wizard chat panel (home page, right side).
     wiz_tx: Option<Sender<crate::wizard::WizardCmd>>,
+    /// Set to cut the in-flight stream short — Esc while streaming.
+    wiz_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     wiz_status: Option<crate::wizard::WizardStatus>,
     /// Transcript: (role, text) — see the WIZ_* role constants.
     wiz_log: Vec<(u8, String)>,
@@ -482,16 +484,17 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
     }
     // The Wizard's network worker reports through the same channel.
     let settings = Settings::load();
-    let wiz_tx = if settings.wizard_chat {
+    let (wiz_tx, wiz_cancel) = if settings.wizard_chat {
         let txw = tx.clone();
-        Some(crate::wizard::spawn(
+        let (tx, cancel) = crate::wizard::spawn(
             crate::wizard::WizardCfg::from_settings(&settings),
             move |ev| {
                 let _ = txw.send(AppEvent::Wizard(ev));
             },
-        ))
+        );
+        (Some(tx), Some(cancel))
     } else {
-        None
+        (None, None)
     };
     std::thread::spawn(move || loop {
         match crossterm::event::read() {
@@ -549,6 +552,7 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         orb_cfg: None,
         orb_placed: None,
         wiz_tx,
+        wiz_cancel,
         wiz_status: None,
         wiz_log: Vec::new(),
         wiz_stream: String::new(),
@@ -1191,7 +1195,18 @@ impl App {
         // A focused chatbox swallows all plain keys.
         if self.home && self.wiz_focus && !alt {
             match key.code {
-                KeyCode::Esc => self.wiz_focus = false,
+                KeyCode::Esc => {
+                    // Mid-stream, Esc cuts the reply short instead of
+                    // leaving the panel — a second Esc leaves it once the
+                    // stream has actually stopped.
+                    if self.wiz_streaming {
+                        if let Some(c) = &self.wiz_cancel {
+                            c.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    } else {
+                        self.wiz_focus = false;
+                    }
+                }
                 KeyCode::Enter => self.wizard_submit(),
                 KeyCode::Backspace => {
                     self.wiz_input.pop();

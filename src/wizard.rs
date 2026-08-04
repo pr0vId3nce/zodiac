@@ -227,13 +227,27 @@ fn persona(face: &str) -> &'static str {
 /// How much conversation the worker keeps for context.
 const MAX_TURNS: usize = 24;
 
-pub fn spawn(cfg: WizardCfg, notify: impl Fn(WizardEvent) + Send + 'static) -> Sender<WizardCmd> {
+/// Returns a command channel plus a shared flag: set it to cut the current
+/// stream short. It has to be a flag rather than a `WizardCmd` — the worker
+/// is blocked inside a network read while streaming and won't drain the
+/// channel again until that call returns.
+pub fn spawn(
+    cfg: WizardCfg,
+    notify: impl Fn(WizardEvent) + Send + 'static,
+) -> (Sender<WizardCmd>, std::sync::Arc<std::sync::atomic::AtomicBool>) {
     let (tx, rx) = channel();
-    std::thread::spawn(move || worker(cfg, rx, notify));
-    tx
+    let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let worker_cancel = cancel.clone();
+    std::thread::spawn(move || worker(cfg, rx, worker_cancel, notify));
+    (tx, cancel)
 }
 
-fn worker(cfg: WizardCfg, rx: Receiver<WizardCmd>, notify: impl Fn(WizardEvent)) {
+fn worker(
+    cfg: WizardCfg,
+    rx: Receiver<WizardCmd>,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    notify: impl Fn(WizardEvent),
+) {
     let mut status: Option<WizardStatus> = None;
     let mut waking_since: Option<Instant> = None;
     let mut last_poll: Option<Instant> = None;
@@ -304,31 +318,49 @@ fn worker(cfg: WizardCfg, rx: Receiver<WizardCmd>, notify: impl Fn(WizardEvent))
                 force_spread,
                 face,
             } => {
+                // A cancel left set from a stream that was already cut short
+                // shouldn't poison the next one.
+                cancel.store(false, std::sync::atomic::Ordering::Relaxed);
                 let attach = spread.attach(&text, force_spread);
                 history.push(("user", text));
                 let mut acc = String::new();
-                let out = chat_stream(&cfg, &face, &history, &digest, attach, &notify, &mut acc);
+                let out =
+                    chat_stream(&cfg, &face, &history, &digest, attach, &cancel, &notify, &mut acc);
+                cancel.store(false, std::sync::atomic::Ordering::Relaxed);
                 spread.settle(out.as_ref().copied().unwrap_or(false));
                 let reached_the_end = out.is_ok();
                 if let Err(e) = out {
                     if acc.is_empty() {
                         history.pop();
                     }
-                    let (why, new) = match e {
-                        NetErr::Refused => (
-                            "the wizard is sleeping — the tower answers, but the fire is out"
-                                .to_string(),
-                            WizardStatus::Sleeping,
-                        ),
-                        NetErr::Unreachable(d) => {
-                            (format!("the tower does not answer ({d})"), WizardStatus::Away)
+                    match e {
+                        NetErr::Cancelled => {
+                            notify(WizardEvent::Note("the vision was cut short".into()));
                         }
-                        NetErr::Bad(d) => (format!("the vision faded: {d}"), WizardStatus::Away),
-                    };
-                    notify(WizardEvent::Error(why));
-                    if status != Some(new) {
-                        status = Some(new);
-                        notify(WizardEvent::Status(new));
+                        NetErr::Refused => {
+                            notify(WizardEvent::Error(
+                                "the wizard is sleeping — the tower answers, but the fire is out"
+                                    .into(),
+                            ));
+                            if status != Some(WizardStatus::Sleeping) {
+                                status = Some(WizardStatus::Sleeping);
+                                notify(WizardEvent::Status(WizardStatus::Sleeping));
+                            }
+                        }
+                        NetErr::Unreachable(d) => {
+                            notify(WizardEvent::Error(format!("the tower does not answer ({d})")));
+                            if status != Some(WizardStatus::Away) {
+                                status = Some(WizardStatus::Away);
+                                notify(WizardEvent::Status(WizardStatus::Away));
+                            }
+                        }
+                        NetErr::Bad(d) => {
+                            notify(WizardEvent::Error(format!("the vision faded: {d}")));
+                            if status != Some(WizardStatus::Away) {
+                                status = Some(WizardStatus::Away);
+                                notify(WizardEvent::Status(WizardStatus::Away));
+                            }
+                        }
                     }
                 }
                 if !acc.is_empty() {
@@ -381,6 +413,8 @@ enum NetErr {
     Unreachable(String),
     /// Connected but the exchange went wrong.
     Bad(String),
+    /// Des hit Esc mid-stream — not a fault, just cut short.
+    Cancelled,
 }
 
 fn connect(cfg: &WizardCfg) -> Result<TcpStream, NetErr> {
@@ -403,13 +437,17 @@ fn connect(cfg: &WizardCfg) -> Result<TcpStream, NetErr> {
 }
 
 /// One request; the whole response body lands in the returned String.
-/// `read_timeout` bounds each socket read, not the total exchange.
+/// `read_timeout` bounds each socket read, not the total exchange. `cancel`
+/// is checked between reads of the body — a stream sends chunks often
+/// enough (roughly once per token) that this notices a cancel within a
+/// fraction of a second, without needing to interrupt a read in flight.
 fn http(
     cfg: &WizardCfg,
     method: &str,
     path: &str,
     body: Option<&str>,
     read_timeout: Duration,
+    cancel: &std::sync::atomic::AtomicBool,
     mut on_body: impl FnMut(&[u8]),
 ) -> Result<u16, NetErr> {
     let mut sock = connect(cfg)?;
@@ -457,6 +495,9 @@ fn http(
     let mut buf = vec![0u8; 16 * 1024];
     if chunked {
         loop {
+            if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(NetErr::Cancelled);
+            }
             let mut sz = String::new();
             rd.read_line(&mut sz).map_err(|e| NetErr::Bad(format!("chunk: {e}")))?;
             let sz = sz.trim().split(';').next().unwrap_or("");
@@ -495,7 +536,8 @@ fn http(
 }
 
 fn health(cfg: &WizardCfg) -> WizardStatus {
-    match http(cfg, "GET", "/health", None, Duration::from_secs(3), |_| {}) {
+    let no_cancel = std::sync::atomic::AtomicBool::new(false);
+    match http(cfg, "GET", "/health", None, Duration::from_secs(3), &no_cancel, |_| {}) {
         Ok(200) => WizardStatus::Awake,
         Ok(503) => WizardStatus::Waking, // llama-server: model still loading
         Ok(_) => WizardStatus::Away,
@@ -533,6 +575,7 @@ fn chat_stream(
     history: &[(&'static str, String)],
     digest: &str,
     attach_spread: bool,
+    cancel: &std::sync::atomic::AtomicBool,
     notify: &dyn Fn(WizardEvent),
     acc: &mut String,
 ) -> Result<bool, NetErr> {
@@ -566,7 +609,10 @@ fn chat_stream(
     // raw <tool_call> blocks as prose, and `tool_choice: none` does the same
     // (llama-server stops parsing calls but the model keeps making them).
     for round in 0..=MAX_TOOL_ROUNDS {
-        let turn = stream_once(cfg, &messages, &mut |tok| {
+        if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+            return Err(NetErr::Cancelled);
+        }
+        let turn = stream_once(cfg, &messages, cancel, &mut |tok| {
             acc.push_str(tok);
             notify(WizardEvent::Token(tok.to_string()));
         })?;
@@ -600,7 +646,7 @@ fn chat_stream(
         }
     }
     // The refusals leave the model with nothing to do but talk.
-    stream_once(cfg, &messages, &mut |tok| {
+    stream_once(cfg, &messages, cancel, &mut |tok| {
         acc.push_str(tok);
         notify(WizardEvent::Token(tok.to_string()));
     })?;
@@ -766,6 +812,7 @@ fn run_tool(
 fn stream_once(
     cfg: &WizardCfg,
     messages: &[serde_json::Value],
+    cancel: &std::sync::atomic::AtomicBool,
     on_token: &mut dyn FnMut(&str),
 ) -> Result<Turn, NetErr> {
     let mut body = serde_json::json!({
@@ -791,6 +838,7 @@ fn stream_once(
         "/v1/chat/completions",
         Some(&body),
         Duration::from_secs(180),
+        cancel,
         |bytes| {
             pend.extend_from_slice(bytes);
             while let Some(pos) = pend.iter().position(|&b| b == b'\n') {
@@ -1572,7 +1620,8 @@ mod tests {
             let history = vec![("user", q.to_string())];
             let attach = about_session(q);
             println!("[{label}] spread attached: {attach}");
-            let r = chat_stream(&cfg, "wizard", &history, digest, attach, &|ev| {
+            let no_cancel = std::sync::atomic::AtomicBool::new(false);
+            let r = chat_stream(&cfg, "wizard", &history, digest, attach, &no_cancel, &|ev| {
                 if let WizardEvent::Note(n) = ev {
                     println!("  note: {n}");
                 }
@@ -1595,16 +1644,61 @@ mod tests {
                  founded, the currency of Bhutan, and the depth of Lake Baikal.";
         let mut acc = String::new();
         let history = vec![("user", q.to_string())];
-        let out = chat_stream(&cfg, "wizard", &history, "session 'x': 0 cards", false, &|ev| {
-            if let WizardEvent::Note(n) = ev {
-                println!("  note: {n}");
-            }
-        }, &mut acc);
+        let no_cancel = std::sync::atomic::AtomicBool::new(false);
+        let out = chat_stream(
+            &cfg,
+            "wizard",
+            &history,
+            "session 'x': 0 cards",
+            false,
+            &no_cancel,
+            &|ev| {
+                if let WizardEvent::Note(n) = ev {
+                    println!("  note: {n}");
+                }
+            },
+            &mut acc,
+        );
         assert!(out.is_ok(), "request failed");
         println!("answer: {acc}\n");
         assert!(!acc.trim().is_empty(), "spent the budget and said nothing");
         assert!(!acc.contains("<tool_call>"), "leaked tool syntax");
         assert!(!acc.contains("<function="), "leaked tool syntax");
+    }
+
+    /// Esc mid-stream (`WizardCmd::Chat`'s cancel flag) must actually cut
+    /// the network read short, not just stop rendering tokens client-side —
+    /// proves the flag reaches all the way into `http`'s chunk loop.
+    #[test]
+    #[ignore]
+    fn live_cancel_cuts_the_stream_short() {
+        let cfg = WizardCfg::from_settings(&Settings::load());
+        let q = "Write a very long, detailed essay — at least 500 words — about the history \
+                 of clockmaking.";
+        let history = vec![("user", q.to_string())];
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let flip = cancel.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(800));
+            flip.store(true, std::sync::atomic::Ordering::Relaxed);
+        });
+        let mut acc = String::new();
+        let start = Instant::now();
+        let out = chat_stream(
+            &cfg,
+            "wizard",
+            &history,
+            "session 'x': 0 cards",
+            false,
+            &cancel,
+            &|_| {},
+            &mut acc,
+        );
+        let elapsed = start.elapsed();
+        assert!(matches!(out, Err(NetErr::Cancelled)), "expected Cancelled, got Ok/other Err");
+        assert!(!acc.is_empty(), "cancel fired before any tokens arrived — flakier timing needed");
+        assert!(elapsed < Duration::from_secs(10), "took {elapsed:?} — cancel did not cut in");
+        println!("cancelled after {elapsed:?}, {} chars captured", acc.len());
     }
 
     /// The other live path: a follow-up that names nothing must still know
@@ -1627,7 +1721,8 @@ mod tests {
             println!("[{q}] spread attached: {attach}");
             history.push(("user", q.to_string()));
             let mut acc = String::new();
-            let out = chat_stream(&cfg, "wizard", &history, digest, attach, &|ev| {
+            let no_cancel = std::sync::atomic::AtomicBool::new(false);
+            let out = chat_stream(&cfg, "wizard", &history, digest, attach, &no_cancel, &|ev| {
                 if let WizardEvent::Note(n) = ev {
                     println!("  note: {n}");
                 }

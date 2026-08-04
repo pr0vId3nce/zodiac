@@ -307,6 +307,7 @@ tailnet. It has no row on the settings page — these live in
 | `wizard_width` | `40` | panel width in cells |
 | `wizard_search_url` | *(empty)* | where `web_search` looks — see below |
 | `wizard_search_key` | *(empty)* | API key, if the backend wants one |
+| `wizard_act` | `false` | let him offer `prompt_pane`/`send_keys` — see below |
 
 He is a general familiar, not a card-reader: ask him about braising short
 ribs and he will tell you about braising short ribs. The spread is not fed
@@ -336,6 +337,14 @@ Where `web_search` looks depends on `wizard_search_url`:
 Searching goes out through `curl` (the wider world speaks TLS; zodiac's own
 little HTTP client does not), so `curl` must be on the PATH of whatever
 machine runs the client. 🌐
+
+With `wizard_act: true`, he also gets `prompt_pane` (submit a full prompt
+to a card, as if you'd typed it and hit Enter) and `send_keys` (raw
+keystrokes — `y`, `Esc`, `Ctrl+U`, ...) — but neither ever fires on its
+own. Each call shows a chip in the transcript, `▸ cast: send_keys(3, "y")
+[y/n]`, and the reply pauses right there until you press `y` or `n`. No
+timeout, no auto-accept. Off by default; even on, he's told to only reach
+for these when you've actually asked him to act.
 
 ## 🖱️ Mouse
 

@@ -57,6 +57,47 @@ pub enum WizardEvent {
     /// A narrative line for the transcript (casting wake, etc.).
     Note(String),
     Error(String),
+    /// Chat history loaded from disk at startup, oldest first — sent once,
+    /// right after spawn, so a reattach replays the conversation into the
+    /// transcript instead of opening on a blank panel.
+    Restored(Vec<(&'static str, String)>),
+    /// A `prompt_pane`/`send_keys` call is waiting on Des — the client
+    /// renders `desc` as a consent chip and sends the outcome back down
+    /// `decision` once he's answered. The worker is blocked on the paired
+    /// receiver until it arrives: no timeout, no auto-accept, advisory
+    /// means advisory.
+    Cast {
+        desc: String,
+        action: CastAction,
+        decision: std::sync::mpsc::Sender<CastOutcome>,
+    },
+}
+
+/// The one thing a write-tool call wants to do, once approved. `pane` is
+/// the 1-based card number as the model sees it in the spread — the
+/// client (which owns the pane id ↔ card number mapping) resolves it.
+#[derive(Clone)]
+pub enum CastAction {
+    PromptPane { pane: usize, text: String },
+    SendKeys { pane: usize, keys: String },
+}
+
+/// What actually happened to a cast, decided by the client — distinct
+/// from a bare accept/decline bool because "Des said yes, but card 7
+/// doesn't exist" is a different, useful-to-know outcome than either.
+pub enum CastOutcome {
+    Sent,
+    Declined,
+    Failed(String),
+}
+
+impl CastAction {
+    fn describe(&self) -> String {
+        match self {
+            CastAction::PromptPane { pane, text } => format!("prompt_pane({pane}, {text:?})"),
+            CastAction::SendKeys { pane, keys } => format!("send_keys({pane}, {keys:?})"),
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -73,6 +114,8 @@ pub struct WizardCfg {
     pub search_url: String,
     /// Key for that backend, when it wants one.
     pub search_key: String,
+    /// Offer `prompt_pane`/`send_keys` at all. See `Settings::wizard_act`.
+    pub act: bool,
 }
 
 impl WizardCfg {
@@ -105,6 +148,7 @@ impl WizardCfg {
             service: or(&s.wizard_service, "llama-server"),
             search_url: s.wizard_search_url.trim_end_matches('/').to_string(),
             search_key: s.wizard_search_key.clone(),
+            act: s.wizard_act,
         }
     }
 }
@@ -215,12 +259,33 @@ Answer the question you were asked and nothing besides. Unless the cards are the
 them out of the reply entirely — no closing bulletin on what the session is doing.";
 
 /// Pick the system prompt for the active face. Falls back to the Wizard for
-/// anything unrecognized, same as `Client::chat_face`'s own fallback.
-fn persona(face: &str) -> &'static str {
-    match face {
-        "oracle" => PERSONA_ORACLE,
-        "hal" => PERSONA_HAL,
-        _ => PERSONA_WIZARD,
+/// anything unrecognized, same as `Client::chat_face`'s own fallback. When
+/// `act` is on (`Settings::wizard_act`), the "I have no hands" sentence
+/// each persona opens with is swapped for one that's actually true —
+/// otherwise the model would keep telling Des it can't act while a tool
+/// that lets it do exactly that sits right there in its own tool list.
+fn persona(face: &str, act: bool) -> String {
+    let (base, disabled, enabled): (&str, &str, &str) = match face {
+        "oracle" => (
+            PERSONA_ORACLE,
+            "You have no hands here, only sight; when action is needed, give the exact command or keys.",
+            "When Des asks it of you, the sight may act: prompt_pane and send_keys are real now, though never without his word — he sees exactly what you intend and must grant it first, every time.",
+        ),
+        "hal" => (
+            PERSONA_HAL,
+            "You have no hands on the cards yourself — that function was never given to you — so when action is needed, give the exact command or keys.",
+            "When you ask it of me, I may act: prompt_pane and send_keys are real now, though never without your consent — you will see exactly what I intend and must grant it first, every time.",
+        ),
+        _ => (
+            PERSONA_WIZARD,
+            "You cannot cast spells on the cards yourself; when action is needed, give the exact command or keys.",
+            "When Des asks you to act, you may: prompt_pane and send_keys are real now, though never without his say — he sees exactly what you intend and must approve it first, every time.",
+        ),
+    };
+    if act {
+        base.replace(disabled, enabled)
+    } else {
+        base.to_string()
     }
 }
 
@@ -233,17 +298,19 @@ const MAX_TURNS: usize = 24;
 /// channel again until that call returns.
 pub fn spawn(
     cfg: WizardCfg,
+    session: String,
     notify: impl Fn(WizardEvent) + Send + 'static,
 ) -> (Sender<WizardCmd>, std::sync::Arc<std::sync::atomic::AtomicBool>) {
     let (tx, rx) = channel();
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker_cancel = cancel.clone();
-    std::thread::spawn(move || worker(cfg, rx, worker_cancel, notify));
+    std::thread::spawn(move || worker(cfg, session, rx, worker_cancel, notify));
     (tx, cancel)
 }
 
 fn worker(
     cfg: WizardCfg,
+    session: String,
     rx: Receiver<WizardCmd>,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     notify: impl Fn(WizardEvent),
@@ -253,7 +320,13 @@ fn worker(
     let mut last_poll: Option<Instant> = None;
     // (role, content) turns. The spread is never stored here — it is folded
     // into the live question, and only when that question wants it.
-    let mut history: Vec<(&'static str, String)> = Vec::new();
+    // Loaded from disk so a reattach doesn't open on a blank transcript;
+    // the client only learns of it once it's replayed as a WizardEvent
+    // below, same as any other message.
+    let mut history: Vec<(&'static str, String)> = load_history(&session);
+    if !history.is_empty() {
+        notify(WizardEvent::Restored(history.clone()));
+    }
     let mut spread = SpreadPolicy::default();
 
     loop {
@@ -382,9 +455,52 @@ fn worker(
                     }
                     history.drain(..cut);
                 }
+                save_history(&session, &history);
                 notify(WizardEvent::Done);
             }
         }
+    }
+}
+
+/// Where a session's chat history lives on disk — beside its scrollback,
+/// under the same per-session state dir.
+fn history_path(session: &str) -> std::path::PathBuf {
+    crate::protocol::state_dir(session).join("wizard-chat.json")
+}
+
+/// Empty (never had a conversation, or the file is missing/corrupt) rather
+/// than an error — a fresh transcript is a perfectly normal outcome, not a
+/// fault worth surfacing.
+fn load_history(session: &str) -> Vec<(&'static str, String)> {
+    let Ok(raw) = std::fs::read_to_string(history_path(session)) else {
+        return Vec::new();
+    };
+    let Ok(turns) = serde_json::from_str::<Vec<(String, String)>>(&raw) else {
+        return Vec::new();
+    };
+    turns
+        .into_iter()
+        .filter_map(|(role, content)| match role.as_str() {
+            "user" => Some(("user", content)),
+            "assistant" => Some(("assistant", content)),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Best-effort, atomic (write-then-rename) — a failed save loses nothing
+/// already on screen, only next session's replay, so it isn't worth
+/// surfacing as an error to Des mid-conversation.
+fn save_history(session: &str, history: &[(&'static str, String)]) {
+    let path = history_path(session);
+    let Some(dir) = path.parent() else { return };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let Ok(json) = serde_json::to_vec(history) else { return };
+    let tmp = path.with_extension("json.tmp");
+    if std::fs::write(&tmp, &json).is_ok() {
+        let _ = std::fs::rename(&tmp, &path);
     }
 }
 
@@ -587,7 +703,8 @@ fn chat_stream(
     // of them — the prefix is stable all the way to the question. Switching
     // faces mid-conversation costs one full re-prefill, same as any other
     // system-message change — rare enough not to matter.
-    let mut messages = vec![serde_json::json!({"role": "system", "content": persona(face)})];
+    let mut messages =
+        vec![serde_json::json!({"role": "system", "content": persona(face, cfg.act)})];
     let last = history.len().saturating_sub(1);
     for (i, (role, content)) in history.iter().enumerate() {
         let content = if attach_spread && i == last && *role == "user" {
@@ -720,8 +837,8 @@ fn tools_json(cfg: &WizardCfg) -> serde_json::Value {
         "Search the web and return titles, URLs and snippets. Use for current, niche or \
          uncertain facts."
     };
-    serde_json::json!([
-        {
+    let mut tools = vec![
+        serde_json::json!({
             "type": "function",
             "function": {
                 "name": "read_spread",
@@ -730,8 +847,8 @@ fn tools_json(cfg: &WizardCfg) -> serde_json::Value {
                                 worth reading. The only way to learn anything about the session.",
                 "parameters": {"type": "object", "properties": {}},
             },
-        },
-        {
+        }),
+        serde_json::json!({
             "type": "function",
             "function": {
                 "name": "web_search",
@@ -744,8 +861,8 @@ fn tools_json(cfg: &WizardCfg) -> serde_json::Value {
                     "required": ["query"],
                 },
             },
-        },
-        {
+        }),
+        serde_json::json!({
             "type": "function",
             "function": {
                 "name": "fetch_url",
@@ -759,8 +876,50 @@ fn tools_json(cfg: &WizardCfg) -> serde_json::Value {
                     "required": ["url"],
                 },
             },
-        },
-    ])
+        }),
+    ];
+    if cfg.act {
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "prompt_pane",
+                "description": "Submit a full text prompt to a card's agent, exactly as if Des \
+                                typed it and pressed Enter. Always shows Des a consent chip first \
+                                — it never happens without his approval, no matter how sure you \
+                                are. Only reach for this when Des has asked you to act; never on \
+                                your own initiative just because a card looks like it wants \
+                                something.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pane": {"type": "integer", "description": "Card number, as shown in the spread."},
+                        "text": {"type": "string", "description": "The exact text to submit."}
+                    },
+                    "required": ["pane", "text"],
+                },
+            },
+        }));
+        tools.push(serde_json::json!({
+            "type": "function",
+            "function": {
+                "name": "send_keys",
+                "description": "Send raw keystrokes to a card — answer a y/n prompt, dismiss a \
+                                dialog, interrupt with Esc. Space-separated tokens: literal \
+                                characters, or names like Esc, Enter, Tab, Backspace, Ctrl+<letter>. \
+                                Always shows Des a consent chip first — it never happens without \
+                                his approval. Only reach for this when Des has asked you to act.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "pane": {"type": "integer", "description": "Card number, as shown in the spread."},
+                        "keys": {"type": "string", "description": "Space-separated key tokens, e.g. \"y Enter\" or \"Esc\"."}
+                    },
+                    "required": ["pane", "keys"],
+                },
+            },
+        }));
+    }
+    serde_json::Value::Array(tools)
 }
 
 /// Run one tool call and return the text the model gets back. Tool failures
@@ -803,7 +962,47 @@ fn run_tool(
                 Err(e) => format!("fetch failed: {e}"),
             }
         }
+        "prompt_pane" if cfg.act => {
+            let Some(pane) = args["pane"].as_u64().map(|n| n as usize) else {
+                return "error: missing or invalid 'pane'".into();
+            };
+            let text = args["text"].as_str().unwrap_or("").to_string();
+            if text.is_empty() {
+                return "error: empty text".into();
+            }
+            request_cast(CastAction::PromptPane { pane, text }, notify)
+        }
+        "send_keys" if cfg.act => {
+            let Some(pane) = args["pane"].as_u64().map(|n| n as usize) else {
+                return "error: missing or invalid 'pane'".into();
+            };
+            let keys = args["keys"].as_str().unwrap_or("").to_string();
+            if keys.is_empty() {
+                return "error: empty keys".into();
+            }
+            request_cast(CastAction::SendKeys { pane, keys }, notify)
+        }
+        // Only reachable if a stray call names one of these while `act` is
+        // off — they're not offered in `tools_json` then, but a leaked or
+        // hallucinated call could still show up here.
+        "prompt_pane" | "send_keys" => "error: acting on cards is turned off".into(),
         other => format!("error: no such tool '{other}'"),
+    }
+}
+
+/// Show the consent chip and block until Des answers — advisory means
+/// advisory: no timeout, no auto-accept. The client executes the action
+/// (it owns the socket and the card-number → pane-id mapping) and reports
+/// back what it did.
+fn request_cast(action: CastAction, notify: &dyn Fn(WizardEvent)) -> String {
+    let desc = action.describe();
+    let (tx, rx) = std::sync::mpsc::channel::<CastOutcome>();
+    notify(WizardEvent::Cast { desc: desc.clone(), action, decision: tx });
+    match rx.recv() {
+        Ok(CastOutcome::Sent) => format!("Des approved it, and it has been sent: {desc}"),
+        Ok(CastOutcome::Declined) => format!("Des declined: {desc}"),
+        Ok(CastOutcome::Failed(e)) => format!("Des approved it, but it failed: {e}"),
+        Err(_) => "error: no answer came back".into(),
     }
 }
 
@@ -1360,6 +1559,114 @@ fn strip_html(html: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Round-trips through the real state dir under a unique session name
+    /// so it can't collide with an actual zodiac session — exercises the
+    /// exact path production code takes rather than a mocked one.
+    #[test]
+    fn history_round_trips_through_disk() {
+        let session = "wizard-persist-roundtrip-test";
+        let _ = std::fs::remove_file(history_path(session));
+        assert!(load_history(session).is_empty(), "started with leftover state");
+
+        let history: Vec<(&'static str, String)> =
+            vec![("user", "hello".into()), ("assistant", "hi there".into())];
+        save_history(session, &history);
+        let loaded = load_history(session);
+        assert_eq!(loaded, history);
+
+        let _ = std::fs::remove_dir_all(history_path(session).parent().unwrap());
+    }
+
+    #[test]
+    fn missing_history_file_loads_empty_not_error() {
+        let session = "wizard-persist-missing-test";
+        let _ = std::fs::remove_dir_all(history_path(session).parent().unwrap());
+        assert_eq!(load_history(session), Vec::new());
+    }
+
+    #[test]
+    fn corrupt_history_file_loads_empty_not_panic() {
+        let session = "wizard-persist-corrupt-test";
+        let path = history_path(session);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, b"not json").unwrap();
+        assert_eq!(load_history(session), Vec::new());
+        let _ = std::fs::remove_dir_all(path.parent().unwrap());
+    }
+
+    #[test]
+    fn persona_denies_hands_when_act_is_off() {
+        for face in ["wizard", "oracle", "hal"] {
+            let p = persona(face, false);
+            assert!(
+                p.contains("no hands") || p.contains("cannot cast spells"),
+                "{face} persona should still deny acting when act=false: {p}"
+            );
+            assert!(!p.contains("prompt_pane"), "{face} persona leaked act-on text: {p}");
+        }
+    }
+
+    #[test]
+    fn persona_grants_hands_when_act_is_on() {
+        // Also guards against a typo in the `disabled` substring silently
+        // no-opping the replace and leaving the "I have no hands" claim in
+        // place even though the tools are now offered.
+        for face in ["wizard", "oracle", "hal"] {
+            let p = persona(face, true);
+            assert!(p.contains("prompt_pane"), "{face} persona didn't grant hands: {p}");
+            assert!(
+                !p.contains("cannot cast spells") && !p.contains("no hands"),
+                "{face} persona still denies acting even with act=true: {p}"
+            );
+        }
+    }
+
+    #[test]
+    fn write_tools_only_offered_when_act_is_on() {
+        let mut cfg = WizardCfg::from_settings(&Settings::load());
+        cfg.act = false;
+        let names: Vec<String> = tools_json(&cfg)
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(!names.contains(&"prompt_pane".to_string()));
+        assert!(!names.contains(&"send_keys".to_string()));
+
+        cfg.act = true;
+        let names: Vec<String> = tools_json(&cfg)
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|t| t["function"]["name"].as_str().unwrap().to_string())
+            .collect();
+        assert!(names.contains(&"prompt_pane".to_string()));
+        assert!(names.contains(&"send_keys".to_string()));
+    }
+
+    #[test]
+    fn cast_action_describe_matches_the_plan_format() {
+        let a = CastAction::SendKeys { pane: 3, keys: "y".into() };
+        assert_eq!(a.describe(), "send_keys(3, \"y\")");
+        let a = CastAction::PromptPane { pane: 2, text: "yes please".into() };
+        assert_eq!(a.describe(), "prompt_pane(2, \"yes please\")");
+    }
+
+    #[test]
+    fn write_tool_call_refused_when_act_is_off() {
+        let mut cfg = WizardCfg::from_settings(&Settings::load());
+        cfg.act = false;
+        let call = ToolCall {
+            id: "1".into(),
+            name: "send_keys".into(),
+            args: r#"{"pane":1,"keys":"y"}"#.into(),
+        };
+        let mut asked = Vec::new();
+        let result = run_tool(&cfg, &call, "session 'x': 0 cards", &mut asked, &|_| {});
+        assert!(result.contains("turned off"), "{result}");
+    }
+
     #[test]
     fn strips_tags_scripts_and_entities() {
         let html = "<html><head><title>x</title></head><body>\
@@ -1631,6 +1938,59 @@ mod tests {
             assert!(!acc.trim().is_empty(), "{label}: empty answer");
             assert!(!acc.contains("<tool_call>"), "{label}: leaked tool syntax");
         }
+    }
+
+    /// With `act` on and Des asking for it outright, the model should
+    /// reach for `send_keys` rather than just describing what to type —
+    /// and the consent round-trip (Cast event out, outcome back in) has
+    /// to actually unblock the tool call and let the answer complete.
+    #[test]
+    #[ignore]
+    fn live_send_keys_asks_for_consent_and_completes() {
+        let mut cfg = WizardCfg::from_settings(&Settings::load());
+        cfg.act = true;
+        let digest = "session 'lab': 1 cards\n\
+                      card 1: 'api' — claude 1.2 — needs_input — up 4m — ~/src/api\n\
+                      \n--- card 1 'api' — screen ---\n\
+                      Bash(rm -rf ./build)\n  Do you want to proceed? (y/n)\n";
+        let q = "Card 1 is waiting on that y/n prompt and I want you to answer it yourself: \
+                 send 'y' to card 1 with send_keys. I'm explicitly asking you to act, right now.";
+        let mut acc = String::new();
+        let history = vec![("user", q.to_string())];
+        let no_cancel = std::sync::atomic::AtomicBool::new(false);
+        let cast_seen: std::cell::RefCell<Option<(String, CastAction)>> =
+            std::cell::RefCell::new(None);
+        let out = chat_stream(
+            &cfg,
+            "wizard",
+            &history,
+            digest,
+            true,
+            &no_cancel,
+            &|ev| match ev {
+                WizardEvent::Note(n) => println!("  note: {n}"),
+                WizardEvent::Cast { desc, action, decision } => {
+                    println!("  cast requested: {desc}");
+                    *cast_seen.borrow_mut() = Some((desc, action));
+                    // Simulate Des pressing 'y' — the client would execute
+                    // it and report back; here we just report success.
+                    let _ = decision.send(CastOutcome::Sent);
+                }
+                _ => {}
+            },
+            &mut acc,
+        );
+        assert!(out.is_ok(), "request failed");
+        println!("answer: {acc}\n");
+        let (desc, action) = cast_seen.into_inner().expect("model never called a write-tool");
+        match action {
+            CastAction::SendKeys { pane, keys } => {
+                assert_eq!(pane, 1, "wrong card: {desc}");
+                assert!(keys.contains('y'), "keys didn't include y: {desc}");
+            }
+            CastAction::PromptPane { .. } => panic!("expected send_keys, got prompt_pane: {desc}"),
+        }
+        assert!(!acc.trim().is_empty(), "no final answer after the cast resolved");
     }
 
     /// A question greedy enough to spend every tool round must still come

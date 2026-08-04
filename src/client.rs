@@ -70,6 +70,8 @@ const WIZ_USER: u8 = 0;
 const WIZ_WIZARD: u8 = 1;
 const WIZ_NOTE: u8 = 2;
 const WIZ_ERROR: u8 = 3;
+/// A pending prompt_pane/send_keys consent chip — "▸ cast: ... [y/n]".
+const WIZ_CAST: u8 = 4;
 
 const CURSOR_TYPES: &[&str] =
     &["auto", "block", "underline", "bar", "orb", "circle", "aleph"];
@@ -281,6 +283,9 @@ enum Mode {
     Normal,
     Rename { buf: String },
     Settings,
+    /// Fuzzy-find a pane by name (Alt+/); `jump_sel` on `App` tracks which
+    /// of the live-filtered matches is highlighted.
+    Jump { buf: String },
 }
 
 /// A mouse selection in the pane area, in pane-relative (row, col) cells.
@@ -430,6 +435,8 @@ struct App {
     copied_at: Option<Instant>,
     settings: Settings,
     settings_row: usize,
+    /// Highlighted row among `Mode::Jump`'s live-filtered matches.
+    jump_sel: usize,
     resized_at: Option<Instant>,
     home: bool,
     home_sel: usize,
@@ -467,6 +474,9 @@ struct App {
     wiz_tx: Option<Sender<crate::wizard::WizardCmd>>,
     /// Set to cut the in-flight stream short — Esc while streaming.
     wiz_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// A prompt_pane/send_keys call awaiting a y/n — the worker is blocked
+    /// on the sender's paired receiver until one arrives.
+    wiz_cast: Option<(crate::wizard::CastAction, std::sync::mpsc::Sender<crate::wizard::CastOutcome>)>,
     wiz_status: Option<crate::wizard::WizardStatus>,
     /// Transcript: (role, text) — see the WIZ_* role constants.
     wiz_log: Vec<(u8, String)>,
@@ -514,6 +524,7 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         let txw = tx.clone();
         let (tx, cancel) = crate::wizard::spawn(
             crate::wizard::WizardCfg::from_settings(&settings),
+            session.to_string(),
             move |ev| {
                 let _ = txw.send(AppEvent::Wizard(ev));
             },
@@ -557,6 +568,7 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         copied_at: None,
         settings,
         settings_row: 0,
+        jump_sel: 0,
         resized_at: None,
         home: true, // always open to the home page
         home_sel: 0,
@@ -579,6 +591,7 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         orb_placed: None,
         wiz_tx,
         wiz_cancel,
+        wiz_cast: None,
         wiz_status: None,
         wiz_log: Vec::new(),
         wiz_stream: String::new(),
@@ -756,6 +769,23 @@ impl App {
             let id = p.id;
             self.send(T_FOCUS, id, &[]);
         }
+    }
+
+    /// Panes whose name fuzzy-matches `pattern`, best match first, as
+    /// (pane index, score). An empty pattern matches nothing — Jump is
+    /// for typing a few characters, not browsing the full list.
+    fn jump_matches(&self, pattern: &str) -> Vec<(usize, i32)> {
+        if pattern.is_empty() {
+            return Vec::new();
+        }
+        let mut out: Vec<(usize, i32)> = self
+            .panes
+            .iter()
+            .enumerate()
+            .filter_map(|(i, p)| fuzzy_score(&p.name, pattern).map(|s| (i, s)))
+            .collect();
+        out.sort_by(|a, b| b.1.cmp(&a.1));
+        out
     }
 
     fn handle(&mut self, ev: AppEvent) {
@@ -1176,6 +1206,53 @@ impl App {
             return;
         }
 
+        if matches!(self.mode, Mode::Jump { .. }) {
+            // Worked on an owned copy of the buffer: fuzzy-matching needs
+            // `&self` (for `self.panes`), which a `&mut self.mode` borrow
+            // of `buf` in place would block.
+            let mut buf = match &self.mode {
+                Mode::Jump { buf } => buf.clone(),
+                _ => unreachable!(),
+            };
+            match key.code {
+                KeyCode::Esc => {
+                    self.mode = Mode::Normal;
+                    return;
+                }
+                KeyCode::Enter => {
+                    let matches = self.jump_matches(&buf);
+                    if let Some(&(idx, _)) = matches.get(self.jump_sel) {
+                        self.mode = Mode::Normal;
+                        if self.home {
+                            self.leave_home();
+                        }
+                        self.focus(idx);
+                    }
+                    return;
+                }
+                KeyCode::Backspace => {
+                    buf.pop();
+                    self.jump_sel = 0;
+                }
+                KeyCode::Up => self.jump_sel = self.jump_sel.saturating_sub(1),
+                KeyCode::Down => {
+                    let n = self.jump_matches(&buf).len();
+                    if self.jump_sel + 1 < n {
+                        self.jump_sel += 1;
+                    }
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if buf.chars().count() < 40 {
+                        buf.push(c);
+                    }
+                    self.jump_sel = 0;
+                }
+                _ => {}
+            }
+            self.mode = Mode::Jump { buf };
+            return;
+        }
+
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -1215,6 +1292,16 @@ impl App {
                 } else {
                     self.wiz_focus = !self.wiz_focus;
                 }
+            }
+            return;
+        }
+        // A pending cast chip takes every key as y/n until it's answered —
+        // no typing past it, no scrolling around it.
+        if self.home && self.wiz_focus && !alt && self.wiz_cast.is_some() {
+            match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.wiz_decide(true),
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => self.wiz_decide(false),
+                _ => {}
             }
             return;
         }
@@ -1304,6 +1391,11 @@ impl App {
                             buf: p.name.clone(),
                         };
                     }
+                    return;
+                }
+                KeyCode::Char('/') => {
+                    self.mode = Mode::Jump { buf: String::new() };
+                    self.jump_sel = 0;
                     return;
                 }
                 KeyCode::Char(c @ '1'..='9') => {
@@ -1533,6 +1625,16 @@ impl App {
                 self.wiz_streaming = false;
                 self.wiz_note(WIZ_ERROR, t);
             }
+            E::Restored(turns) => {
+                for (role, text) in turns {
+                    let wiz_role = if role == "user" { WIZ_USER } else { WIZ_WIZARD };
+                    self.wiz_note(wiz_role, text);
+                }
+            }
+            E::Cast { desc, action, decision } => {
+                self.wiz_cast = Some((action, decision));
+                self.wiz_note(WIZ_CAST, format!("▸ cast: {desc}  [y/n]"));
+            }
         }
     }
 
@@ -1655,6 +1757,55 @@ impl App {
             s.push('\n');
         }
         s
+    }
+
+    /// Execute (or decline) a pending cast — the only place the Wizard's
+    /// prompt_pane/send_keys can actually reach a pane's PTY. `action`
+    /// names a card by the 1-based number the model saw in the spread;
+    /// resolved to a pane id here, since the worker has no socket of its
+    /// own to send `T_INPUT` with.
+    fn wiz_decide(&mut self, yes: bool) {
+        use crate::wizard::{CastAction, CastOutcome};
+        let Some((action, decision)) = self.wiz_cast.take() else {
+            return;
+        };
+        let outcome = if !yes {
+            self.wiz_note(WIZ_NOTE, "cast declined".to_string());
+            CastOutcome::Declined
+        } else {
+            match &action {
+                CastAction::PromptPane { pane, text } => match self.card_pane(*pane) {
+                    Some((id, _)) => {
+                        self.send(T_INPUT, id, text.as_bytes());
+                        // Same pacing `zodiac prompt` uses: give the pane's
+                        // program a beat to register the pasted text as one
+                        // block before the Enter that submits it.
+                        std::thread::sleep(std::time::Duration::from_millis(200));
+                        self.send(T_INPUT, id, b"\r");
+                        self.wiz_note(WIZ_NOTE, format!("cast: sent to card {pane}"));
+                        CastOutcome::Sent
+                    }
+                    None => {
+                        let msg = format!("no such card {pane}");
+                        self.wiz_note(WIZ_ERROR, format!("cast failed: {msg}"));
+                        CastOutcome::Failed(msg)
+                    }
+                },
+                CastAction::SendKeys { pane, keys } => match self.card_pane(*pane) {
+                    Some((id, _)) => {
+                        self.send(T_INPUT, id, &decode_keys(keys));
+                        self.wiz_note(WIZ_NOTE, format!("cast: sent to card {pane}"));
+                        CastOutcome::Sent
+                    }
+                    None => {
+                        let msg = format!("no such card {pane}");
+                        self.wiz_note(WIZ_ERROR, format!("cast failed: {msg}"));
+                        CastOutcome::Failed(msg)
+                    }
+                },
+            }
+        };
+        let _ = decision.send(outcome);
     }
 
     fn wizard_submit(&mut self) {
@@ -2237,6 +2388,9 @@ impl App {
             if let Mode::Settings = self.mode {
                 self.draw_settings(f, area);
             }
+            if matches!(self.mode, Mode::Jump { .. }) {
+                self.draw_jump(f, area);
+            }
             return;
         }
 
@@ -2320,6 +2474,60 @@ impl App {
         if let Mode::Settings = self.mode {
             self.draw_settings(f, area);
         }
+        if matches!(self.mode, Mode::Jump { .. }) {
+            self.draw_jump(f, area);
+        }
+    }
+
+    /// Floating overlay for `Mode::Jump`: an input line plus the live
+    /// fuzzy-filtered pane list, best match first, current pick
+    /// highlighted. Sits in the upper third so it doesn't cover whatever
+    /// the pane you're about to jump to is showing.
+    fn draw_jump(&self, f: &mut Frame, area: Rect) {
+        let Mode::Jump { buf } = &self.mode else { return };
+        let matches = self.jump_matches(buf);
+        let w = 50.min(area.width.saturating_sub(4)).max(20);
+        let list_h = matches.len().min(10) as u16;
+        let h = (list_h + 3).min(area.height.saturating_sub(2));
+        if area.width < 6 || area.height < 4 {
+            return;
+        }
+        let rect = Rect {
+            x: (area.width.saturating_sub(w)) / 2,
+            y: (area.height.saturating_sub(h)) / 3,
+            width: w,
+            height: h,
+        };
+        f.render_widget(Clear, rect);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" jump to pane (Esc to cancel) ")
+            .border_style(Style::default().fg(Color::Cyan));
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+        let mut lines = vec![Line::from(vec![
+            Span::styled("🔎 ", Style::default().fg(Color::Cyan)),
+            Span::styled(buf.clone(), Style::default().fg(Color::Yellow)),
+            Span::styled("▏", Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK)),
+        ])];
+        if matches.is_empty() && !buf.is_empty() {
+            lines.push(Line::from(Span::styled(
+                "no matches",
+                Style::default().fg(Color::DarkGray).italic(),
+            )));
+        }
+        let rows = (inner.height as usize).saturating_sub(1);
+        for (i, &(idx, _)) in matches.iter().take(rows).enumerate() {
+            let p = &self.panes[idx];
+            let style = if i == self.jump_sel {
+                Style::default().fg(Color::Black).bg(Color::Cyan).bold()
+            } else {
+                Style::default().fg(Color::Gray)
+            };
+            let name = truncate(&p.name, inner.width.saturating_sub(4) as usize);
+            lines.push(Line::from(Span::styled(format!(" {:>2} {name}", idx + 1), style)));
+        }
+        f.render_widget(Paragraph::new(lines), inner);
     }
 
     fn draw_settings(&self, f: &mut Frame, area: Rect) {
@@ -3353,6 +3561,15 @@ impl App {
                         lines.push(
                             Line::from(Span::styled(l, st)).alignment(Alignment::Center),
                         );
+                    }
+                }
+                WIZ_CAST => {
+                    // Left-aligned and bold, unlike the centered italic
+                    // notes — this is the one line in the transcript that
+                    // wants a keypress, not just a read.
+                    let st = Style::default().fg(Color::Indexed(220)).bold();
+                    for l in wrap_text(text, wrapw) {
+                        lines.push(Line::from(Span::styled(l, st)));
                     }
                 }
                 r => {
@@ -4651,6 +4868,60 @@ fn wrap_md_runs(runs: &[(String, MdStyle)], width: usize) -> Vec<Vec<(String, Md
     lines
 }
 
+/// Decode `send_keys`' space-separated token spec into raw bytes for
+/// `T_INPUT`: named keys (Esc, Enter, Tab, Backspace, Ctrl+<letter>), or
+/// anything else sent as its literal UTF-8 bytes.
+fn decode_keys(spec: &str) -> Vec<u8> {
+    let mut out = Vec::new();
+    for tok in spec.split_whitespace() {
+        match tok {
+            "Esc" | "esc" | "Escape" | "escape" => out.push(0x1b),
+            "Enter" | "enter" | "Return" | "return" => out.push(b'\r'),
+            "Tab" | "tab" => out.push(b'\t'),
+            "Backspace" | "backspace" => out.push(0x7f),
+            t if t.len() > 5 && t[..5].eq_ignore_ascii_case("ctrl+") => {
+                if let Some(c) = t[5..].chars().next() {
+                    let up = c.to_ascii_uppercase();
+                    if up.is_ascii_uppercase() {
+                        out.push(up as u8 - 0x40);
+                    } else {
+                        out.extend(tok.as_bytes());
+                    }
+                }
+            }
+            other => out.extend(other.as_bytes()),
+        }
+    }
+    out
+}
+
+/// Case-insensitive subsequence fuzzy match: every char of `pattern` must
+/// appear in `text` in order, not necessarily contiguous. `None` when it
+/// doesn't match at all. Score rewards runs of consecutive matches and
+/// matches right after a word boundary, so "zd" ranks "zodiac dev" above a
+/// buried match deep in an unrelated word; shorter names are favored
+/// slightly over longer ones of the same match quality.
+fn fuzzy_score(text: &str, pattern: &str) -> Option<i32> {
+    if pattern.is_empty() {
+        return None;
+    }
+    let tchars: Vec<char> = text.to_lowercase().chars().collect();
+    let pchars: Vec<char> = pattern.to_lowercase().chars().collect();
+    let mut ti = 0;
+    let mut score = 0i32;
+    let mut last_matched: Option<usize> = None;
+    for &pc in &pchars {
+        let idx = (ti..tchars.len()).find(|&j| tchars[j] == pc)?;
+        let boundary = idx == 0 || matches!(tchars[idx - 1], '-' | '_' | ' ' | '/' | '.');
+        let consecutive = last_matched == Some(idx.wrapping_sub(1));
+        score += 1 + if boundary { 3 } else { 0 } + if consecutive { 2 } else { 0 };
+        last_matched = Some(idx);
+        ti = idx + 1;
+    }
+    score -= tchars.len() as i32 / 8;
+    Some(score)
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
@@ -4734,4 +5005,90 @@ mod md_tests {
         assert_eq!(lines[0].len(), 1, "same-style words should merge into one span");
         assert_eq!(lines[0][0].0, "plain plain plain");
     }
+}
+
+#[cfg(test)]
+mod jump_tests {
+    use super::*;
+
+    #[test]
+    fn matches_a_subsequence_in_order() {
+        assert!(fuzzy_score("zodiac dev", "zdv").is_some());
+        assert!(fuzzy_score("zodiac dev", "vdz").is_none(), "out-of-order must not match");
+    }
+
+    #[test]
+    fn no_match_when_a_char_is_missing() {
+        assert!(fuzzy_score("bear dev", "bearx").is_none());
+    }
+
+    #[test]
+    fn empty_pattern_never_matches() {
+        assert!(fuzzy_score("anything", "").is_none());
+    }
+
+    #[test]
+    fn word_boundary_start_outranks_a_buried_match() {
+        // "dev" starts "dev tools" at a boundary; in "bear dev" it's also
+        // right after a boundary (the space) — but a match starting at
+        // the very front of the string should still win a tie-break.
+        let front = fuzzy_score("dev tools", "dev").unwrap();
+        let buried = fuzzy_score("xxdev", "dev").unwrap();
+        assert!(front > buried, "front={front} buried={buried}");
+    }
+
+    #[test]
+    fn consecutive_run_outscores_scattered_hits() {
+        // Scattered here deliberately avoids sitting the hits right after
+        // word-boundary characters too, so this isolates the consecutive
+        // bonus rather than confounding it with boundary bonuses.
+        let consecutive = fuzzy_score("bear", "bea").unwrap();
+        let scattered = fuzzy_score("bxexaxr", "bea").unwrap();
+        assert!(
+            consecutive > scattered,
+            "consecutive={consecutive} scattered={scattered}"
+        );
+    }
+
+    #[test]
+    fn case_insensitive() {
+        assert_eq!(fuzzy_score("Zodiac", "ZOD"), fuzzy_score("zodiac", "zod"));
+    }
+}
+
+#[cfg(test)]
+mod cast_tests {
+    use super::*;
+
+    #[test]
+    fn named_keys_decode_to_their_control_bytes() {
+        assert_eq!(decode_keys("Esc"), vec![0x1b]);
+        assert_eq!(decode_keys("Enter"), vec![b'\r']);
+        assert_eq!(decode_keys("Tab"), vec![b'\t']);
+        assert_eq!(decode_keys("Backspace"), vec![0x7f]);
+    }
+
+    #[test]
+    fn ctrl_combo_decodes_to_a_control_byte() {
+        // Ctrl+U is byte 0x15 — matches the terminal convention of
+        // masking the letter down to its control-code range.
+        assert_eq!(decode_keys("Ctrl+U"), vec![0x15]);
+        assert_eq!(decode_keys("Ctrl+u"), vec![0x15], "case shouldn't matter");
+    }
+
+    #[test]
+    fn literal_text_passes_through_as_utf8() {
+        assert_eq!(decode_keys("y"), b"y".to_vec());
+    }
+
+    #[test]
+    fn multiple_tokens_concatenate_in_order() {
+        assert_eq!(decode_keys("Ctrl+U y Enter"), {
+            let mut v = vec![0x15];
+            v.extend(b"y");
+            v.push(b'\r');
+            v
+        });
+    }
+
 }

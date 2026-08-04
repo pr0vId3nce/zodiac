@@ -122,6 +122,12 @@ pub struct Settings {
     /// CPU-only model, independent of the wizard chat panel above.
     #[serde(default = "default_true")]
     pub wizard_watch: bool,
+    /// Lets the interactive Wizard chat panel offer `prompt_pane`/
+    /// `send_keys` — the only way it can ever touch a pane. Off by
+    /// default: even enabled, every use still shows a consent chip in the
+    /// transcript and waits on a keypress, no timeout, no auto-accept.
+    #[serde(default)]
+    pub wizard_act: bool,
 }
 
 /// Audio files with these extensions in the ringtones dir are offered as

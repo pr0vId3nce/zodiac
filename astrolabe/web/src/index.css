@@ -1,0 +1,186 @@
+@import "tailwindcss";
+@import "@xterm/xterm/css/xterm.css";
+
+@theme {
+  --color-sky-deep: #0b1020;
+  --color-sky-mid: #131a33;
+  --color-card: #141b36;
+  --color-card-edge: #242e55;
+  --color-gold: #d4af37;
+  --color-gold-soft: #f5e6b8;
+  --font-mono: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
+
+  /* Type scale — named so the same handful of sizes gets reused everywhere
+     instead of arbitrary Tailwind values accumulating per-component. */
+  --text-title: 20px;
+  --text-title--line-height: 1.3;
+  --text-body: 17px;
+  --text-body--line-height: 1.4;
+  --text-subhead: 13px;
+  --text-subhead--line-height: 1.35;
+  --text-caption: 11px;
+  --text-caption--line-height: 1.3;
+
+  /* Apple's own sheet-presentation curve — a spring settle, not a generic
+     ease. Named because it's specifically the "native sheet" motion, reused
+     for the bottom sheet and the screen-transition fallback alike. */
+  --ease-ios-sheet: cubic-bezier(0.32, 0.72, 0, 1);
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  background: var(--color-sky-deep);
+  color: #e6e8f0;
+  font-family: -apple-system, BlinkMacSystemFont, ui-sans-serif, system-ui, sans-serif;
+  overscroll-behavior: none;
+}
+
+/* shimmer for working panes, Claude Code style */
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+.shimmer {
+  background: linear-gradient(
+    90deg,
+    rgba(230, 232, 240, 0.55) 40%,
+    #ffffff 50%,
+    rgba(230, 232, 240, 0.55) 60%
+  );
+  background-size: 200% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: shimmer 2.2s linear infinite;
+}
+
+@keyframes pulse-red {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(248, 113, 113, 0.55);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(248, 113, 113, 0);
+  }
+}
+.pulse-red {
+  animation: pulse-red 1.6s ease-out infinite;
+}
+
+/* Haptic-feel fallback (native.ts) — a quick overshoot bounce standing in
+   for a Taptic Engine impulse iOS Safari can't actually trigger. Reuses
+   the same press language as the existing active:scale-[0.97]. */
+@keyframes haptic-pulse {
+  0% {
+    transform: scale(1);
+  }
+  40% {
+    transform: scale(0.95);
+  }
+  70% {
+    transform: scale(1.03);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+.haptic-pulse {
+  animation: haptic-pulse 180ms ease-out;
+}
+
+.xterm .xterm-viewport {
+  background-color: transparent !important;
+}
+
+/* read-mode search hits */
+.astrolabe-mark {
+  background: rgba(212, 175, 55, 0.35);
+  color: inherit;
+  border-radius: 2px;
+}
+.astrolabe-mark-active {
+  background: #d4af37;
+  color: #0b1020;
+}
+
+/* keep the composer above the iOS home indicator */
+.safe-bottom {
+  padding-bottom: max(env(safe-area-inset-bottom), 0.5rem);
+}
+
+/* black-translucent (index.html) draws content under the status bar —
+   push headers down below it instead of letting the clock overlap them. */
+.safe-top {
+  padding-top: max(env(safe-area-inset-top), 0.5rem);
+}
+
+/* Herd ⇄ Pane transitions — View Transitions API path (Nav.tsx skips this
+   entirely on browsers without support, using a manual transform slide
+   instead). One name shared by both screens is safe here: the two are
+   never simultaneously in the DOM at the moment startViewTransition()
+   actually runs (that only happens on the single-screen "idle" render). */
+[data-nav-screen] {
+  view-transition-name: screen;
+}
+::view-transition-old(screen),
+::view-transition-new(screen) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+::view-transition-old(screen) {
+  z-index: 1;
+}
+::view-transition-new(screen) {
+  z-index: 2;
+}
+html[data-nav-direction="forward"] ::view-transition-new(screen) {
+  animation: astrolabe-slide-in-right 300ms var(--ease-ios-sheet);
+}
+html[data-nav-direction="forward"] ::view-transition-old(screen) {
+  animation: astrolabe-slide-out-left 300ms var(--ease-ios-sheet);
+}
+html[data-nav-direction="back"] ::view-transition-new(screen) {
+  animation: astrolabe-slide-in-left 300ms var(--ease-ios-sheet);
+}
+html[data-nav-direction="back"] ::view-transition-old(screen) {
+  animation: astrolabe-slide-out-right 300ms var(--ease-ios-sheet);
+}
+@keyframes astrolabe-slide-in-right {
+  from {
+    transform: translateX(100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@keyframes astrolabe-slide-out-left {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(-100%);
+  }
+}
+@keyframes astrolabe-slide-in-left {
+  from {
+    transform: translateX(-100%);
+  }
+  to {
+    transform: translateX(0);
+  }
+}
+@keyframes astrolabe-slide-out-right {
+  from {
+    transform: translateX(0);
+  }
+  to {
+    transform: translateX(100%);
+  }
+}

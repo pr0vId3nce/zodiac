@@ -217,15 +217,15 @@ needs_input,idle` is the building block for "tell me when the agent is
 done" scripting; agents can drive other agents with
 `zodiac prompt`/`zodiac read`.
 
-## 🔭 scry (phone web UI)
+## 🔭 astrolabe (phone web UI)
 
-`scry/` holds a companion web UI for your phone, served over Tailscale: a
-herd view of every pane's status (needs-input panes pulse at the top), a
+`astrolabe/` holds a companion web UI for your phone, served over Tailscale:
+a herd view of every pane's status (needs-input panes pulse at the top), a
 colored live terminal mirror per pane (searchable scrollback), a
 slash-command palette, a special-keys pad, and a plain reply box your
 phone's voice dictation works in. It rides a read-only observer mode in the
 server (`T_WATCH`): observers get state + replay + live output without
-disturbing the attached UI. See `scry/README.md`.
+disturbing the attached UI. See `astrolabe/README.md`.
 
 ## ⚙️ The grimoire (settings)
 

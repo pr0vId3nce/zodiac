@@ -1,0 +1,10 @@
+node_modules/
+web/dist/
+web/dist-ssr/
+*.tsbuildinfo
+*.log
+.DS_Store
+
+# xcodegen-generated, not source
+ios/*.xcodeproj/
+ios/DerivedData/

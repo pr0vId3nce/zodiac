@@ -1,0 +1,41 @@
+# XcodeGen manifest — run `xcodegen generate` on the Mac, then open Astrolabe.xcodeproj.
+name: Astrolabe
+options:
+  bundleIdPrefix: dev.d3s
+  deploymentTarget:
+    iOS: "17.0"
+targets:
+  Astrolabe:
+    type: application
+    platform: iOS
+    sources:
+      - path: Sources
+      - path: Resources
+        buildPhase: resources
+    info:
+      path: Info.plist
+      properties:
+        CFBundleDisplayName: Astrolabe
+        CFBundleShortVersionString: "1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        ITSAppUsesNonExemptEncryption: false
+        # The bridge is plain http on a tailscale IP; ATS exceptions can't
+        # target raw IPs, so allow arbitrary loads (tailnet-only anyway).
+        NSAppTransportSecurity:
+          NSAllowsArbitraryLoads: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+          - UIInterfaceOrientationLandscapeLeft
+          - UIInterfaceOrientationLandscapeRight
+    entitlements:
+      path: Astrolabe.entitlements
+      properties:
+        # dev-signed builds use the APNs sandbox → ASTROLABE_APNS_ENV=sandbox
+        # on the bridge. TestFlight/App Store builds flip to production.
+        aps-environment: development
+    settings:
+      base:
+        CODE_SIGN_STYLE: Automatic
+        TARGETED_DEVICE_FAMILY: "1"
+        # DEVELOPMENT_TEAM: XXXXXXXXXX   # or pick your team in Xcode's Signing pane

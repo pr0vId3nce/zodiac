@@ -143,8 +143,8 @@ pub struct PaneState {
 pub struct SessionState {
     pub session: String,
     pub attached: bool,
-    /// Pane grid size (all panes share it) — lets observers (the scry web
-    /// mirror) size their emulator to match the byte stream exactly.
+    /// Pane grid size (all panes share it) — lets observers (the astrolabe
+    /// web mirror) size their emulator to match the byte stream exactly.
     #[serde(default)]
     pub rows: u16,
     #[serde(default)]

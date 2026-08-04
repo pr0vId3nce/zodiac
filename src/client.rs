@@ -32,6 +32,10 @@ const IN_PROGRESS_WINDOW: Duration = Duration::from_secs(5);
 
 const WORKING_COLOR: Color = Color::Indexed(208);
 
+/// True black. `Color::Black` is ANSI index 0, which most terminal themes
+/// tint dark grey rather than #000 — this asks for the RGB value directly.
+const OLED_BLACK: Color = Color::Rgb(0, 0, 0);
+
 /// Output arriving this soon after a resize is a SIGWINCH repaint, not
 /// activity (matches the server-side squelch).
 const RESIZE_SQUELCH: Duration = Duration::from_millis(1200);
@@ -131,6 +135,28 @@ const SHIMMER_SPEEDS: &[(&str, u64)] = &[
     ("fast", 1200),
     ("zippy", 700),
 ];
+
+/// `h`/`s`/`v` each 0.0-1.0. Used for the Oracle's drifting hues, where
+/// picking a color by angle round a wheel reads far more naturally than
+/// lerping RGB channels straight-line (which crosses through grey/brown).
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> (u8, u8, u8) {
+    let i = (h * 6.0).floor();
+    let f = h * 6.0 - i;
+    let (p, q, t) = (v * (1.0 - s), v * (1.0 - f * s), v * (1.0 - (1.0 - f) * s));
+    let (r, g, b) = match (i as i64).rem_euclid(6) {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    };
+    (
+        (r * 255.0).round() as u8,
+        (g * 255.0).round() as u8,
+        (b * 255.0).round() as u8,
+    )
+}
 
 /// Resolve a color-setting value, falling back to the given default name.
 fn color_by_name(name: &str, default: &str) -> (&'static str, Color, (u8, u8, u8)) {
@@ -3190,10 +3216,19 @@ impl App {
             self.wiz_art_rect = Rect::default();
             return;
         }
+        let face = self.chat_face();
+        if face == "oracle" {
+            // The orb itself paints its own cells black; without this, the
+            // rest of the panel around and behind it — margins, transcript,
+            // input line — falls back to the terminal's own default
+            // background, which reads as grey next to true black. Rgb(0,0,0)
+            // rather than the named Black: that's ANSI color 0, which most
+            // terminal themes tint dark grey rather than true black.
+            f.render_widget(Block::default().style(Style::default().bg(OLED_BLACK)), inner);
+        }
         let mut y = inner.y;
         // Portrait zone — the wizard/HAL images are painted by
         // wizard_overlay; the Oracle is pure text and needs no kitty.
-        let face = self.chat_face();
         let art_h: u16 = if (self.kitty_on || face == "oracle") && inner.height >= 20 {
             9
         } else {
@@ -3768,13 +3803,16 @@ impl App {
     fn draw_oracle(&self, f: &mut Frame, rect: Rect) {
         use crate::wizard::WizardStatus as S;
         let t = self.anim_start.elapsed().as_millis() as f32 / 1000.0;
-        let ((br, bg, bb), (hr, hg, hb)): ((f32, f32, f32), (f32, f32, f32)) =
-            match self.wiz_status {
-                Some(S::Awake) => ((96.0, 62.0, 190.0), (140.0, 235.0, 255.0)),
-                Some(S::Waking) => ((150.0, 96.0, 40.0), (255.0, 226.0, 140.0)),
-                Some(S::Sleeping) => ((52.0, 52.0, 110.0), (110.0, 116.0, 190.0)),
-                _ => ((70.0, 70.0, 80.0), (128.0, 130.0, 140.0)),
-            };
+        // Hue arc + saturation the glass drifts across, per status — a
+        // range rather than two fixed points, so the fusion never settles
+        // on one color. Hues in turns (0.0-1.0): ~0.75 violet, ~0.52 cyan,
+        // ~0.08 amber, ~0.65 indigo.
+        let (hue_lo, hue_hi, sat_max): (f32, f32, f32) = match self.wiz_status {
+            Some(S::Awake) => (0.52, 0.80, 0.75),
+            Some(S::Waking) => (0.05, 0.14, 0.70),
+            Some(S::Sleeping) => (0.60, 0.70, 0.45),
+            _ => (0.60, 0.65, 0.12), // away/unknown: nearly monochrome
+        };
         let (cx, cy) = (rect.width as f32 / 2.0, rect.height as f32 / 2.0 - 0.1);
         let ry = rect.height as f32 * 0.48;
         let rx = ry * 2.05; // terminal cells are ~2:1
@@ -3787,7 +3825,7 @@ impl App {
                 let dy = (yy as f32 - cy) / ry;
                 let d = (dx * dx + dy * dy).sqrt();
                 if d > 1.0 {
-                    spans.push(Span::styled(" ", Style::default().bg(Color::Black)));
+                    spans.push(Span::styled(" ", Style::default().bg(OLED_BLACK)));
                     continue;
                 }
                 let ang = dy.atan2(dx);
@@ -3804,20 +3842,25 @@ impl App {
                 } else {
                     (ramp[((v * ramp.len() as f32) as usize).min(ramp.len() - 1)], v)
                 };
-                let col = Color::Rgb(
-                    (br + (hr - br) * boost).min(255.0) as u8,
-                    (bg + (hg - bg) * boost).min(255.0) as u8,
-                    (bb + (hb - bb) * boost).min(255.0) as u8,
-                );
+                // Hue rides the same brightness swirl but on its own drift,
+                // so color and light shift independently — a fusion of
+                // hues across the glass rather than one gradient.
+                let hue = hue_lo
+                    + (hue_hi - hue_lo) * boost
+                    + 0.05 * (ang * 1.7 - t * 0.7).sin()
+                    + 0.03 * (d * 5.0 + t * 1.3).cos();
+                let sat = sat_max * (0.3 + 0.7 * boost);
+                let val = (0.28 + 0.72 * boost).clamp(0.0, 1.0);
+                let (r, g, b) = hsv_to_rgb(hue.rem_euclid(1.0), sat.clamp(0.0, 1.0), val);
                 spans.push(Span::styled(
                     ch.to_string(),
-                    Style::default().fg(col).bg(Color::Black),
+                    Style::default().fg(Color::Rgb(r, g, b)).bg(OLED_BLACK),
                 ));
             }
             lines.push(Line::from(spans));
         }
         f.render_widget(
-            Paragraph::new(lines).style(Style::default().bg(Color::Black)),
+            Paragraph::new(lines).style(Style::default().bg(OLED_BLACK)),
             rect,
         );
     }

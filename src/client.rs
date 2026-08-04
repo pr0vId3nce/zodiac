@@ -3357,20 +3357,19 @@ impl App {
                 }
                 r => {
                     let (pfx, pst, st) = msg_styles(r);
-                    for (i, l) in
-                        wrap_text(text, wrapw.saturating_sub(2)).into_iter().enumerate()
+                    let runs = parse_md(text);
+                    for (i, line) in
+                        wrap_md_runs(&runs, wrapw.saturating_sub(2)).into_iter().enumerate()
                     {
-                        if i == 0 {
-                            lines.push(Line::from(vec![
-                                Span::styled(pfx, pst),
-                                Span::styled(l, st),
-                            ]));
+                        let mut spans = if i == 0 {
+                            vec![Span::styled(pfx, pst)]
                         } else {
-                            lines.push(Line::from(vec![
-                                Span::raw("  "),
-                                Span::styled(l, st),
-                            ]));
-                        }
+                            vec![Span::raw("  ")]
+                        };
+                        spans.extend(
+                            line.into_iter().map(|(t, s)| Span::styled(t, apply_md(st, s))),
+                        );
+                        lines.push(Line::from(spans));
                     }
                     lines.push(Line::default());
                 }
@@ -3389,16 +3388,19 @@ impl App {
                 )));
             } else {
                 let (pfx, pst, st) = msg_styles(WIZ_WIZARD);
-                let text = format!("{}▌", self.wiz_stream);
-                for (i, l) in
-                    wrap_text(&text, wrapw.saturating_sub(2)).into_iter().enumerate()
+                let mut runs = parse_md(&self.wiz_stream);
+                // The cursor block always renders plain — an unterminated
+                // bold/code marker still streaming in shouldn't catch it.
+                runs.push(("▌".to_string(), MdStyle::default()));
+                for (i, line) in
+                    wrap_md_runs(&runs, wrapw.saturating_sub(2)).into_iter().enumerate()
                 {
-                    let head = if i == 0 {
-                        Span::styled(pfx, pst)
-                    } else {
-                        Span::raw("  ")
-                    };
-                    lines.push(Line::from(vec![head, Span::styled(l, st)]));
+                    let head = if i == 0 { Span::styled(pfx, pst) } else { Span::raw("  ") };
+                    let mut spans = vec![head];
+                    spans.extend(
+                        line.into_iter().map(|(t, s)| Span::styled(t, apply_md(st, s))),
+                    );
+                    lines.push(Line::from(spans));
                 }
             }
         } else if lines.last().is_some_and(|l| l.spans.is_empty()) {
@@ -4529,11 +4531,207 @@ fn wrap_text(s: &str, width: usize) -> Vec<String> {
     out
 }
 
+/// Which markdown emphasis (if any) a run of chat text carries.
+#[derive(Clone, Copy, Default, PartialEq, Eq, Debug)]
+struct MdStyle {
+    bold: bool,
+    code: bool,
+}
+
+fn apply_md(base: Style, s: MdStyle) -> Style {
+    let mut st = base;
+    if s.bold {
+        st = st.add_modifier(Modifier::BOLD);
+    }
+    if s.code {
+        st = st.fg(Color::Indexed(114));
+    }
+    st
+}
+
+/// A small markdown-lite scanner for the chat transcript: recognizes
+/// `**bold**`/`__bold__` and `` `code` `` spans, everything else is
+/// literal text. Deliberately skips single-`*`/`_` italics — those
+/// delimiters collide too often with ordinary text a coding assistant
+/// says (multiplication, `snake_case`, path segments), and a false
+/// match there is far more disruptive than losing italics. An unmatched
+/// marker (a stray "**" with no closing pair, common mid-stream) falls
+/// back to literal text rather than eating the rest of the message.
+fn parse_md(text: &str) -> Vec<(String, MdStyle)> {
+    let chars: Vec<char> = text.chars().collect();
+    let mut out: Vec<(String, MdStyle)> = Vec::new();
+    let mut plain = String::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '`' {
+            if let Some(end) = md_close(&chars, i + 1, '`', 1) {
+                if !plain.is_empty() {
+                    out.push((std::mem::take(&mut plain), MdStyle::default()));
+                }
+                out.push((chars[i + 1..end].iter().collect(), MdStyle { code: true, ..Default::default() }));
+                i = end + 1;
+                continue;
+            }
+        } else if (chars[i] == '*' || chars[i] == '_') && chars.get(i + 1) == Some(&chars[i]) {
+            let delim = chars[i];
+            if let Some(end) = md_close(&chars, i + 2, delim, 2) {
+                if !plain.is_empty() {
+                    out.push((std::mem::take(&mut plain), MdStyle::default()));
+                }
+                out.push((chars[i + 2..end].iter().collect(), MdStyle { bold: true, ..Default::default() }));
+                i = end + 2;
+                continue;
+            }
+        }
+        plain.push(chars[i]);
+        i += 1;
+    }
+    if !plain.is_empty() {
+        out.push((plain, MdStyle::default()));
+    }
+    out
+}
+
+/// First index `>= from` where `run` consecutive `delim` chars occur, with
+/// at least one char of content in between — an empty `` ` ` `` /`****`
+/// isn't emphasis, it's nothing, and shouldn't consume the marker.
+fn md_close(chars: &[char], from: usize, delim: char, run: usize) -> Option<usize> {
+    let mut j = from;
+    while j + run <= chars.len() {
+        if j > from && chars[j..j + run].iter().all(|&c| c == delim) {
+            return Some(j);
+        }
+        j += 1;
+    }
+    None
+}
+
+/// Greedy word-wrap that keeps each word's markdown style attached, so
+/// bold/code spans survive a line break — same wrapping rule as
+/// `wrap_text` (break on the last word that still fits), just carrying
+/// style instead of discarding it. Adjacent same-style words on one line
+/// merge into a single entry, so rendering isn't a Span per word.
+fn wrap_md_runs(runs: &[(String, MdStyle)], width: usize) -> Vec<Vec<(String, MdStyle)>> {
+    let width = width.max(4);
+    let mut lines: Vec<Vec<(String, MdStyle)>> = Vec::new();
+    let mut cur: Vec<(String, MdStyle)> = Vec::new();
+    let mut len = 0usize;
+    for (text, style) in runs {
+        for (pi, para) in text.split('\n').enumerate() {
+            if pi > 0 {
+                lines.push(std::mem::take(&mut cur));
+                len = 0;
+            }
+            for word in para.split(' ') {
+                if word.is_empty() {
+                    continue;
+                }
+                let wl = word.chars().count();
+                if len == 0 {
+                    cur.push((word.to_string(), *style));
+                    len = wl;
+                } else if len + 1 + wl <= width {
+                    if cur.last().is_some_and(|(_, s)| *s == *style) {
+                        let last = cur.last_mut().expect("just checked");
+                        last.0.push(' ');
+                        last.0.push_str(word);
+                    } else {
+                        cur.push((format!(" {word}"), *style));
+                    }
+                    len += 1 + wl;
+                } else {
+                    lines.push(std::mem::take(&mut cur));
+                    len = wl;
+                    cur.push((word.to_string(), *style));
+                }
+            }
+        }
+    }
+    lines.push(cur);
+    lines
+}
+
 fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
         let cut: String = s.chars().take(max.saturating_sub(1)).collect();
         format!("{cut}…")
+    }
+}
+
+#[cfg(test)]
+mod md_tests {
+    use super::*;
+
+    fn plain(t: &str) -> (String, MdStyle) {
+        (t.to_string(), MdStyle::default())
+    }
+
+    #[test]
+    fn parses_bold_and_code() {
+        let runs = parse_md("say **hello** then `run it`");
+        assert_eq!(
+            runs,
+            vec![
+                plain("say "),
+                ("hello".into(), MdStyle { bold: true, code: false }),
+                plain(" then "),
+                ("run it".into(), MdStyle { bold: false, code: true }),
+            ]
+        );
+    }
+
+    #[test]
+    fn underscores_bold_too() {
+        let runs = parse_md("__loud__");
+        assert_eq!(runs, vec![("loud".into(), MdStyle { bold: true, code: false })]);
+    }
+
+    #[test]
+    fn unmatched_marker_falls_back_to_literal() {
+        // A stray "**" with no closing pair — must not eat the rest of
+        // the message, e.g. mid-stream before the model has typed the
+        // closing marker yet.
+        let runs = parse_md("careful with rm -rf ** now");
+        assert_eq!(runs, vec![plain("careful with rm -rf ** now")]);
+    }
+
+    #[test]
+    fn empty_span_is_not_emphasis() {
+        let runs = parse_md("nothing here: ****");
+        assert_eq!(runs, vec![plain("nothing here: ****")]);
+    }
+
+    #[test]
+    fn single_asterisk_is_left_alone() {
+        // Deliberately not treated as italic — "2 * 3 * 4" is common
+        // enough in ordinary chat text that pairing single stars would
+        // misfire constantly.
+        let runs = parse_md("2 * 3 * 4 = 24");
+        assert_eq!(runs, vec![plain("2 * 3 * 4 = 24")]);
+    }
+
+    #[test]
+    fn wrap_keeps_style_across_a_line_break() {
+        let runs = parse_md("a very **bold** claim indeed");
+        let lines = wrap_md_runs(&runs, 10);
+        // "a very" | "**bold**" | "claim" | "indeed" roughly, at width 10 —
+        // the important thing is "bold" keeps bold=true wherever it lands.
+        let bold_word = lines
+            .iter()
+            .flatten()
+            .find(|(t, _)| t.contains("bold"))
+            .expect("bold word survived wrapping");
+        assert!(bold_word.1.bold, "bold flag lost across the wrap: {bold_word:?}");
+    }
+
+    #[test]
+    fn wrap_merges_adjacent_same_style_words() {
+        let runs = parse_md("plain plain plain");
+        let lines = wrap_md_runs(&runs, 80);
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].len(), 1, "same-style words should merge into one span");
+        assert_eq!(lines[0][0].0, "plain plain plain");
     }
 }

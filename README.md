@@ -1,82 +1,79 @@
-# 🧙‍♂️ zodiac
+# zodiac
 
-> *A TUI agent multiplexer — a summoning circle for your AI agents.*
+**A terminal multiplexer built around AI coding agents.**
 
-You are a wizard. Your agents are familiars: eager, tireless, occasionally
-in need of a stern tap on the shoulder when the astral connection drops.
-zodiac gives you one scrying glass to command them all — the left sidebar
-lists every agent pane (numbered top-to-bottom, renamable); the right side
-is a full terminal emulator running that pane's shell. Background panes
-keep running and rendering, so you can flip between long-running agents
-like turning cards. 🔮
+tmux will happily run six agents for you and tell you nothing about any of
+them. zodiac's whole premise is the opposite: the sidebar lists every pane,
+and each row tells you what's running there, what it's doing right now, and
+whether it's blocked waiting on you. The right side is a full terminal
+emulator for the focused pane; background panes keep running and rendering,
+so switching costs nothing.
 
-Each pane spawns `$SHELL` as a login shell (so your profile, prompt — e.g.
-starship ✨ — and PATH are rebuilt fresh even under the long-lived server),
-with `TERM=xterm-256color` and `COLORTERM=truecolor`. Summon whatever agent
-you like inside it.
+Each pane spawns `$SHELL` as a login shell — your profile, prompt and PATH
+are rebuilt fresh even under the long-lived server — with
+`TERM=xterm-256color` and `COLORTERM=truecolor`. Run whatever agent you like
+inside it; zodiac recognizes claude, opencode, codex, aider, gemini and
+goose, and treats everything else as an ordinary shell.
 
-Panes are graphics terminals: zodiac faithfully emulates the kitty graphics
-protocol inside every pane (transmit/place/delete, chunking, PNG and raw
-formats, file/tmp/shm media, queries) and composites the images through the
-outer terminal when it speaks the protocol itself (ghostty, kitty, wezterm).
-Images scroll with their text, live in scrollback, survive detach/reattach,
-and each pane's state is isolated — id collisions between panes can't
-happen. Pane PTYs report true pixel dimensions, so `icat`, matplotlib
-backends, yazi previews and friends size images correctly. In a
-non-graphics outer terminal apps cleanly detect "unsupported" (the query
-goes unanswered, DA1 still resolves the probe). Animations and Unicode
-placeholders are politely declined with an error response. The forbidden
-magic has been learned. 🪄 (Design notes: GRAPHICS.md.)
+Also here: a phone UI over Tailscale ([astrolabe](astrolabe/README.md)), a
+scripting CLI, kitty-graphics support inside panes, and a watchdog that
+un-sticks Claude Code when the API stalls.
 
-zodiac answers the terminal queries apps whisper on startup (vim's t_RV,
-nvim's background-color probe, crossterm's kitty-keyboard check): DA1/DA2,
-DSR/CPR, DECRQM, XTVERSION, window-size, XTGETTCAP (as "not supported"),
-and OSC 10/11 color queries — which report white-on-black, so theme-sniffing
-apps see a dark terminal, as is proper for the occult. Without replies these
-apps would sit in their probe timeouts, which is why some TUIs used to take
-seconds to start inside zodiac. The spirits demand acknowledgment.
+---
 
-## 🕯️ Sessions persist (necromancy included)
+## Install
 
-`zodiac` is client–server, like tmux: a background server owns the PTYs, the
-UI just attaches. Closing the app (`Alt+Q`, or closing the terminal window)
-**detaches** — every agent keeps toiling in the dark. Run `zodiac` again to
-reattach exactly where you left off, scrollback included. `zodiac <name>`
-opens a separate named session (default is `main`); attaching from a second
-terminal takes the session over from the first. There can be only one
-wizard per circle. 🧙
+```sh
+cargo build --release && ./target/release/zodiac
+```
 
-Across reboots, running processes cannot be preserved — nothing can do
-that, not even magic — but zodiac saves pane names, order, working
-directories, the active pane, and each pane's scrollback (metadata on every
-change, scrollback every 60 s and on SIGTERM, so a normal reboot saves
-cleanly). On next launch it raises each shell from the grave in its old
-directory with a "restored session" banner above the old scrollback. State
-lives in `~/.local/state/zodiac/<session>/` (config and state dirs from the
-pre-rename `coop` days are migrated automatically on first launch — the
-rebrand was foretold).
+On NixOS, `cc` is needed for build scripts: `nix shell nixpkgs#gcc -c cargo
+build --release`. There's also a flake — `nix run github:pr0vId3nce/zodiac`,
+or add `zodiac.packages.${system}.default` to your system packages. Tagged
+releases (`v*`) build binaries for x86_64/aarch64 Linux and both macOS
+architectures via GitHub Actions.
 
-The agents themselves can be raised too. Every 60 s the server also writes
-`snapshot.json` beside that state: session name, save time, and for each
-pane its index, name, directory, the agent running there, that agent's
-model, and — for claude — the **chat id** of the conversation on screen.
-At startup the old file is kept as `snapshot.prev.json` — but only when it
-actually had agents in it, so two restarts in a row can't push the last
-useful picture out.
+**Platforms.** Linux is the primary target; macOS works, including process,
+working-directory and agent detection (via libproc rather than `/proc`).
+Desktop notifications go through `notify-send`, so they're a no-op on macOS
+until something equivalent is wired up. Finish sounds use the first of
+mpv/ffplay/pw-play/paplay found on PATH.
 
-**`Alt+⇧R` raises them.** The overlay lists what the snapshot holds — the
-agent, its model, whether a chat id came with it, and the directory — and
-`Enter` puts them back: each pane gets `cd <its directory> && claude
---resume <its chat id>` typed in, so claude reopens the same conversation
-rather than a blank one. Other agents are relaunched by name. Panes the
-snapshot had but this session doesn't are opened first; panes already
-running that agent, or with anything else in the foreground, are left
-strictly alone (nobody wants a command typed into their vim), which also
-makes pressing it twice harmless. `zodiac restore` does the same thing from
-a script.
+## Sessions
 
-`scripts/zodiac-restore.sh` is the same ritual for anyone who'd rather
-drive it from outside — it reads the JSON itself and can preview:
+zodiac is client–server like tmux: a background server owns the PTYs and the
+UI attaches to it. `Alt+Q`, or closing the terminal window, **detaches** —
+every agent keeps working. Run `zodiac` again to reattach exactly where you
+left off, scrollback included. `zodiac <name>` opens a separate named session
+(default `main`); attaching from a second terminal takes the session over
+from the first.
+
+Reboots can't preserve running processes, but zodiac saves pane names, order,
+working directories, the active pane, and each pane's scrollback — metadata
+on every change, scrollback every 60 s and on `SIGTERM`, so a normal reboot
+saves cleanly. On next launch each shell comes back in its old directory with
+a "restored session" banner above the recovered scrollback. State lives in
+`~/.local/state/zodiac/<session>/`.
+
+### Bringing the agents back
+
+The server also writes `snapshot.json` next to that state every 60 s: session
+name, save time, and per pane its index, name, directory, the agent running
+there, that agent's model, and — for claude — the **chat id** of the
+conversation on screen. At startup the previous file is kept as
+`snapshot.prev.json`, but only if it had agents in it, so restarting twice
+can't push the last useful snapshot out.
+
+**`Alt+Shift+R`** replays it. The overlay lists what the snapshot holds and
+`Enter` puts it back: each pane gets `cd <directory> && claude --resume <chat
+id>` typed in, so claude reopens the same conversation instead of a blank
+one. Other agents relaunch by name. Panes the snapshot had but this session
+doesn't are opened first. Panes already running that agent, or with anything
+else in the foreground, are left alone — nothing gets typed into your vim,
+and pressing the key twice is harmless.
+
+`zodiac restore` does the same from a script. `scripts/zodiac-restore.sh`
+reads the JSON itself, for driving it from outside the session:
 
 ```sh
 scripts/zodiac-restore.sh                # session 'main', last snapshot
@@ -84,149 +81,129 @@ scripts/zodiac-restore.sh -s work -n     # another session, dry run
 scripts/zodiac-restore.sh --from <file>  # a specific snapshot
 ```
 
-It opens any panes the snapshot had and zodiac hasn't, skips panes already
-running the right agent (so re-running it is harmless), and restores names
-you pinned with `Alt+R`.
+## Panes name themselves
 
-## 🃏 The home page (yes, it's a tarot spread)
+A new pane is named for its working directory (`zodiac`, not the whole path;
+`~` for home). Open something in it and the name follows: `nvim`, `htop`,
+`psql`. SSH into a box and it becomes the hostname. Start an agent and it
+becomes the agent — and for claude and opencode, the **model** that agent is
+currently using: `opus 5`, `sonnet 4.5`, `fable 5`.
 
-zodiac always opens to the home page: a spread of tarot cards, one per
-pane, each showing the pane's roman numeral and name, the agent and its
-version (`claude 2.1.220`, probed once via `--version`), uptime, live
-status — **thinking** (Claude's `esc to interrupt` spinner is on screen),
-**working**, **finished**, **needs approval** (rang the bell), or idle —
-and the working directory. Arrow keys move between cards, `Enter` drops
-you into that agent's pane, and a click does both at once. `Alt+~` (or
-`` Alt+` ``) brings the spread back from anywhere; `Esc` returns to the
-current pane. Your fortune: *you will review a large diff soon.* ✨
+Priority runs agent (or its model) → ssh host → foreground app → directory,
+re-evaluated once a second. claude's model comes from its session transcript,
+so `/model` switches show up within a second; opencode's comes from the
+`provider/model` in its footer.
 
-Each card carries an emblem up top: for claude panes, a bouncing coral
-mascot while claude is working or thinking, and Claude's `✳` starburst
-when it's idle; other panes get a gold `>_` prompt. (The bounce is
-painted-art only — the Unicode fallback always shows the `✳`.) The
-**Claude style** setting picks his body shape: `hard` (boxy, the default)
-or `soft` (rounded).
+`Alt+R` overrides all of it: a name you type is pinned until you clear it
+(empty rename un-pins and hands the name back to the automatic logic).
 
-In a kitty-graphics terminal (ghostty, kitty) each card gets painted art —
-a night-sky gradient with stars 🌙, the emblem rendered as vector art, a
-gold double frame, and a glow in the status color — placed under the text
-via the graphics protocol. Everywhere else the cards fall back to pure
-Unicode ornament, which is its own kind of spell.
+## Home page
 
-## ⌨️ Incantations (keys)
+zodiac opens to an overview of every pane — three layouts, switchable in
+settings: **cards** (a grid), **list** (stacked rows), **blocks** (wide rows
+with recent transcript). A card shows the pane's numeral and name, the agent
+and its version (probed once via `--version`), uptime, working directory,
+live status, and — when a local model is configured — a short summary of what
+that pane is doing and its latest `⏺` transcript line.
 
-All multiplexer keys use `Alt` so the inner terminal keeps `TAB`, `Ctrl+W`,
-`Ctrl+N`, etc. for itself. No wand required.
+Status is one of **thinking** (Claude's `esc to interrupt` spinner is on
+screen), **working**, **finished**, **needs approval** (the pane rang the
+bell), or idle. Arrow keys move between panes, `Enter` opens one, and a click
+does both. `Alt+~` returns here from anywhere; `Esc` goes back to the current
+pane.
+
+In a kitty-graphics terminal (ghostty, kitty) cards are painted images — a
+night-sky gradient, a vector emblem, a gold frame, a glow in the status
+color — composited under the text. Everywhere else they fall back to Unicode
+box-drawing. claude panes get an animated mascot while working and Claude's
+`✳` when idle; other panes get a `>_` prompt.
+
+## Keys
+
+Everything uses `Alt` so the inner terminal keeps `Tab`, `Ctrl+W`, `Ctrl+N`
+and friends for itself.
 
 | Key | Action |
 | --- | --- |
-| `Alt+~` | Toggle the home page (tarot-card overview of every agent) |
+| `Alt+~` | Toggle the home page |
 | `Alt+N` | New pane (spawns `$SHELL`) |
-| `Alt+W` | Close pane — kills its process. Closing the last pane ends the session. |
-| `Alt+R` | Rename pane (`Enter` save, `Esc` cancel) |
-| `Alt+Shift+R` | Raise the last session's agents from the snapshot (`Enter` confirm, `Esc` cancel) |
+| `Alt+W` | Close pane — kills its process. Closing the last one ends the session. |
+| `Alt+R` | Rename pane (`Enter` save, `Esc` cancel; empty name restores auto-naming) |
+| `Alt+Shift+R` | Restore the last session's agents from the snapshot |
+| `Alt+/` | Fuzzy-find a pane by name |
 | `Alt+1`–`9` | Jump to pane by number |
 | `Alt+↑` / `Alt+↓` | Step through the pane list |
-| `Alt+PgUp` / `Alt+PgDn` | Move pane up/down the list (numbers are positional, so its number changes with its slot) |
-| `Alt+T` | Collapse/expand the sidebar to numbers-only |
-| `Alt+Z` | Zoom the active pane full-width (hides the sidebar) |
-| `Ctrl+S` | Settings (the one non-Alt binding — inner apps don't see Ctrl+S) |
-| `Shift+PgUp` / `Shift+PgDn` | Scrollback in the active pane (any keystroke snaps back live) |
-| `Alt+Q` | Detach — session and all agents keep running |
-| `Alt+Shift+Q` | Banish everything (kills all panes and the server) |
+| `Alt+PgUp` / `Alt+PgDn` | Move pane up/down (numbers are positional) |
+| `Alt+T` | Collapse the sidebar to numbers only |
+| `Alt+Z` | Zoom the active pane full-width |
+| `Alt+G` | Chat panel (see below) |
+| `Alt+P` | Pairing QR for the phone UI |
+| `Ctrl+S` | Settings — the one non-Alt binding, since inner apps don't see `Ctrl+S` |
+| `Shift+PgUp` / `Shift+PgDn` | Scrollback in the active pane (any keystroke snaps back to live) |
+| `Alt+Q` | Detach — session and agents keep running |
+| `Alt+Shift+Q` | Kill everything: all panes and the server |
 
-A pane whose shell exits (e.g. you type `exit`) is removed automatically.
-It has served its purpose.
+A pane whose shell exits is removed automatically.
 
-## 🌈 Omens (sidebar status colors)
+## Status signals
 
-The focused pane's name is underlined (just the name, not the whole row),
-and its number is replaced by an eye (`ಠ`, or `◉` — see Settings) that
-blinks every few seconds — you're looking at it, and it's looking back. 👁️
-The working spinner shows on every working pane, focused or not; the
-*color* omens below apply only to background panes (focusing a pane clears
-its sticky state):
+The focused pane's name is underlined and its number becomes a blinking eye.
+The working indicator shows on every working pane; the *colors* below apply
+to background panes only, and focusing a pane clears its sticky state.
 
-- **Working**: shown by an animated indicator flush right in the sidebar
-  (see Settings below; a single bar when the sidebar is collapsed) — the
-  pane's name stays uncolored, only the spinner is orange. While the
-  spinner runs, the name also shimmers, Claude Code style: a bright band
-  sweeping across dimmed text — on the focused row too, where it layers
-  with the underline. A pane counts as working when a braille spinner frame
-  starts its terminal title (Claude Code animates `✳`/`⠂`/`⠐`/… while
-  working), **or** it produced output in the last 5 s *and* is identified
-  as running a known agent. The `✳` frame alone proves nothing — it's part
-  of the working animation *and* the resting idle marker — so agent panes
-  with non-braille titles fall through to output recency (safe for agent
-  TUIs: their spinners keep emitting output while they work; Claude Code
-  goes quiet only when idle). Non-agent panes never count recency, or an
-  ordinary TUI (htop, a music player) would spin forever, like a cursed
-  music box.
-- **Green — finished** ✅: it did work since you last looked and has gone
-  quiet. Sticky until you focus the pane. This transition also plays the
-  **finish sound** (see Settings): a ringtone from
-  `~/.config/zodiac/ringtones/`, played server-side, so it fires for
-  background panes while attached and for every pane while detached — the
-  pane you're actively watching stays silent. The bell tolls only for work
-  you haven't seen.
-- **Red — needs approval / stopped** 🔴: the pane rang the terminal bell
-  while in the background — Claude Code's "blocked on you" signal (keep its
-  terminal bell notifications enabled). Sticky until focused.
-  Red > orange > green, as in any respectable hierarchy of dread.
+- **Working** — an animated indicator flush right in the sidebar, plus a
+  bright band sweeping across the pane's name. A pane counts as working when
+  a braille spinner frame starts its terminal title (Claude Code animates
+  one), or it produced output in the last 5 s *and* is running a known agent.
+  Non-agent panes never count output recency, or htop would spin forever.
+- **Green — finished.** It did work since you last looked and has gone quiet.
+  Sticky until you focus it. This also plays the finish sound: a ringtone
+  from `~/.config/zodiac/ringtones/`, played server-side, so it fires for
+  background panes while attached and for every pane while detached. The pane
+  you're actively watching stays silent.
+- **Red — needs approval.** The pane rang the terminal bell while in the
+  background, which is Claude Code's "blocked on you" signal (keep its bell
+  notifications enabled). Sticky until focused, and also fires a desktop
+  notification.
 
-A pane turning red also fires a desktop notification via `notify-send`,
-from the UI when attached and from the server when detached.
+Output arriving within ~1.2 s of a resize is treated as the SIGWINCH repaint
+storm rather than agent activity, so `Alt+T` and `Alt+Z` don't light up every
+pane at once.
 
-Output arriving within ~1.2 s of a resize (toggling the sidebar or zoom
-resizes every pane) is treated as the SIGWINCH repaint storm, not agent
-activity — so `Alt+T`/`Alt+Z` don't light up every pane's spinner. Not
-every twitch is a portent.
+## Auto-resume watchdog
 
-## ⚗️ The watchdog (auto-resume on API stalls)
+Claude Code sessions sometimes wedge on API errors. When a claude pane shows
+one of these at the bottom of its screen, zodiac presses `Esc`, clears the
+input box with `Ctrl+U` (so a leftover `--resume` can't double up), and
+submits `--resume`:
 
-Every wizard needs a familiar that never sleeps. Claude Code sessions
-sometimes wedge on Anthropic API hiccups — the astral link falters. When a
-pane running claude shows either of these at the bottom of its screen,
-zodiac's watchdog automatically presses `Esc` (interrupt), clears the input
-box (`Ctrl+U`, so a leftover `--resume` from an earlier attempt can't
-double up), and submits `--resume`:
+- `API Error: Response stalled mid-stream` — after the message has sat there
+  ~6 s.
+- `API Error: Connection closed mid-response` — immediately; a closed
+  connection is never transient. Toggleable via **Conn-error resume** in
+  settings, re-read by the server every second.
+- `Waiting for API response` — only after ~30 s, since this also appears
+  briefly on healthy requests.
 
-- `API Error: Response stalled mid-stream. The response above may be
-  incomplete.` — acts after the message has sat there for ~6 s.
-- `API Error: Connection closed mid-response. The response above may be
-  incomplete.` — acts immediately (a closed connection is never transient).
-  This phrase can be toggled with the **Conn-error resume** setting
-  (`Ctrl+S`, default on); the server re-reads the setting every second, so
-  the toggle applies live.
-- `Waiting for API response` — acts only after ~30 s, since this also
-  appears briefly on healthy requests. Patience is a virtue; 30 seconds of
-  it is plenty.
+Matching is whitespace-insensitive, limited to the bottom 15 rows, and only
+fires in panes running claude. The row must also carry the visual signature
+of a real status line — the error phrase starting its row in an error color,
+the waiting phrase on a live spinner line — so an agent merely *discussing*
+these strings doesn't trip it. After intervening, zodiac waits for the phrase
+to leave the screen before it can fire again (with a 90 s retry if it never
+clears). Each intervention fires a desktop notification, and the keystrokes
+are paced on their own thread so other panes keep streaming.
 
-The match is whitespace-insensitive, only the bottom 15 rows count, and it
-only fires in panes identified as running claude. A row must also carry the
-visual signature of the real status line, so merely *quoting* these phrases
-in a conversation doesn't trip the watchdog: the API-error phrase must start
-its row (a short decoration prefix like `⎿` is allowed) and be painted in an
-error color, and the waiting phrase must sit on a live spinner line (leading
-spinner glyph, `esc to interrupt` suffix in the same row). False prophets
-are ignored. After intervening, zodiac waits for the phrase to leave the
-screen before it can trigger again (with a 90 s retry if it never clears,
-in case the first interrupt didn't take). Each intervention fires a desktop
-notification. The keystroke sequence is paced on its own thread, so a
-firing watchdog doesn't pause I/O for the other panes.
+On by default; `zodiac autoresume <pane> on|off` toggles it per pane, and the
+choice persists with the session.
 
-The watchdog is on by default; toggle it per pane with
-`zodiac autoresume <pane> on|off` (persisted with the session).
+## CLI
 
-## 📜 Scrolls (CLI / scripting API)
-
-Every command talks to the running server over its socket without
-disturbing the attached UI (`-s <session>` selects a session, default
-`main`). Agents commanding agents commanding agents — the circle is
-complete: 💫
+Every command talks to the running server over its socket without disturbing
+the attached UI. `-s <session>` selects a session (default `main`).
 
 ```
-zodiac ls [--json]                   # panes with semantic status: working | idle | done | needs_input
+zodiac ls [--json]                   # panes with status: working | idle | done | needs_input
 zodiac read <pane>                   # print a pane's rendered screen
 zodiac send <pane> <text> [--enter]  # type into a pane
 zodiac prompt <pane> <text>          # submit text + Enter (prompt an agent)
@@ -234,100 +211,56 @@ zodiac rename <pane> <name>
 zodiac focus <pane>
 zodiac new
 zodiac close <pane>
-zodiac wait <pane> [--state s1,s2] [--timeout secs]   # block until state reached
-zodiac autoresume <pane> on|off      # toggle the API-stall watchdog (default on)
+zodiac wait <pane> [--state s1,s2] [--timeout secs]   # block until a state is reached
+zodiac autoresume <pane> on|off      # per-pane API-stall watchdog
+zodiac restore                       # re-launch the agents from the last snapshot
 zodiac kill-server
 zodiac --remote <ssh-host> [session] # attach to zodiac on another machine (ssh -t)
 ```
 
-`ls` also divines which agent runs in each pane (`claude`, `opencode`, …),
-identified by title patterns plus a /proc walk over the pane's process tree
-for known agent binaries (claude, opencode, codex, aider, gemini, goose).
+Pane numbers are the 1-based sidebar positions. Text passed to `send` and
+`prompt` is typed verbatim, flags included, so `zodiac send 2 "claude
+--resume $id" --enter` does what it looks like. `zodiac wait 3 --state
+needs_input,idle` is the building block for "tell me when the agent is done",
+and agents can drive other agents with `prompt` and `read`.
 
-Pane numbers are the 1-based sidebar positions. `zodiac wait 3 --state
-needs_input,idle` is the building block for "tell me when the agent is
-done" scripting; agents can drive other agents with
-`zodiac prompt`/`zodiac read`.
+## astrolabe — the phone UI
 
-## 🔭 astrolabe (phone web UI)
+`astrolabe/` is a companion you open on your phone over Tailscale: every
+pane's status at a glance, a live colored terminal mirror per pane with
+searchable scrollback, a slash-command palette, a keys pad, and a reply box
+your phone's own voice dictation works in. When an agent asks a numbered
+question, the options become buttons — tap one, optionally with a note.
 
-`astrolabe/` holds a companion web UI for your phone, served over Tailscale:
-a herd view of every pane's status (needs-input panes pulse at the top), a
-colored live terminal mirror per pane (searchable scrollback), a
-slash-command palette, a special-keys pad, and a plain reply box your
-phone's voice dictation works in. It rides a read-only observer mode in the
-server (`T_WATCH`): observers get state + replay + live output without
-disturbing the attached UI. See `astrolabe/README.md`.
+It rides a read-only observer mode in the server (`T_WATCH`): observers get
+state, replay and live output without ever disturbing the attached UI.
+Pairing is by QR (`Alt+P`) carrying a token the server mints per launch.
 
-## ⚙️ The grimoire (settings)
+Three pieces: a TypeScript **bridge** (zodiac's socket on one side, HTTP +
+WebSocket on the other), a React **PWA**, and a native **iOS** app that holds
+a list of paired computers, delivers push notifications, and shows the
+selected machine's uptime, battery, CPU and memory in its title bar. The iOS
+sources live outside this repo; everything they talk to is here. See
+[astrolabe/README.md](astrolabe/README.md).
 
-`Ctrl+S` opens the settings page. `↑`/`↓` select a setting, `←`/`→` change
-its value (with a live preview), `Esc` or `Ctrl+S` closes. Settings persist
-to `~/.config/zodiac/config.json` and apply to all sessions.
+## Chat panel
 
-- **Working animation** — the sidebar indicator for working agents. Default
-  is `equalizer` (bounce-and-stretch bars); the other styles are from the
-  [FGRibreau/spinners](https://github.com/FGRibreau/spinners) collection:
-  dots, line, pipe, arc, triangle, circle-halves, square-corners,
-  grow-vertical, noise, toggle, star, point, arrow, bouncing-bar, aesthetic,
-  bouncing-ball. In the collapsed sidebar, multi-cell styles fall back to a
-  single equalizer bar.
-- **Spinner color** — the working indicator's color: orange (default),
-  gold, cyan, blue, violet, pink, green, red, or white. Also tints the
-  status bar's `· working` note.
-- **Shimmer color** — the bright band that sweeps across a working pane's
-  name: white (default) or any of the colors above.
-- **Shimmer speed** — how fast the band sweeps: slow, normal (default),
-  fast, or zippy. Both shimmer rows show a live preview.
-- **Focus eye** — the blinking marker on the focused pane. Each style is an
-  open/blink glyph pair: `eye` (`ಠ`/`‿`, the default), `dot` (`◉`/`─`),
-  `star` (`✦`/`✧`), `heart` (`♥`/`♡`), `diamond` (`◆`/`◇`), `pulse`
-  (`●`/`○`), `flower` (`✿`/`❀`), `note` (`♪`/`♫`), `arrow` (`▶`/`▷`).
-- **Sidebar frame** — `separator` (just the line between the tabs and the
-  terminal, the default), `surround` (a full border around the sidebar), or
-  `rounded` (surround with rounded corners).
-- **Sidebar weight** — `normal`, `thick`, or `double` border lines.
-  Unicode has no thick or double rounded corners, so those weights render
-  square corners even in `rounded` mode. Even magic has limits.
-- **Sidebar color** — the border's color: `dark` (dim gray, the default)
-  or any color from the spinner palette plus `gray`.
-- **Card icon** — size of the emblem painted on home-page cards (the `>_`
-  prompt / Claude starburst): small, medium (default), large, or huge.
-  Applies to the kitty-graphics art; the Unicode fallback emblem is text
-  and keeps its size. Settings opened from the home page apply live.
-- **Card outline** — the card's own frame: `double` (default), `single`,
-  or `none`. In painted-art mode this sets the gold rings in the image —
-  the text border is gone there entirely, so card edges no longer layer
-  box-drawing lines over the art. The fallback maps double/single to
-  double/rounded text borders.
-- **Select color** / **Select weight** — the selected-card outline: any
-  palette color (gold default) at thin/normal/thick/heavy. With painted
-  art the selection is a ring at the card's true pixel edge, so it fully
-  surrounds the card instead of running through cell centers; the fallback
-  maps thick/heavy to thick/double text borders.
-- **Select style** — how the painted ring renders: `glow` (rounded
-  corners with a soft halo, the default) or `ring` (hard square).
-- **Card numeral** — how cards are numbered: `roman` (I, II, III — the
-  default), `arabic` (1, 2, 3), or `zodiac` (♈ ♉ ♊ …, wrapping after ♓).
-  You know which one to pick. ♒
-- **Finish sound** — the ringtone played when an agent finishes (working →
-  green). Choices are `off` plus every audio file in
-  `~/.config/zodiac/ringtones/` (mp3/m4a/m4r/aac/wav/ogg/opus/flac/aiff/caf —
-  drop files in, they're picked up live); stepping through the list previews
-  each sound. Default is the first ringtone alphabetically, so the alert
-  works as soon as the folder has files. Playback uses the first of
-  mpv/ffplay/pw-play/paplay found on PATH.
-- **Conn-error resume** — the immediate auto-resume on Claude Code's
-  "Connection closed mid-response" API error (see the watchdog section
-  above). Default on. Like Finish sound, this is read by the server and
-  re-checked every second, so toggling it applies to running sessions
-  right away.
+`Alt+G` opens a chat panel on the home page that talks to an
+OpenAI-compatible endpoint over your tailnet (a llama-server, by default).
+It's a general assistant, not a session narrator: the pane overview isn't fed
+to it unless the question sounds like it concerns the session, plus one turn
+of momentum so follow-ups still land. It can pull the overview in itself via
+a `read_spread` tool, and `/why <n>` attaches it outright. `/wake` and
+`/dispell` start and stop the model's systemd unit over ssh.
 
-### 🔮 The Wizard's keys
+It can also search the web and fetch URLs when a question turns on facts it
+doesn't have — three tool rounds per question, then it has to answer.
+Searching shells out to `curl`, which must be on the PATH of whatever machine
+runs the client.
 
-The chat panel on the home page (`Alt+G`) talks to a llama-server over the
-tailnet. It has no row on the settings page — these live in
-`~/.config/zodiac/config.json` directly:
+These have no settings-page rows; they live in
+`~/.config/zodiac/config.json`. The keys keep a `wizard_` prefix for
+historical reasons:
 
 | key | default | what |
 | --- | --- | --- |
@@ -337,75 +270,101 @@ tailnet. It has no row on the settings page — these live in
 | `wizard_ssh` | `des@bigbox` | where `/wake` and `/dispell` ssh to |
 | `wizard_service` | `llama-server` | the systemd --user unit they start/stop |
 | `wizard_width` | `40` | panel width in cells |
-| `wizard_search_url` | *(empty)* | where `web_search` looks — see below |
-| `wizard_search_key` | *(empty)* | API key, if the backend wants one |
-| `wizard_act` | `false` | let him offer `prompt_pane`/`send_keys` — see below |
+| `wizard_search_url` | *(empty)* | Wikipedia when empty; a SearXNG base URL (needs `json` in `search.formats`) or `https://api.search.brave.com` otherwise |
+| `wizard_search_key` | *(empty)* | API key, for backends that want one |
+| `wizard_watch` | `true` | the background summarizer and stuck-pane check (see below) |
+| `wizard_act` | `false` | allow `prompt_pane`/`send_keys` — see below |
 
-He is a general familiar, not a card-reader: ask him about braising short
-ribs and he will tell you about braising short ribs. The spread is not fed
-to him by default — it rides along only when the question sounds like it
-concerns the session, plus one turn of momentum afterwards so follow-ups
-("is that safe?") still land. When the guess is wrong he fixes it himself:
-`read_spread` is a tool, and reaching for it shows up in the transcript as
-`turning over the cards…`. `/why <n>` always attaches it outright.
+With `wizard_act` on, the panel can offer to submit a prompt to a pane or
+send raw keystrokes, but neither ever fires on its own: each call shows a
+consent line in the transcript and waits for `y` or `n`. No timeout, no
+auto-accept.
 
-He can also reach past the tower — `web_search` and `fetch_url`, called when
-a question turns on facts he doesn't hold, shown as `scrying the aether —
-"…"` and `reading example.com…`. Three tool rounds per question, then the
-tools answer him with a refusal and he must speak.
+### Background summaries
 
-Where `web_search` looks depends on `wizard_search_url`:
+Separately from the chat panel, the server runs a small model to write the
+one-line summary under each pane's status and to flag panes that have been
+"working" with an unchanged screen for three minutes. It never writes to a
+pane — it produces a notification and a log line, nothing more.
 
-- **empty** — Wikipedia's API. Keyless and always available, but it knows
-  nothing of news, prices or this week's releases; he'll say so rather than
-  guess.
-- **a SearXNG base URL** (e.g. `http://bigbox:8888`) — the whole web,
-  keyless, over your own tailnet. The instance must have `json` in its
-  `search.formats`, or the request comes back as HTML and he'll tell you the
-  tower answered in the wrong tongue.
-- **`https://api.search.brave.com`** — Brave's API, with the key in
-  `wizard_search_key`.
+This one is not configurable yet: the host, port and model name are constants
+in `src/familiar.rs`, pointing at a CPU-only llama-server on the author's
+tailnet. Edit those (or set `wizard_watch: false`) until it grows real
+settings.
 
-Searching goes out through `curl` (the wider world speaks TLS; zodiac's own
-little HTTP client does not), so `curl` must be on the PATH of whatever
-machine runs the client. 🌐
+## Settings
 
-With `wizard_act: true`, he also gets `prompt_pane` (submit a full prompt
-to a card, as if you'd typed it and hit Enter) and `send_keys` (raw
-keystrokes — `y`, `Esc`, `Ctrl+U`, ...) — but neither ever fires on its
-own. Each call shows a chip in the transcript, `▸ cast: send_keys(3, "y")
-[y/n]`, and the reply pauses right there until you press `y` or `n`. No
-timeout, no auto-accept. Off by default; even on, he's told to only reach
-for these when you've actually asked him to act.
+`Ctrl+S` opens the settings page: `↑`/`↓` select, `←`/`→` change with a live
+preview, `Esc` or `Ctrl+S` closes. Settings persist to
+`~/.config/zodiac/config.json` and apply to every session. The page also
+carries a keybinding reference in its right column.
 
-## 🖱️ Mouse
+| Setting | What |
+| --- | --- |
+| Working animation | Sidebar indicator style — `equalizer` (default) plus 16 from [FGRibreau/spinners](https://github.com/FGRibreau/spinners) |
+| Spinner / Shimmer color | Indicator color and the band that sweeps a working pane's name |
+| Shimmer speed | slow, normal, fast, zippy |
+| Focus eye | The blinking marker on the focused pane — eye, dot, star, heart, diamond, pulse, flower, note, arrow |
+| Sidebar frame / weight / color | Separator, surround or rounded; normal, thick or double; any palette color |
+| Home view | cards, list, or blocks |
+| Card size / Cards per row | Card dimensions; `auto` or a fixed 1–6 columns |
+| Separator color | Line color in the blocks view |
+| Card icon | Emblem size on painted cards |
+| Card outline | double, single, or none |
+| Select color / weight / style | The selected card's ring — palette color, thin→heavy, `glow` or `ring` |
+| Card numeral | roman, arabic, or zodiac signs (♈ ♉ ♊ …) |
+| Claude style | Mascot body shape: `hard` or `soft` |
+| Finish sound | Ringtone on working → finished, from `~/.config/zodiac/ringtones/` (mp3/m4a/m4r/aac/wav/ogg/opus/flac/aiff/caf, picked up live); stepping the list previews each |
+| Conn-error resume | Immediate `--resume` on "Connection closed mid-response" |
+| Cursor type / blink / color | Follow the inner app or force block/underline/bar; blink on/off; focused-pane tint |
+| Bottom controls | Hide the keybinding hints in the status bar |
+| Chat character | The face on the chat panel |
 
-zodiac owns the mouse, so selection is confined to the pane — the sidebar
-can never end up in your copy:
+## Mouse
 
-- **Drag to select, release to copy.** The selection highlights, and on
-  release the text goes to the clipboard via OSC 52 (works over ssh /
-  `--remote`) plus `wl-copy` when available. The status bar flashes
-  `· copied`. Any keystroke or click clears the highlight.
+zodiac owns the mouse, so a selection can never accidentally include the
+sidebar.
+
+- **Drag to select, release to copy** — to the clipboard via OSC 52 (works
+  over ssh and `--remote`) plus `wl-copy` when available. The status bar
+  flashes `· copied`; any keystroke or click clears the highlight.
 - **Click a sidebar row** to focus that pane.
-- **Wheel** scrolls zodiac's scrollback in shell panes; in fullscreen apps
-  it becomes arrow keys (the usual "alternate scroll").
-- Apps that ask for mouse reporting (vim, htop, some agent TUIs) get mouse
-  events forwarded instead — hold **Shift** while dragging to select in
-  those panes anyway, the standard terminal convention.
+- **Wheel** scrolls zodiac's scrollback in shell panes; in fullscreen apps it
+  becomes arrow keys, the usual alternate-scroll convention.
+- Apps that ask for mouse reporting (vim, htop, agent TUIs) get the events
+  forwarded instead — hold **Shift** while dragging to select there anyway.
 
-## ⚠️ Curses (caveats)
+## Graphics and terminal queries
 
-- `Shift+PgUp/PgDn` reaches zodiac only if your terminal emulator passes it
-  through while in the alternate screen (foot, kitty, alacritty all do).
-- Scrollback is 10,000 lines per pane, held in memory. Beyond that, the
-  past is lost to the void. 🌌
+Panes are graphics terminals. zodiac implements the kitty graphics protocol
+inside every pane — transmit/place/delete, chunking, PNG and raw formats,
+file/tmp/shm media, queries — and composites images through the outer
+terminal when it speaks the protocol too (ghostty, kitty, wezterm). Images
+scroll with their text, live in scrollback, and survive detach/reattach; each
+pane's image state is isolated, so ids can't collide between panes. Pane PTYs
+report true pixel dimensions, so `icat`, matplotlib and yazi previews size
+correctly. In a non-graphics terminal, apps cleanly detect "unsupported".
+Animations and Unicode placeholders are declined with an error response.
+Design notes: [GRAPHICS.md](GRAPHICS.md).
 
-## 🛠️ The ritual (build)
+zodiac also answers the queries apps send on startup — DA1/DA2, DSR/CPR,
+DECRQM, XTVERSION, window size, XTGETTCAP (as "not supported"), and OSC 10/11
+color queries, which report white-on-black so theme-sniffing apps see a dark
+terminal. Without replies, those apps sit in their probe timeouts, which is
+why some TUIs used to take seconds to start inside a multiplexer.
 
-```sh
-nix shell nixpkgs#gcc -c cargo build --release   # NixOS: cc needed for build scripts
-./target/release/zodiac
-```
+## Limitations
 
-No goats were harmed. Rust only asks for your patience at link time. 🧙‍♂️✨
+- `Shift+PgUp`/`PgDn` only reaches zodiac if your terminal passes it through
+  in the alternate screen (foot, kitty, alacritty all do).
+- Scrollback is 10,000 lines per pane, in memory. Older lines are gone.
+- Desktop notifications need `notify-send`, so macOS is silent for now.
+- The background summarizer's endpoint is hardcoded in `src/familiar.rs`
+  rather than configurable.
+- Two claude panes in the *same* directory share a project folder, so
+  model-based naming shows whichever session wrote most recently — right when
+  they run the same model, a near-miss when they don't.
+
+## License
+
+MIT — see [LICENSE](LICENSE).

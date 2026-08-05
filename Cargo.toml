@@ -2,7 +2,7 @@
 name = "zodiac"
 version = "0.1.0"
 edition = "2021"
-description = "TUI agent multiplexer: a pen for your agents"
+description = "Terminal multiplexer built around AI coding agents"
 
 [dependencies]
 anyhow = "1"

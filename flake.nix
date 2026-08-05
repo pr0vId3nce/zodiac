@@ -1,5 +1,5 @@
 {
-  description = "zodiac — TUI agent multiplexer: a summoning circle for your AI agents";
+  description = "zodiac — a terminal multiplexer built around AI coding agents";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -21,7 +21,7 @@
             # vt100 is vendored in-tree (vendor/vt100), a plain path
             # dependency — no hash overrides needed.
             meta = with pkgs.lib; {
-              description = "TUI agent multiplexer — a summoning circle for your AI agents";
+              description = "Terminal multiplexer built around AI coding agents";
               homepage = "https://github.com/pr0vId3nce/zodiac";
               license = licenses.mit;
               mainProgram = "zodiac";

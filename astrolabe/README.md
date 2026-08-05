@@ -1,12 +1,13 @@
-# 🔭 Astrolabe
+# Astrolabe
 
-> *An astrolabe for your zodiac herd — read the sky, answer what needs you, over Tailscale.*
+**The phone half of zodiac, over Tailscale.**
 
-Open one URL on your phone, see which familiar is waiting on you, and answer
-it with your phone's keyboard. Each pane gets a colored terminal mirror, a
-slash-command palette, a special-keys pad, and scrollback you can search.
-The reply box is an ordinary text field, so your phone's own voice dictation
-works in it — Astrolabe ships none of its own.
+Open one URL on your phone and see which agent is waiting on you — then
+answer it. Each pane gets a colored terminal mirror, a slash-command
+palette, a special-keys pad, and scrollback you can search. When an agent
+asks a numbered question, its options become buttons. The reply box is an
+ordinary text field, so your phone's own voice dictation works in it;
+Astrolabe ships none of its own.
 
 ## Pieces
 
@@ -23,19 +24,25 @@ works in it — Astrolabe ships none of its own.
   Binds to this machine's **tailscale IPv4** by default, so the UI is
   tailnet-only by construction.
 - **web** (`web/`): Vite + React + Tailwind PWA with an xterm.js mirror.
-- **ios** (`ios/`): native shell holding a *list of paired computers* — pair
-  by scanning zodiac's QR (Alt+P), tap one to open a WKWebView on that
-  computer's web UI, unchanged. Plus APNs push ("agent needs you" with
-  lock-screen **inline reply**, badge = panes waiting across every paired
-  computer, tap opens the right computer's pane). Built with XcodeGen on a
-  Mac; see `ios/README.md`. Push stays off until `ASTROLABE_APNS_*` creds
-  exist in `~/.config/astrolabe/env`.
+- **ios** (not in this repo — it ships through the App Store separately):
+  a native shell holding a *list of paired computers*. Pair by scanning
+  zodiac's QR (Alt+P), tap one to open a WKWebView on that computer's web
+  UI, unchanged. It adds APNs push ("agent needs you", with lock-screen
+  inline reply and numbered-answer buttons; badge = panes waiting across
+  every paired computer), per-computer nicknames, three themes it hands
+  through to the web UI, and a title bar showing the selected machine's
+  uptime, battery, CPU and memory from `/api/host`. Everything it talks to
+  is in this directory; push stays off until `ASTROLABE_APNS_*` creds exist
+  in `~/.config/astrolabe/env`.
 
 ## Install
 
 ```
-./install.sh          # npm install, vite build, enable systemd --user unit
+./install.sh          # npm install, vite build, install the background service
 ```
+
+That's a `systemd --user` unit on Linux and a launchd LaunchAgent
+(`dev.d3s.astrolabe`, logging to `/tmp/astrolabe.log`) on macOS.
 
 Then open `http://<this-machine's-tailscale-ip>:7979` on your phone and add
 it to the home screen.
@@ -111,6 +118,14 @@ HTTP API (used by the iOS shell; the PWA uses the WebSocket):
   reports a token dead)
 - `POST /api/prompt` `{pane, text}` — send a reply (newline wiring for agent
   panes handled server-side); this is what lock-screen inline reply hits
+- `POST /api/answer` `{pane, option, note?}` — answer a numbered question by
+  option number; a note follows the digit into the pane as a normal prompt
+- `GET /api/host` — the bridge machine's uptime, CPU, memory and battery,
+  for the phone's title bar. Every field but uptime is nullable (desktops
+  have no battery). Memory comes from `vm_stat` on macOS and `MemAvailable`
+  on Linux, not `os.freemem()`, which counts cache as used and reads as 95%
+  on a healthy machine; CPU is sampled on a timer, since one `os.cpus()`
+  reading is only an average since boot. Cached for 3 s.
 - `POST /api/push-test` — push "the bridge can reach you" to every device
 
 Pushes fire on status transitions only (→ `needs_input`, and `working` →
@@ -120,13 +135,21 @@ restart.
 ## The UI
 
 - **Herd view**: one card per pane — name, live status (`needs you` panes
-  pulse red and float to the top), agent + version, the ✶ LLM subtitle and
+  pulse red and float to the top), agent + version, the one-line summary and
   latest ⏺ transcript bullet, cwd, uptime. Tap a card to enter the pane.
-- **Pane view**: read-only colored mirror of the real terminal (exact
-  server-side grid, horizontal scroll + A−/A+ font buttons), 10k lines of
-  scrollback, search with prev/next. The composer's send button submits
-  text + Enter (`zodiac prompt` pacing); newlines in a multi-line dictation
-  are sent as `\`+Enter so Claude Code keeps them as newlines.
+- **Pane view**: two ways to look at a pane. **Read** re-renders the
+  emulator's buffer as ordinary wrapped DOM text — what you actually want on
+  a phone — and hides full-width separator rules and bare prompt rows.
+  **Mirror** is the exact server-side grid in xterm.js, pinch- or
+  button-zoomable, and clipped to the columns that actually carry content so
+  a 120-column session doesn't scroll off into blank space. Both have 10k
+  lines of scrollback and search with prev/next. The composer's send button
+  submits text + Enter (`zodiac prompt` pacing); newlines in a multi-line
+  dictation are sent as `\`+Enter so Claude Code keeps them as newlines.
+- **Questions**: when a pane goes to `needs_input` the bridge parses the
+  numbered options off its screen and shows them as buttons above the
+  composer (and in the push notification). Tapping one sends that digit;
+  anything typed in the composer rides along as a note.
 - **Slash palette**: Claude Code built-ins plus everything in
   `~/.claude/commands/*.md`; tapping inserts the command into the reply box.
 - **Keys pad**: Esc, Tab, ⇧Tab, arrows, ⏎, ^C ^U ^R ^O, PgUp/PgDn — raw
@@ -141,7 +164,7 @@ restart.
   URL instead. Voice dictation works either way.
 - **Old server, new binary**: the running zodiac server only grows the
   observer mode after a restart (`Alt+Shift+Q`, then `zodiac` — scrollback
-  and pane layout are restored, agents revive with `claude --resume`).
+  and pane layout are restored; `Alt+Shift+R` brings the agents back).
   Until then the pane mirror shows the amber "plain 1 Hz mirror" banner.
 - Multiple phones/tabs can watch at once; replay rings are only sent for
   the pane you're actually viewing, so herd view costs almost nothing.

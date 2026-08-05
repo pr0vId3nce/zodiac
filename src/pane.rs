@@ -94,6 +94,15 @@ impl SrvPane {
         cmd.arg("-l");
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        // A zodiac server started from inside a claude session would pass
+        // claude's session markers into every pane — and a claude launched
+        // in such a pane then thinks it's a child session and stops saving
+        // transcripts (which also breaks model naming and Alt+⇧R resume).
+        // Panes are top-level terminals; scrub the inherited markers.
+        cmd.env_remove("CLAUDECODE");
+        cmd.env_remove("CLAUDE_CODE_CHILD_SESSION");
+        cmd.env_remove("CLAUDE_CODE_SSE_PORT");
+        cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
         if let Some(dir) = cwd
             .filter(|d| d.is_dir())
             .or_else(|| std::env::current_dir().ok())
@@ -447,7 +456,7 @@ impl SrvPane {
     /// what makes the session snapshot restorable across a reboot.
     pub fn chat_id(&self) -> Option<String> {
         let cwd = self.cwd()?;
-        let (path, _) = claude_session_file(&cwd)?;
+        let (path, _) = self.claude_transcript(&cwd)?;
         Some(path.file_stem()?.to_str()?.to_string())
     }
 
@@ -478,7 +487,7 @@ impl SrvPane {
     /// 1s auto-name tick doesn't re-read an idle transcript.
     fn claude_model(&mut self) -> Option<String> {
         let cwd = self.cwd()?;
-        let (path, mtime) = claude_session_file(&cwd)?;
+        let (path, mtime) = self.claude_transcript(&cwd)?;
         if self.model_mtime == Some(mtime) {
             return self.model_name.clone();
         }
@@ -486,6 +495,50 @@ impl SrvPane {
         self.model_mtime = Some(mtime);
         self.model_name = name.clone();
         name
+    }
+
+    /// The claude process serving this pane, with its argv — found among
+    /// the shell's descendants, same match as agent detection.
+    fn claude_proc(&self) -> Option<(u32, Vec<String>)> {
+        let root = self.pid?;
+        descendant_procs(root).into_iter().find(|(_, args)| {
+            args.iter()
+                .take(2)
+                .any(|a| a.rsplit('/').next() == Some("claude"))
+        })
+    }
+
+    /// Which transcript is *this pane's* claude session? Two claude panes
+    /// in the same directory share a project folder, and "newest by mtime"
+    /// labels both panes with whichever session wrote last — wrong whenever
+    /// they run different models. Stronger signals first:
+    ///
+    ///  1. `claude --resume <id>` carries the session id in argv — exact.
+    ///  2. A fresh `claude` creates its transcript within moments of the
+    ///     process starting — match file birth time to process start.
+    ///  3. Otherwise (resume via the interactive picker, filesystems
+    ///     without birth times): newest by mtime, the old near-miss.
+    fn claude_transcript(&self, cwd: &str) -> Option<(std::path::PathBuf, std::time::SystemTime)> {
+        let dir = claude_project_dir(cwd)?;
+        let proc = self.claude_proc();
+        if let Some((_, args)) = &proc {
+            if let Some(id) = resume_id(args) {
+                let path = dir.join(format!("{id}.jsonl"));
+                if let Ok(meta) = std::fs::metadata(&path) {
+                    if let Ok(mtime) = meta.modified() {
+                        return Some((path, mtime));
+                    }
+                }
+            }
+        }
+        if let Some((pid, _)) = &proc {
+            if let Some(started) = process_start_time(*pid) {
+                if let Some(hit) = jsonl_created_near(&dir, started) {
+                    return Some(hit);
+                }
+            }
+        }
+        newest_jsonl(&dir)
     }
 
     /// opencode shows `provider/model` in its TUI footer — parse it out of
@@ -725,16 +778,59 @@ const STALL_RETRY: Duration = Duration::from_secs(90);
 
 const AGENT_BINARIES: &[&str] = &["claude", "opencode", "codex", "aider", "gemini", "goose"];
 
-/// The newest Claude Code session transcript for a working directory:
-/// ~/.claude/projects/<munged>/<session>.jsonl, where the project dir name
-/// is the cwd with every non-alphanumeric character turned into `-`.
-fn claude_session_file(cwd: &str) -> Option<(std::path::PathBuf, std::time::SystemTime)> {
+/// Claude Code's project directory for a working directory:
+/// ~/.claude/projects/<munged>, where the name is the cwd with every
+/// non-alphanumeric character turned into `-`.
+fn claude_project_dir(cwd: &str) -> Option<std::path::PathBuf> {
     let home = std::env::var("HOME").ok()?;
     let munged: String = cwd
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    let dir = std::path::Path::new(&home).join(".claude/projects").join(munged);
+    Some(std::path::Path::new(&home).join(".claude/projects").join(munged))
+}
+
+/// The session id from a `claude --resume <id>` argv, if present.
+fn resume_id(args: &[String]) -> Option<&str> {
+    let at = args.iter().position(|a| a == "--resume" || a == "-r")?;
+    let id = args.get(at + 1)?;
+    // A session id, not a following flag or prompt text.
+    (id.len() >= 8 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
+        .then_some(id.as_str())
+}
+
+/// The transcript whose creation time sits within a couple of minutes of
+/// `started` — a fresh claude writes its session file moments after launch.
+/// None when birth times are unavailable (some Linux filesystems) or no
+/// file matches (a resumed session appends to an old file).
+fn jsonl_created_near(
+    dir: &std::path::Path,
+    started: std::time::SystemTime,
+) -> Option<(std::path::PathBuf, std::time::SystemTime)> {
+    const SLACK: std::time::Duration = std::time::Duration::from_secs(180);
+    let mut best: Option<(std::path::PathBuf, std::time::SystemTime, std::time::Duration)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else { continue };
+        let (Ok(created), Ok(mtime)) = (meta.created(), meta.modified()) else {
+            continue;
+        };
+        let gap = match created.duration_since(started) {
+            Ok(d) => d,
+            Err(e) => e.duration(),
+        };
+        if gap <= SLACK && best.as_ref().is_none_or(|(_, _, g)| gap < *g) {
+            best = Some((path, mtime, gap));
+        }
+    }
+    best.map(|(p, m, _)| (p, m))
+}
+
+/// Newest transcript by mtime — the last-resort pick.
+fn newest_jsonl(dir: &std::path::Path) -> Option<(std::path::PathBuf, std::time::SystemTime)> {
     let mut newest: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let path = entry.path();
@@ -749,6 +845,38 @@ fn claude_session_file(cwd: &str) -> Option<(std::path::PathBuf, std::time::Syst
         }
     }
     newest
+}
+
+/// When a process started, for pairing it with the session file it created.
+#[cfg(target_os = "macos")]
+fn process_start_time(pid: u32) -> Option<std::time::SystemTime> {
+    let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+    let got = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            libc::PROC_PIDTBSDINFO,
+            0,
+            &mut info as *mut _ as *mut libc::c_void,
+            size,
+        )
+    };
+    if got != size {
+        return None;
+    }
+    Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(info.pbi_start_tvsec))
+}
+
+#[cfg(target_os = "linux")]
+fn process_start_time(pid: u32) -> Option<std::time::SystemTime> {
+    // The /proc/<pid> directory is created when the process is — its
+    // metadata timestamps are the start time, without jiffies arithmetic.
+    std::fs::metadata(format!("/proc/{pid}")).ok()?.modified().ok()
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_start_time(_pid: u32) -> Option<std::time::SystemTime> {
+    None
 }
 
 /// The last `"model": "..."` value in the tail of a session transcript —
@@ -1263,5 +1391,34 @@ mod model_name_tests {
 {"message":{"model":"claude-fable-5"}}"#;
         assert_eq!(last_model_in(t), Some("fable 5".to_string()));
         assert_eq!(last_model_in("no model here"), None);
+    }
+}
+
+#[cfg(test)]
+mod transcript_pick_tests {
+    use super::resume_id;
+
+    fn args(s: &str) -> Vec<String> {
+        s.split_whitespace().map(String::from).collect()
+    }
+
+    #[test]
+    fn resume_id_from_argv() {
+        assert_eq!(
+            resume_id(&args("claude --resume 7e32fca3-76ed-4878-861f-396bcfb7071f")),
+            Some("7e32fca3-76ed-4878-861f-396bcfb7071f")
+        );
+        assert_eq!(resume_id(&args("claude -r deadbeef01")), Some("deadbeef01"));
+    }
+
+    #[test]
+    fn resume_without_id_is_none() {
+        // Bare --resume opens the interactive picker; the next token (if
+        // any) is not a session id.
+        assert_eq!(resume_id(&args("claude --resume")), None);
+        assert_eq!(resume_id(&args("claude --resume --continue")), None);
+        assert_eq!(resume_id(&args("claude")), None);
+        // Prompt text after -r isn't an id either.
+        assert_eq!(resume_id(&args("claude -r fix_the_tests")), None);
     }
 }

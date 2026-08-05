@@ -513,6 +513,9 @@ struct App {
     /// when the bridge itself restarts, which is rare enough to just
     /// re-read on the next open.
     pair_endpoint: Option<(String, String, String)>,
+    /// The endpoint file points somewhere nothing answers — see
+    /// `endpoint_alive`. Probed when the overlay opens.
+    pair_dead: bool,
     /// The exact URL the current QR image encodes, so kitty_overlay only
     /// re-rasterizes when the token (or endpoint) actually changes.
     pair_qr_src: String,
@@ -633,6 +636,7 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         server_mouse_gate: false,
         pair_open: false,
         pair_endpoint: None,
+        pair_dead: false,
         pair_qr_src: String::new(),
         pair_qr: None,
         pair_rect: Rect::default(),
@@ -781,6 +785,24 @@ fn read_bridge_endpoint() -> Option<(String, String, String)> {
     let cid = v.get("cid")?.as_str()?.to_string();
     let name = v.get("name")?.as_str()?.to_string();
     Some((url, cid, name))
+}
+
+/// Is anything actually listening where the bridge said it would be? The
+/// pairing file is one per machine and only rewritten on a bridge's own
+/// startup, so it can outlive the bridge that wrote it (a second bridge on
+/// another port, then killed, leaves the file pointing at a dead one). A
+/// QR for a dead address pairs fine and then shows the phone nothing, so
+/// check before offering it. 400 ms: a tailnet round trip, not a stall.
+fn endpoint_alive(url: &str) -> bool {
+    use std::net::{TcpStream, ToSocketAddrs};
+    let rest = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://"));
+    let Some(hostport) = rest.map(|r| r.split('/').next().unwrap_or(r)) else {
+        return true; // unparseable — say nothing rather than cry wolf
+    };
+    let Ok(mut addrs) = hostport.to_socket_addrs() else {
+        return true;
+    };
+    addrs.any(|a| TcpStream::connect_timeout(&a, Duration::from_millis(400)).is_ok())
 }
 
 /// Percent-encodes a query-param value. The token is hex and the cid a
@@ -1700,6 +1722,10 @@ impl App {
     /// bridge itself restarts.
     fn open_pair_overlay(&mut self) {
         self.pair_endpoint = read_bridge_endpoint();
+        self.pair_dead = self
+            .pair_endpoint
+            .as_ref()
+            .is_some_and(|(url, _, _)| !endpoint_alive(url));
         self.pair_open = true;
     }
 
@@ -3305,6 +3331,16 @@ impl App {
             );
             return;
         };
+        if self.pair_dead {
+            center_msg(
+                f,
+                &format!(
+                    "nothing is answering at {url}\n\nthe bridge it points to is gone — start it \
+                     (astrolabe/install.sh, or `node bridge/main.ts`) and re-open this overlay",
+                ),
+            );
+            return;
+        }
         let pair_url = format!(
             "{url}/?t={}&cid={}&name={}",
             url_encode(&token),

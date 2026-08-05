@@ -614,7 +614,15 @@ async function resolveHost(): Promise<string> {
 }
 
 const host = await resolveHost();
-const identity = publishEndpoint(`http://${host}:${PORT}`);
+const endpointURL = `http://${host}:${PORT}`;
+const identity = publishEndpoint(endpointURL);
+// endpoint.json is what zodiac's pairing QR advertises, and there is only
+// one of it per machine — so a second bridge (another port, another
+// session) overwrites it, and pairing then points at whichever bridge
+// started last, even after that one exits. Re-claim it periodically: the
+// bridge still running wins, within a minute, without any cleanup on exit
+// (which a killed process can't do anyway).
+setInterval(() => publishEndpoint(endpointURL), 60_000).unref();
 link.start();
 server.listen(PORT, host, () => {
   console.log(`astrolabe: serving http://${host}:${PORT} → zodiac session '${SESSION}'`);

@@ -55,6 +55,37 @@ fn default_true() -> bool {
     true
 }
 
+/// A human-readable, script-readable picture of the session, rewritten once
+/// a minute to `<state dir>/snapshot.json` (and on clean shutdown). Unlike
+/// `state.json` — which zodiac reloads itself and keeps minimal — this one
+/// exists for the outside world: it carries the agent and its chat id per
+/// pane so `scripts/zodiac-restore.sh` can bring the agents back after a
+/// reboot, not just the panes and their directories.
+#[derive(Serialize)]
+struct Snapshot {
+    session: String,
+    /// Seconds since the epoch, so a script can tell how stale this is.
+    saved_at: u64,
+    /// 1-based index of the focused pane.
+    active: usize,
+    panes: Vec<SnapshotPane>,
+}
+
+#[derive(Serialize)]
+struct SnapshotPane {
+    /// 1-based, matching `zodiac ls` and every pane-taking CLI command.
+    index: usize,
+    name: String,
+    cwd: Option<String>,
+    agent: Option<String>,
+    model: Option<String>,
+    /// Claude Code session id — `claude --resume <chat_id>`. Only ever set
+    /// for claude panes; other agents don't expose one we can read.
+    chat_id: Option<String>,
+    auto_resume: bool,
+    renamed: bool,
+}
+
 /// Tail of every restored pane's replayed scrollback. The recorded bytes can
 /// end mid-alt-screen (vim, less, an agent TUI), and the client's parser would
 /// otherwise stay there and paint the new shell's prompt over the old frame.
@@ -181,6 +212,12 @@ pub fn run(session: &str) -> Result<()> {
     };
     srv.restore()?;
     srv.save_meta();
+    // The snapshot on disk describes the session as it was before this
+    // process started — exactly what a restore script wants. Keep it as
+    // `snapshot.prev.json` before the fresh (agent-less) one overwrites it.
+    let sdir = state_dir(&srv.session);
+    let _ = std::fs::rename(sdir.join("snapshot.json"), sdir.join("snapshot.prev.json"));
+    srv.save_snapshot();
 
     let mut last_ring_save = Instant::now();
     let mut last_stall_check = Instant::now();
@@ -219,12 +256,14 @@ pub fn run(session: &str) -> Result<()> {
             // add/remove/rename, so an agent launched inside an existing pane
             // would otherwise be missing from state.json if we died hard.
             srv.save_meta();
+            srv.save_snapshot();
             last_ring_save = Instant::now();
         }
     }
 
     srv.save_meta();
     srv.save_rings();
+    srv.save_snapshot();
     srv.send_ui(T_SERVER_EXIT, 0, &[]);
     srv.send_watchers(T_SERVER_EXIT, 0, &[]);
     for p in &mut srv.panes {
@@ -927,6 +966,52 @@ impl Server {
             let tmp = dir.join("state.json.tmp");
             if std::fs::write(&tmp, &json).is_ok() {
                 let _ = std::fs::rename(&tmp, dir.join("state.json"));
+            }
+        }
+    }
+
+    /// Write `snapshot.json` — see `Snapshot`. Written whole to a temp file
+    /// and renamed, so a restore script never reads a half-written file.
+    fn save_snapshot(&mut self) {
+        let session = self.session.clone();
+        let active = self.idx(self.active).unwrap_or(0) + 1;
+        let saved_at = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0);
+        let panes = self
+            .panes
+            .iter_mut()
+            .enumerate()
+            .map(|(i, p)| {
+                let agent = p.agent();
+                SnapshotPane {
+                    index: i + 1,
+                    name: p.name.clone(),
+                    cwd: p.cwd(),
+                    chat_id: match agent.as_deref() {
+                        Some("claude") => p.chat_id(),
+                        _ => None,
+                    },
+                    model: p.model(),
+                    agent,
+                    auto_resume: p.auto_resume,
+                    renamed: p.renamed,
+                }
+            })
+            .collect();
+        let snap = Snapshot {
+            session,
+            saved_at,
+            active,
+            panes,
+        };
+        let dir = state_dir(&self.session);
+        let _ = std::fs::create_dir_all(&dir);
+        if let Ok(json) = serde_json::to_vec_pretty(&snap) {
+            let tmp = dir.join("snapshot.json.tmp");
+            if std::fs::write(&tmp, &json).is_ok() {
+                let _ = std::fs::rename(&tmp, dir.join("snapshot.json"));
             }
         }
     }

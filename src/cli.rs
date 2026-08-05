@@ -77,8 +77,15 @@ pub fn run(mut args: Vec<String>) -> Result<()> {
         }
         "send" => {
             let id = resolve(&mut sock, &args, 0)?;
-            let enter = args.iter().any(|a| a == "--enter");
-            let text = join_text(&args[1..]);
+            let mut rest: Vec<String> = args[1..].to_vec();
+            let enter = match rest.iter().position(|a| a == "--enter") {
+                Some(i) => {
+                    rest.remove(i);
+                    true
+                }
+                None => false,
+            };
+            let text = join_text(&rest);
             if text.is_empty() && !enter {
                 bail!("usage: zodiac send <pane> <text...> [--enter]");
             }
@@ -207,12 +214,11 @@ fn resolve(sock: &mut UnixStream, args: &[String], pos: usize) -> Result<u64> {
         .ok_or_else(|| anyhow!("no pane {n} (session has {})", st.panes.len()))
 }
 
+/// Everything the user typed, verbatim — text destined for a pane must keep
+/// its `--flags` (`claude --resume <id>` is a command, not zodiac options).
+/// Commands with their own flags strip them before calling this.
 fn join_text(args: &[String]) -> String {
-    args.iter()
-        .filter(|a| !a.starts_with("--"))
-        .cloned()
-        .collect::<Vec<_>>()
-        .join(" ")
+    args.join(" ")
 }
 
 fn flag_value(args: &[String], flag: &str) -> Option<String> {

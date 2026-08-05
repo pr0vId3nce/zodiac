@@ -51,11 +51,33 @@ that, not even magic — but zodiac saves pane names, order, working
 directories, the active pane, and each pane's scrollback (metadata on every
 change, scrollback every 60 s and on SIGTERM, so a normal reboot saves
 cleanly). On next launch it raises each shell from the grave in its old
-directory with a "restored session" banner above the old scrollback; revive
-agents inside with e.g. `claude --resume`. State lives in
-`~/.local/state/zodiac/<session>/` (config and state dirs from the
+directory with a "restored session" banner above the old scrollback. State
+lives in `~/.local/state/zodiac/<session>/` (config and state dirs from the
 pre-rename `coop` days are migrated automatically on first launch — the
 rebrand was foretold).
+
+The agents themselves can be raised too. Every 60 s the server also writes
+`snapshot.json` beside that state: session name, save time, and for each
+pane its index, name, directory, the agent running there, that agent's
+model, and — for claude — the **chat id** of the conversation on screen.
+At startup the old file is kept as `snapshot.prev.json`, so the picture of
+the session as it was before the reboot survives the restart that replaces
+it.
+
+`scripts/zodiac-restore.sh` reads that snapshot and puts the agents back:
+each pane gets `cd <its directory> && claude --resume <its chat id>`, so
+claude reopens the same conversation rather than a blank one. Other agents
+are relaunched by name. Start zodiac first, then:
+
+```sh
+scripts/zodiac-restore.sh                # session 'main', last snapshot
+scripts/zodiac-restore.sh -s work -n     # another session, dry run
+scripts/zodiac-restore.sh --from <file>  # a specific snapshot
+```
+
+It opens any panes the snapshot had and zodiac hasn't, skips panes already
+running the right agent (so re-running it is harmless), and restores names
+you pinned with `Alt+R`.
 
 ## 🃏 The home page (yes, it's a tarot spread)
 

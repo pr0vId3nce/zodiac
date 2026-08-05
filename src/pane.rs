@@ -425,6 +425,22 @@ impl SrvPane {
         }
     }
 
+    /// Claude Code's session ("chat") id for this pane: the newest transcript
+    /// file's stem in the project dir for the pane's cwd. `claude --resume
+    /// <id>` in that directory reopens exactly this conversation, which is
+    /// what makes the session snapshot restorable across a reboot.
+    pub fn chat_id(&self) -> Option<String> {
+        let cwd = self.cwd()?;
+        let (path, _) = claude_session_file(&cwd)?;
+        Some(path.file_stem()?.to_str()?.to_string())
+    }
+
+    /// The short model name for whatever agent is running here, if any.
+    pub fn model(&mut self) -> Option<String> {
+        let agent = self.agent()?;
+        self.agent_model(&agent)
+    }
+
     /// The model the agent in this pane currently runs, as a short display
     /// name (`fable 5`, `sonnet 4.5`) — only for agents whose model is
     /// discoverable: claude via its session transcripts, opencode via its
@@ -832,13 +848,14 @@ fn macos_cwd(pid: u32) -> Option<String> {
     let cwd = String::from_utf8_lossy(&path[..end]).into_owned();
     (!cwd.is_empty()).then_some(cwd)
 }
-
-/// Find a known agent binary among the descendants of `root` by walking
-/// /proc. Matches the basename of argv[0] or argv[1] (argv[1] catches
-/// interpreter-run agents like `node .../bin/claude`).
-fn detect_agent_process(root: u32) -> Option<String> {
+/// Every descendant process of `root` as (pid, argv), breadth-first —
+/// the raw material for "what is actually running in this pane".
+#[cfg(target_os = "linux")]
+fn descendant_procs(root: u32) -> Vec<(u32, Vec<String>)> {
     let mut children: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
-    let entries = std::fs::read_dir("/proc").ok()?;
+    let Ok(entries) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
     for entry in entries.flatten() {
         let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
             continue;
@@ -855,64 +872,184 @@ fn detect_agent_process(root: u32) -> Option<String> {
             children.entry(ppid).or_default().push(pid);
         }
     }
-    let mut queue = vec![root];
-    while let Some(pid) = queue.pop() {
+    let mut out = Vec::new();
+    let mut queue = std::collections::VecDeque::from([root]);
+    while let Some(pid) = queue.pop_front() {
         if pid != root {
-            if let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) {
-                for arg in cmdline.split(|b| *b == 0).take(2) {
-                    let base = String::from_utf8_lossy(arg);
-                    let base = base.rsplit('/').next().unwrap_or_default();
-                    if let Some(hit) = AGENT_BINARIES.iter().find(|a| **a == base) {
-                        return Some(hit.to_string());
-                    }
-                }
-            }
+            let args = std::fs::read(format!("/proc/{pid}/cmdline"))
+                .map(|cmdline| {
+                    cmdline
+                        .split(|b| *b == 0)
+                        .filter(|a| !a.is_empty())
+                        .map(|a| String::from_utf8_lossy(a).into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            out.push((pid, args));
         }
         if let Some(kids) = children.get(&pid) {
             queue.extend(kids);
+        }
+    }
+    out
+}
+
+/// macOS has no /proc: the process table comes from `proc_listpids` +
+/// `proc_pidinfo`, and each descendant's argv from a `KERN_PROCARGS2`
+/// sysctl. When argv is unreadable the accounting name stands in for it,
+/// which is enough for the agent match.
+#[cfg(target_os = "macos")]
+fn descendant_procs(root: u32) -> Vec<(u32, Vec<String>)> {
+    let mut children: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
+    for (pid, ppid) in macos_proc_table() {
+        children.entry(ppid).or_default().push(pid);
+    }
+    let mut out = Vec::new();
+    let mut queue = std::collections::VecDeque::from([root]);
+    while let Some(pid) = queue.pop_front() {
+        if pid != root {
+            let mut args = macos_args(pid);
+            if args.is_empty() {
+                args = process_name(pid).into_iter().collect();
+            }
+            out.push((pid, args));
+        }
+        if let Some(kids) = children.get(&pid) {
+            queue.extend(kids);
+        }
+    }
+    out
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn descendant_procs(_root: u32) -> Vec<(u32, Vec<String>)> {
+    Vec::new()
+}
+
+/// (pid, ppid) for every process this user can see. `proc_listpids` reports
+/// how many *bytes* it wrote, hence the division.
+#[cfg(target_os = "macos")]
+fn macos_proc_table() -> Vec<(u32, u32)> {
+    const PROC_ALL_PIDS: u32 = 1;
+    let want = unsafe { libc::proc_listpids(PROC_ALL_PIDS, 0, std::ptr::null_mut(), 0) };
+    if want <= 0 {
+        return Vec::new();
+    }
+    // Headroom for processes spawned between the sizing call and this one.
+    let cap = want as usize / std::mem::size_of::<libc::c_int>() + 64;
+    let mut pids = vec![0 as libc::c_int; cap];
+    let n = unsafe {
+        libc::proc_listpids(
+            PROC_ALL_PIDS,
+            0,
+            pids.as_mut_ptr() as *mut libc::c_void,
+            (cap * std::mem::size_of::<libc::c_int>()) as libc::c_int,
+        )
+    };
+    if n <= 0 {
+        return Vec::new();
+    }
+    pids.truncate(n as usize / std::mem::size_of::<libc::c_int>());
+    let mut out = Vec::with_capacity(pids.len());
+    for pid in pids {
+        if pid <= 0 {
+            continue;
+        }
+        let mut info: libc::proc_bsdinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_bsdinfo>() as libc::c_int;
+        let got = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTBSDINFO,
+                0,
+                &mut info as *mut _ as *mut libc::c_void,
+                size,
+            )
+        };
+        if got == size {
+            out.push((pid as u32, info.pbi_ppid));
+        }
+    }
+    out
+}
+
+/// A process's argv via `KERN_PROCARGS2`, whose buffer is: argc (u32), the
+/// executable path, NUL padding, then argc NUL-terminated arguments (the
+/// environment follows, and is ignored — argc bounds the walk).
+#[cfg(target_os = "macos")]
+fn macos_args(pid: u32) -> Vec<String> {
+    let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid as libc::c_int];
+    let mut size: libc::size_t = 0;
+    let sized = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            std::ptr::null_mut(),
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if sized != 0 || size < 4 {
+        return Vec::new();
+    }
+    let mut buf = vec![0u8; size];
+    let filled = unsafe {
+        libc::sysctl(
+            mib.as_mut_ptr(),
+            3,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            &mut size,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if filled != 0 || size < 4 {
+        return Vec::new();
+    }
+    buf.truncate(size);
+    let argc = u32::from_ne_bytes(buf[..4].try_into().unwrap()) as usize;
+    let mut chunks = buf[4..].split(|b| *b == 0);
+    chunks.next(); // the exec path, repeated ahead of argv
+    let mut args = Vec::with_capacity(argc);
+    for chunk in chunks {
+        if args.len() == argc {
+            break;
+        }
+        if chunk.is_empty() {
+            continue; // alignment padding between the path and argv[0]
+        }
+        args.push(String::from_utf8_lossy(chunk).into_owned());
+    }
+    args
+}
+
+/// Find a known agent binary among the descendants of `root`. Matches the
+/// basename of argv[0] or argv[1] (argv[1] catches interpreter-run agents
+/// like `node .../bin/claude`).
+fn detect_agent_process(root: u32) -> Option<String> {
+    for (_, args) in descendant_procs(root) {
+        for arg in args.iter().take(2) {
+            let base = arg.rsplit('/').next().unwrap_or(arg);
+            if let Some(hit) = AGENT_BINARIES.iter().find(|a| **a == base) {
+                return Some(hit.to_string());
+            }
         }
     }
     None
 }
 
-/// Same /proc walk as `detect_agent_process`, but for a live `ssh` client
+/// Same descendant walk as `detect_agent_process`, but looking for an `ssh`
 /// process — returns the destination host it's connecting to.
 fn detect_ssh_process(root: u32) -> Option<String> {
-    let mut children: std::collections::HashMap<u32, Vec<u32>> = std::collections::HashMap::new();
-    let entries = std::fs::read_dir("/proc").ok()?;
-    for entry in entries.flatten() {
-        let Ok(pid) = entry.file_name().to_string_lossy().parse::<u32>() else {
-            continue;
-        };
-        let Ok(stat) = std::fs::read_to_string(format!("/proc/{pid}/stat")) else {
-            continue;
-        };
-        let Some(rest) = stat.rfind(')').map(|i| &stat[i + 1..]) else {
-            continue;
-        };
-        if let Some(ppid) = rest.split_whitespace().nth(1).and_then(|s| s.parse().ok()) {
-            children.entry(ppid).or_default().push(pid);
-        }
-    }
-    let mut queue = vec![root];
-    while let Some(pid) = queue.pop() {
-        if pid != root {
-            if let Ok(cmdline) = std::fs::read(format!("/proc/{pid}/cmdline")) {
-                let args: Vec<String> = cmdline
-                    .split(|b| *b == 0)
-                    .filter(|a| !a.is_empty())
-                    .map(|a| String::from_utf8_lossy(a).into_owned())
-                    .collect();
-                let base = args.first().map(|a| a.rsplit('/').next().unwrap_or(a));
-                if base == Some("ssh") {
-                    if let Some(dest) = ssh_destination(&args[1..]) {
-                        return Some(dest);
-                    }
-                }
+    for (_, args) in descendant_procs(root) {
+        let base = args
+            .first()
+            .map(|a| a.rsplit('/').next().unwrap_or(a));
+        if base == Some("ssh") {
+            if let Some(dest) = ssh_destination(&args[1..]) {
+                return Some(dest);
             }
-        }
-        if let Some(kids) = children.get(&pid) {
-            queue.extend(kids);
         }
     }
     None

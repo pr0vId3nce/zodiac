@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::pane::SrvPane;
 use crate::protocol::*;
+use crate::snapshot::{self, SnapPane, Snapshot};
 
 pub enum SrvEvent {
     Conn(UnixStream),
@@ -53,37 +54,6 @@ struct SavedPane {
 
 fn default_true() -> bool {
     true
-}
-
-/// A human-readable, script-readable picture of the session, rewritten once
-/// a minute to `<state dir>/snapshot.json` (and on clean shutdown). Unlike
-/// `state.json` — which zodiac reloads itself and keeps minimal — this one
-/// exists for the outside world: it carries the agent and its chat id per
-/// pane so `scripts/zodiac-restore.sh` can bring the agents back after a
-/// reboot, not just the panes and their directories.
-#[derive(Serialize)]
-struct Snapshot {
-    session: String,
-    /// Seconds since the epoch, so a script can tell how stale this is.
-    saved_at: u64,
-    /// 1-based index of the focused pane.
-    active: usize,
-    panes: Vec<SnapshotPane>,
-}
-
-#[derive(Serialize)]
-struct SnapshotPane {
-    /// 1-based, matching `zodiac ls` and every pane-taking CLI command.
-    index: usize,
-    name: String,
-    cwd: Option<String>,
-    agent: Option<String>,
-    model: Option<String>,
-    /// Claude Code session id — `claude --resume <chat_id>`. Only ever set
-    /// for claude panes; other agents don't expose one we can read.
-    chat_id: Option<String>,
-    auto_resume: bool,
-    renamed: bool,
 }
 
 /// Tail of every restored pane's replayed scrollback. The recorded bytes can
@@ -213,10 +183,9 @@ pub fn run(session: &str) -> Result<()> {
     srv.restore()?;
     srv.save_meta();
     // The snapshot on disk describes the session as it was before this
-    // process started — exactly what a restore script wants. Keep it as
+    // process started — exactly what Alt+⇧R wants. Keep it as
     // `snapshot.prev.json` before the fresh (agent-less) one overwrites it.
-    let sdir = state_dir(&srv.session);
-    let _ = std::fs::rename(sdir.join("snapshot.json"), sdir.join("snapshot.prev.json"));
+    snapshot::rotate(&srv.session);
     srv.save_snapshot();
 
     let mut last_ring_save = Instant::now();
@@ -440,6 +409,7 @@ impl Server {
                     p.write_input(&f.data);
                 }
             }
+            T_RESTORE => self.restore_agents(),
             T_RESIZE => {
                 if f.data.len() >= 4 {
                     let rows = u16::from_le_bytes([f.data[0], f.data[1]]);
@@ -985,7 +955,7 @@ impl Server {
             .enumerate()
             .map(|(i, p)| {
                 let agent = p.agent();
-                SnapshotPane {
+                SnapPane {
                     index: i + 1,
                     name: p.name.clone(),
                     cwd: p.cwd(),
@@ -1000,18 +970,55 @@ impl Server {
                 }
             })
             .collect();
-        let snap = Snapshot {
-            session,
-            saved_at,
-            active,
-            panes,
+        snapshot::write(
+            &self.session,
+            &Snapshot {
+                session,
+                saved_at,
+                active,
+                panes,
+            },
+        );
+    }
+
+    /// Raise the agents from the last snapshot — Alt+⇧R in the UI, or
+    /// `zodiac restore`. Each pane that was running an agent gets the
+    /// command typed back into it (claude on the same conversation).
+    ///
+    /// Panes the snapshot had but this session doesn't are opened first.
+    /// A pane is left strictly alone when it already runs that agent or has
+    /// anything else in the foreground — typing a command into someone's
+    /// vim is worse than skipping them.
+    fn restore_agents(&mut self) {
+        let Some(snap) = snapshot::best(&self.session) else {
+            return;
         };
-        let dir = state_dir(&self.session);
-        let _ = std::fs::create_dir_all(&dir);
-        if let Ok(json) = serde_json::to_vec_pretty(&snap) {
-            let tmp = dir.join("snapshot.json.tmp");
-            if std::fs::write(&tmp, &json).is_ok() {
-                let _ = std::fs::rename(&tmp, dir.join("snapshot.json"));
+        for sp in snap.panes {
+            if sp.agent.is_none() {
+                continue;
+            }
+            // A freshly opened pane's shell needs a moment to reach its
+            // prompt; an existing one is already at it.
+            let (id, delay) = match self.panes.get(sp.index.saturating_sub(1)) {
+                Some(p) => (p.id, 0),
+                None => match self.new_pane(
+                    None,
+                    sp.cwd.clone().map(PathBuf::from),
+                    Vec::new(),
+                    true,
+                ) {
+                    Ok(id) => (id, 900),
+                    Err(_) => continue,
+                },
+            };
+            let tx = self.tx.clone();
+            let Some(pane) = self.pane_mut(id) else { continue };
+            if pane.agent().is_some() || pane.fg_app().is_some() {
+                continue;
+            }
+            let cwd = pane.cwd();
+            if let Some(cmd) = sp.restore_command(cwd.as_deref()) {
+                pane.type_command(tx, cmd, delay);
             }
         }
     }

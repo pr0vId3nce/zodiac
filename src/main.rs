@@ -8,6 +8,7 @@ mod protocol;
 mod query;
 mod server;
 mod settings;
+mod snapshot;
 mod term;
 mod wizard;
 
@@ -118,6 +119,8 @@ commands (against a running server; -s <session>, --json where noted):
                                      a claude pane stuck on \"Response stalled
                                      mid-stream\" / \"Waiting for API response\"
                                      gets Esc + --resume automatically)
+  zodiac restore                       re-launch the agents from the last
+                                     snapshot (claude resumes its chat)
   zodiac kill-server                   shut the session down"
     );
 }

@@ -17,6 +17,7 @@ pub const COMMANDS: &[&str] = &[
     "close",
     "wait",
     "autoresume",
+    "restore",
     "kill-server",
 ];
 
@@ -163,6 +164,9 @@ pub fn run(mut args: Vec<String>) -> Result<()> {
                 _ => bail!("usage: zodiac autoresume <pane> on|off"),
             };
             write_frame(&mut sock, T_AUTORESUME, id, &[on])?;
+        }
+        "restore" => {
+            write_frame(&mut sock, T_RESTORE, 0, &[])?;
         }
         "kill-server" => {
             write_frame(&mut sock, T_SHUTDOWN, 0, &[])?;

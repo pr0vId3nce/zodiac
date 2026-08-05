@@ -406,6 +406,22 @@ impl SrvPane {
         });
     }
 
+    /// Type a command line into this pane after `delay_ms` — how the
+    /// snapshot restore puts an agent back. Paced on a helper thread (like
+    /// `fire_autoresume`) so waiting for a newly spawned shell to reach its
+    /// prompt doesn't block every other pane's I/O.
+    pub fn type_command(&self, tx: Sender<SrvEvent>, cmd: String, delay_ms: u64) {
+        let id = self.id;
+        std::thread::spawn(move || {
+            if delay_ms > 0 {
+                std::thread::sleep(Duration::from_millis(delay_ms));
+            }
+            let mut line = cmd.into_bytes();
+            line.push(b'\r');
+            let _ = tx.send(SrvEvent::Deliver(id, line));
+        });
+    }
+
     pub fn cwd(&self) -> Option<String> {
         let pid = self.pid?;
         #[cfg(target_os = "linux")]
@@ -500,7 +516,7 @@ impl SrvPane {
     /// `htop`, … — or None when the shell itself is at the prompt (or the
     /// answer is unknowable). Asks the PTY who owns the terminal
     /// (`tcgetpgrp`), which is exactly the "an app is open here" signal.
-    fn fg_app(&self) -> Option<String> {
+    pub fn fg_app(&self) -> Option<String> {
         let fd = self.master.as_raw_fd()?;
         let pgid = unsafe { libc::tcgetpgrp(fd) };
         if pgid <= 0 {

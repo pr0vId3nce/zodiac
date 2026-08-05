@@ -60,14 +60,23 @@ The agents themselves can be raised too. Every 60 s the server also writes
 `snapshot.json` beside that state: session name, save time, and for each
 pane its index, name, directory, the agent running there, that agent's
 model, and — for claude — the **chat id** of the conversation on screen.
-At startup the old file is kept as `snapshot.prev.json`, so the picture of
-the session as it was before the reboot survives the restart that replaces
-it.
+At startup the old file is kept as `snapshot.prev.json` — but only when it
+actually had agents in it, so two restarts in a row can't push the last
+useful picture out.
 
-`scripts/zodiac-restore.sh` reads that snapshot and puts the agents back:
-each pane gets `cd <its directory> && claude --resume <its chat id>`, so
-claude reopens the same conversation rather than a blank one. Other agents
-are relaunched by name. Start zodiac first, then:
+**`Alt+⇧R` raises them.** The overlay lists what the snapshot holds — the
+agent, its model, whether a chat id came with it, and the directory — and
+`Enter` puts them back: each pane gets `cd <its directory> && claude
+--resume <its chat id>` typed in, so claude reopens the same conversation
+rather than a blank one. Other agents are relaunched by name. Panes the
+snapshot had but this session doesn't are opened first; panes already
+running that agent, or with anything else in the foreground, are left
+strictly alone (nobody wants a command typed into their vim), which also
+makes pressing it twice harmless. `zodiac restore` does the same thing from
+a script.
+
+`scripts/zodiac-restore.sh` is the same ritual for anyone who'd rather
+drive it from outside — it reads the JSON itself and can preview:
 
 ```sh
 scripts/zodiac-restore.sh                # session 'main', last snapshot
@@ -115,6 +124,7 @@ All multiplexer keys use `Alt` so the inner terminal keeps `TAB`, `Ctrl+W`,
 | `Alt+N` | New pane (spawns `$SHELL`) |
 | `Alt+W` | Close pane — kills its process. Closing the last pane ends the session. |
 | `Alt+R` | Rename pane (`Enter` save, `Esc` cancel) |
+| `Alt+Shift+R` | Raise the last session's agents from the snapshot (`Enter` confirm, `Esc` cancel) |
 | `Alt+1`–`9` | Jump to pane by number |
 | `Alt+↑` / `Alt+↓` | Step through the pane list |
 | `Alt+PgUp` / `Alt+PgDn` | Move pane up/down the list (numbers are positional, so its number changes with its slot) |

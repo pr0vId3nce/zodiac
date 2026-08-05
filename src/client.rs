@@ -53,6 +53,7 @@ const CONTROLS: &[(&str, &str)] = &[
     ("Alt+N", "new pane"),
     ("Alt+W", "close pane"),
     ("Alt+R", "rename pane"),
+    ("Alt+⇧R", "restore agents"),
     ("Alt+↑/↓", "switch pane"),
     ("Alt+1-9", "jump to pane"),
     ("Alt+PgUp/Dn", "move pane"),
@@ -287,6 +288,9 @@ enum Mode {
     /// Fuzzy-find a pane by name (Alt+/); `jump_sel` on `App` tracks which
     /// of the live-filtered matches is highlighted.
     Jump { buf: String },
+    /// Alt+⇧R: what the last snapshot would raise, awaiting confirmation.
+    /// One line per agent pane; empty when there's nothing to restore.
+    Restore { lines: Vec<String>, age: String },
 }
 
 /// A mouse selection in the pane area, in pane-relative (row, col) cells.
@@ -1243,12 +1247,60 @@ impl App {
         }
     }
 
+    /// What Alt+⇧R would raise, read from the session snapshot: one line
+    /// per pane that had an agent, plus how old the picture is. The server
+    /// does the actual work (`T_RESTORE`) — this is only the confirmation.
+    fn restore_preview(&self) -> Mode {
+        let Some(snap) = crate::snapshot::best(&self.session) else {
+            return Mode::Restore {
+                lines: Vec::new(),
+                age: String::new(),
+            };
+        };
+        let home = std::env::var("HOME").unwrap_or_default();
+        let lines = snap
+            .panes
+            .iter()
+            .filter(|p| p.agent.is_some())
+            .map(|p| {
+                let what = match (p.agent.as_deref(), p.model.as_deref()) {
+                    (Some(a), Some(m)) => format!("{a} ({m})"),
+                    (Some(a), None) => a.to_string(),
+                    _ => "agent".to_string(),
+                };
+                let where_ = p.cwd.as_deref().unwrap_or("");
+                let where_ = match where_.strip_prefix(&home) {
+                    Some(rest) if !home.is_empty() => format!("~{rest}"),
+                    _ => where_.to_string(),
+                };
+                let chat = if p.chat_id.is_some() { " ↩ chat" } else { "" };
+                format!("{:>2}  {what}{chat}  {where_}", p.index)
+            })
+            .collect();
+        Mode::Restore {
+            lines,
+            age: ago(snap.saved_at),
+        }
+    }
+
     fn handle_key(&mut self, key: KeyEvent) {
         if key.kind == KeyEventKind::Release {
             return;
         }
         self.selection = None;
         self.selecting = false;
+
+        if let Mode::Restore { lines, .. } = &self.mode {
+            let anything = !lines.is_empty();
+            match key.code {
+                KeyCode::Enter if anything => {
+                    self.send(T_RESTORE, 0, &[]);
+                    self.mode = Mode::Normal;
+                }
+                _ => self.mode = Mode::Normal,
+            }
+            return;
+        }
 
         if let Mode::Rename { buf } = &mut self.mode {
             match key.code {
@@ -1479,8 +1531,14 @@ impl App {
                     self.zoom = !self.zoom;
                     return;
                 }
-                KeyCode::Char('r') | KeyCode::Char('R') => {
-                    if let Some(p) = self.panes.get(self.active) {
+                KeyCode::Char('R') => {
+                    self.mode = self.restore_preview();
+                    return;
+                }
+                KeyCode::Char('r') => {
+                    if shift {
+                        self.mode = self.restore_preview();
+                    } else if let Some(p) = self.panes.get(self.active) {
                         self.mode = Mode::Rename {
                             buf: p.name.clone(),
                         };
@@ -2494,6 +2552,9 @@ impl App {
             if matches!(self.mode, Mode::Jump { .. }) {
                 self.draw_jump(f, area);
             }
+            if matches!(self.mode, Mode::Restore { .. }) {
+                self.draw_restore(f, area);
+            }
             return;
         }
 
@@ -2580,6 +2641,70 @@ impl App {
         if matches!(self.mode, Mode::Jump { .. }) {
             self.draw_jump(f, area);
         }
+        if matches!(self.mode, Mode::Restore { .. }) {
+            self.draw_restore(f, area);
+        }
+    }
+
+    /// Floating overlay for `Mode::Restore`: what the last snapshot holds,
+    /// awaiting Enter. Panes already running their agent are skipped
+    /// server-side, so this lists the snapshot, not the delta.
+    fn draw_restore(&self, f: &mut Frame, area: Rect) {
+        let Mode::Restore { lines, age } = &self.mode else {
+            return;
+        };
+        if area.width < 20 || area.height < 6 {
+            return;
+        }
+        let w = 60.min(area.width.saturating_sub(4)).max(24);
+        // Borders + the "snapshot from …" header, a blank row, and the key
+        // hint: five rows that aren't the list itself.
+        let h = (lines.len().max(1) as u16 + 5).min(area.height.saturating_sub(2));
+        let rect = Rect {
+            x: (area.width.saturating_sub(w)) / 2,
+            y: (area.height.saturating_sub(h)) / 3,
+            width: w,
+            height: h,
+        };
+        f.render_widget(Clear, rect);
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .title(" raise the last session ")
+            .border_style(Style::default().fg(Color::Cyan));
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+
+        let mut out: Vec<Line> = Vec::new();
+        if lines.is_empty() {
+            out.push(Line::from(Span::styled(
+                "no snapshot with agents in it — nothing to raise",
+                Style::default().fg(Color::DarkGray).italic(),
+            )));
+            out.push(Line::from(""));
+            out.push(Line::from(Span::styled(
+                "any key to close",
+                Style::default().fg(Color::DarkGray),
+            )));
+        } else {
+            out.push(Line::from(Span::styled(
+                format!("snapshot from {age}"),
+                Style::default().fg(Color::DarkGray).italic(),
+            )));
+            for l in lines.iter().take(inner.height.saturating_sub(3) as usize) {
+                out.push(Line::from(Span::styled(
+                    truncate(l, inner.width as usize),
+                    Style::default().fg(Color::Gray),
+                )));
+            }
+            out.push(Line::from(""));
+            out.push(Line::from(vec![
+                Span::styled("Enter", Style::default().fg(Color::Yellow).bold()),
+                Span::styled(" to raise them · ", Style::default().fg(Color::DarkGray)),
+                Span::styled("Esc", Style::default().fg(Color::Yellow).bold()),
+                Span::styled(" to cancel", Style::default().fg(Color::DarkGray)),
+            ]));
+        }
+        f.render_widget(Paragraph::new(out), inner);
     }
 
     /// Floating overlay for `Mode::Jump`: an input line plus the live
@@ -5171,6 +5296,23 @@ fn fuzzy_score(text: &str, pattern: &str) -> Option<i32> {
     }
     score -= tchars.len() as i32 / 8;
     Some(score)
+}
+
+/// "4 minutes ago" for a unix timestamp — how stale the snapshot behind the
+/// Alt+⇧R overlay is. Coarse on purpose; nothing here needs seconds.
+fn ago(unix_secs: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let secs = now.saturating_sub(unix_secs);
+    let (n, unit) = match secs {
+        0..=59 => return "moments ago".into(),
+        60..=3599 => (secs / 60, "minute"),
+        3600..=86399 => (secs / 3600, "hour"),
+        _ => (secs / 86400, "day"),
+    };
+    format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
 }
 
 fn truncate(s: &str, max: usize) -> String {

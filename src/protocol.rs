@@ -18,6 +18,7 @@ pub const T_QUERY: u8 = 11; // request SessionState JSON
 pub const T_READ_SCREEN: u8 = 12; // request rendered screen text of pane id
 pub const T_AUTORESUME: u8 = 13; // payload[0]: 0 = off, 1 = on (per pane)
 pub const T_WATCH: u8 = 14; // become a read-only observer (state + replay + live output)
+pub const T_RESTORE: u8 = 15; // re-launch the agents from the last snapshot (see snapshot.rs)
 
 // server -> client
 pub const T_HELLO: u8 = 20; // payload: Hello JSON

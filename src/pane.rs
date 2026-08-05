@@ -20,6 +20,10 @@ pub struct SrvPane {
     /// The user pinned this name (Alt+R / `zodiac rename`) — auto-naming
     /// leaves it alone. An empty Alt+R rename clears the pin.
     pub renamed: bool,
+    /// Auto-naming's cache of the agent's model, keyed by the session
+    /// transcript's mtime (see `claude_model`).
+    model_mtime: Option<std::time::SystemTime>,
+    model_name: Option<String>,
     pub ring: Vec<u8>,
     parser: vt100::Parser, // bell/status tracking + graphics event source
     splitter: GfxSplitter,
@@ -131,6 +135,8 @@ impl SrvPane {
             id,
             name,
             renamed: false,
+            model_mtime: None,
+            model_name: None,
             ring: preload,
             parser,
             splitter: GfxSplitter::new(),
@@ -419,6 +425,61 @@ impl SrvPane {
         }
     }
 
+    /// The model the agent in this pane currently runs, as a short display
+    /// name (`fable 5`, `sonnet 4.5`) — only for agents whose model is
+    /// discoverable: claude via its session transcripts, opencode via its
+    /// on-screen footer.
+    fn agent_model(&mut self, agent: &str) -> Option<String> {
+        match agent {
+            "claude" => self.claude_model(),
+            "opencode" => self.opencode_model(),
+            _ => None,
+        }
+    }
+
+    /// Claude Code writes each assistant turn's `model` into its session
+    /// transcript under ~/.claude/projects/<munged-cwd>/. The newest .jsonl
+    /// for the pane's cwd is almost certainly this pane's session (multiple
+    /// claude panes in one directory share a project dir — the most recently
+    /// written one wins, which is right whenever they run the same model and
+    /// a harmless near-miss when they don't). Cached by file mtime so the
+    /// 1s auto-name tick doesn't re-read an idle transcript.
+    fn claude_model(&mut self) -> Option<String> {
+        let cwd = self.cwd()?;
+        let (path, mtime) = claude_session_file(&cwd)?;
+        if self.model_mtime == Some(mtime) {
+            return self.model_name.clone();
+        }
+        let name = model_from_transcript(&path);
+        self.model_mtime = Some(mtime);
+        self.model_name = name.clone();
+        name
+    }
+
+    /// opencode shows `provider/model` in its TUI footer — parse it out of
+    /// the bottom rows of the screen. Conservative: the model half must
+    /// carry a digit so ordinary paths don't match.
+    fn opencode_model(&self) -> Option<String> {
+        let tail = self.tail_text(3)?;
+        for token in tail.split_whitespace().rev() {
+            if let Some((provider, model)) = token.split_once('/') {
+                let provider_ok = !provider.is_empty()
+                    && provider
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
+                let model_ok = model.len() >= 3
+                    && model.chars().any(|c| c.is_ascii_digit())
+                    && model
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.' || c == '_');
+                if provider_ok && model_ok {
+                    return Some(short_model_name(model));
+                }
+            }
+        }
+        None
+    }
+
     /// The name of the app in this pane's foreground process group — `nvim`,
     /// `htop`, … — or None when the shell itself is at the prompt (or the
     /// answer is unknowable). Asks the PTY who owns the terminal
@@ -440,11 +501,15 @@ impl SrvPane {
     }
 
     /// What this pane should be called when the user hasn't named it:
-    /// the agent running here, else the ssh destination, else the
+    /// the agent running here (with its selected model, when known — e.g.
+    /// `fable 5` instead of `claude`), else the ssh destination, else the
     /// foreground app, else the shell's working directory (basename,
     /// `~` for home, `/` for root).
-    pub fn auto_name(&self) -> Option<String> {
+    pub fn auto_name(&mut self) -> Option<String> {
         if let Some(agent) = self.agent() {
+            if let Some(model) = self.agent_model(&agent) {
+                return Some(model);
+            }
             return Some(agent);
         }
         if let Some(host) = self.ssh_target() {
@@ -620,6 +685,91 @@ const STALL_COOLDOWN: Duration = Duration::from_secs(30);
 const STALL_RETRY: Duration = Duration::from_secs(90);
 
 const AGENT_BINARIES: &[&str] = &["claude", "opencode", "codex", "aider", "gemini", "goose"];
+
+/// The newest Claude Code session transcript for a working directory:
+/// ~/.claude/projects/<munged>/<session>.jsonl, where the project dir name
+/// is the cwd with every non-alphanumeric character turned into `-`.
+fn claude_session_file(cwd: &str) -> Option<(std::path::PathBuf, std::time::SystemTime)> {
+    let home = std::env::var("HOME").ok()?;
+    let munged: String = cwd
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+        .collect();
+    let dir = std::path::Path::new(&home).join(".claude/projects").join(munged);
+    let mut newest: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if newest.as_ref().is_none_or(|(_, t)| mtime > *t) {
+            newest = Some((path, mtime));
+        }
+    }
+    newest
+}
+
+/// The last `"model": "..."` value in the tail of a session transcript —
+/// assistant turns carry the model that produced them, so the last one is
+/// the session's current selection (and tracks /model switches). Reads at
+/// most the final 64 KB.
+fn model_from_transcript(path: &std::path::Path) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(64 * 1024))).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    last_model_in(&text)
+}
+
+fn last_model_in(text: &str) -> Option<String> {
+    let mut best: Option<&str> = None;
+    let mut at = 0;
+    while let Some(pos) = text[at..].find("\"model\":") {
+        let rest = &text[at + pos + 8..];
+        let rest = rest.trim_start();
+        at += pos + 8;
+        if let Some(rest) = rest.strip_prefix('"') {
+            if let Some(end) = rest.find('"') {
+                let m = &rest[..end];
+                if !m.is_empty() && !m.starts_with('<') {
+                    best = Some(m);
+                }
+            }
+        }
+    }
+    best.map(short_model_name)
+}
+
+/// `claude-sonnet-4-5-20250929` → `sonnet 4.5`, `claude-fable-5` →
+/// `fable 5`: strip the vendor prefix and date suffix, join version digits
+/// with dots. Ids that don't fit the family-then-numbers shape just get
+/// their dashes spaced out.
+fn short_model_name(id: &str) -> String {
+    let id = id.strip_prefix("claude-").unwrap_or(id);
+    let id = match id.len().checked_sub(9) {
+        Some(cut)
+            if id.as_bytes()[cut] == b'-'
+                && id[cut + 1..].chars().all(|c| c.is_ascii_digit()) =>
+        {
+            &id[..cut]
+        }
+        _ => id,
+    };
+    let mut parts = id.split('-');
+    let family = parts.next().unwrap_or(id);
+    let nums: Vec<&str> = parts.collect();
+    if !nums.is_empty() && nums.iter().all(|n| n.chars().all(|c| c.is_ascii_digit())) {
+        format!("{} {}", family, nums.join("."))
+    } else {
+        id.replace('-', " ")
+    }
+}
 
 /// Foreground names that mean "nothing is really running here" — the pane
 /// falls through to cwd-based auto-naming.
@@ -930,5 +1080,28 @@ mod tests {
         lines.extend(std::iter::repeat("filler").take(20));
         let p = feed(&lines);
         assert_eq!(stall_match(p.screen(), true), None);
+    }
+}
+
+#[cfg(test)]
+mod model_name_tests {
+    use super::{last_model_in, short_model_name};
+
+    #[test]
+    fn short_names_strip_vendor_and_date() {
+        assert_eq!(short_model_name("claude-fable-5"), "fable 5");
+        assert_eq!(short_model_name("claude-opus-5"), "opus 5");
+        assert_eq!(short_model_name("claude-sonnet-4-5-20250929"), "sonnet 4.5");
+        assert_eq!(short_model_name("claude-haiku-4-5-20251001"), "haiku 4.5");
+        assert_eq!(short_model_name("gpt-5.2"), "gpt 5.2");
+    }
+
+    #[test]
+    fn last_model_wins_and_synthetic_is_skipped() {
+        let t = r#"{"message":{"model":"claude-opus-5"}}
+{"message":{"model":"<synthetic>"}}
+{"message":{"model":"claude-fable-5"}}"#;
+        assert_eq!(last_model_in(t), Some("fable 5".to_string()));
+        assert_eq!(last_model_in("no model here"), None);
     }
 }

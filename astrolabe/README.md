@@ -29,8 +29,11 @@ Astrolabe ships none of its own.
   home is the iOS app's WKWebView; `?web=1` (sticky) re-enables browser
   access for development.
 - **ios** (not in this repo — it ships through the App Store separately):
-  a native shell holding a *list of paired computers*, called **zodiac** on
-  the phone, since that's the thing it shows you. Pair by scanning
+  the product, and fully native as of Aug 2026 — the agents screen, pane
+  view, terminal (SwiftTerm core + a native renderer), composer, question
+  buttons, keys pad and slash suggestions are all SwiftUI, speaking the
+  bridge's WebSocket protocol directly. No WKWebView remains. Called
+  **zodiac** on the phone, since that's the thing it shows you. Pair by scanning
   zodiac's QR (Alt+P), tap one to open a WKWebView on that computer's web
   UI, unchanged. It adds APNs push ("agent needs you", with lock-screen
   inline reply and numbered-answer buttons; badge = panes waiting across

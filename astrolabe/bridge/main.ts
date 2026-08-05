@@ -18,6 +18,7 @@
 //                      subtitle/recap/title text.
 
 import * as crypto from "node:crypto";
+import * as os from "node:os";
 import * as http from "node:http";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -71,17 +72,46 @@ function tokenOk(supplied: string | null): boolean {
   return !!supplied && candidates.some((c) => constantTimeEq(supplied, c));
 }
 
-function tailscaleIp(): string | null {
-  try {
-    const out = execFileSync("tailscale", ["ip", "-4"], {
-      encoding: "utf8",
-      timeout: 3000,
-    });
-    const ip = out.split("\n")[0].trim();
-    return /^\d+\.\d+\.\d+\.\d+$/.test(ip) ? ip : null;
-  } catch {
-    return null;
+/// This machine's tailnet IPv4, read straight off the interface list: a
+/// tailscale address is always in the CGNAT block (100.64.0.0/10) on the
+/// utun/tailscale device it owns. No subprocess, which matters under
+/// launchd and systemd, where PATH is minimal and the `tailscale` CLI is
+/// usually not on it — on macOS it isn't even installed by default, it
+/// lives inside Tailscale.app.
+function tailscaleIfaceIp(): string | null {
+  for (const addrs of Object.values(os.networkInterfaces())) {
+    for (const a of addrs ?? []) {
+      if (a.family !== "IPv4" || a.internal) continue;
+      const [x, y] = a.address.split(".").map(Number);
+      if (x === 100 && y >= 64 && y <= 127) return a.address;
+    }
   }
+  return null;
+}
+
+/// Fallback for an unusual setup (a tailnet on a non-CGNAT range): ask the
+/// CLI, wherever it happens to live.
+function tailscaleCliIp(): string | null {
+  const candidates = [
+    "tailscale",
+    "/usr/local/bin/tailscale",
+    "/opt/homebrew/bin/tailscale",
+    "/Applications/Tailscale.app/Contents/MacOS/Tailscale",
+  ];
+  for (const bin of candidates) {
+    try {
+      const out = execFileSync(bin, ["ip", "-4"], { encoding: "utf8", timeout: 3000 });
+      const ip = out.split("\n")[0].trim();
+      if (/^\d+\.\d+\.\d+\.\d+$/.test(ip)) return ip;
+    } catch {
+      /* not here, or not up yet — try the next one */
+    }
+  }
+  return null;
+}
+
+function tailscaleIp(): string | null {
+  return tailscaleIfaceIp() ?? tailscaleCliIp();
 }
 
 function socketPath(session: string): string {

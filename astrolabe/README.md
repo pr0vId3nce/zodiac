@@ -54,7 +54,7 @@ Env knobs (set in `~/.config/systemd/user/astrolabe.service`):
 | --- | --- | --- |
 | `ASTROLABE_PORT` | `7979` | listen port |
 | `ASTROLABE_SESSION` | `main` | zodiac session to mirror |
-| `ASTROLABE_HOST` | tailscale IPv4 | bind address override |
+| `ASTROLABE_HOST` | tailscale IPv4 | bind address override — the default is read off the interface carrying a 100.64.0.0/10 address, so it works under launchd/systemd where the `tailscale` CLI isn't on PATH |
 | `ASTROLABE_APNS_KEY` | — | path to the `.p8` APNs auth key (enables push) |
 | `ASTROLABE_APNS_KEY_ID` / `ASTROLABE_APNS_TEAM_ID` | — | from the developer portal |
 | `ASTROLABE_APNS_TOPIC` | — | app bundle id (`dev.d3s.Astrolabe`) |

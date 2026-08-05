@@ -499,6 +499,10 @@ struct App {
     wiz_sent: std::collections::HashSet<(u32, u32, u32)>,
     /// Portrait placement currently alive terminal-side.
     wiz_placed: Option<(Rect, u32)>,
+    /// This server gates mouse reports on the pane's foreground app (its
+    /// hello said so). Older servers don't know `T_MOUSE` and would drop it
+    /// on the floor, so against those we keep sending plain `T_INPUT`.
+    server_mouse_gate: bool,
     /// Set when the QR pairing overlay (Alt+P) is open — hides card art via
     /// kitty_overlay() the same way Mode::Settings does, and draws one
     /// scannable QR of this machine's pairing URL over the home page.
@@ -626,6 +630,7 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         wiz_art_rect: Rect::default(),
         wiz_sent: std::collections::HashSet::new(),
         wiz_placed: None,
+        server_mouse_gate: false,
         pair_open: false,
         pair_endpoint: None,
         pair_qr_src: String::new(),
@@ -1042,7 +1047,12 @@ impl App {
             return false;
         };
         if let Some(id) = self.active_id() {
-            self.send(T_INPUT, id, &bytes);
+            let typ = if self.server_mouse_gate {
+                T_MOUSE
+            } else {
+                T_INPUT
+            };
+            self.send(typ, id, &bytes);
         }
         true
     }
@@ -1088,6 +1098,7 @@ impl App {
         match f.typ {
             T_HELLO => {
                 if let Ok(h) = serde_json::from_slice::<Hello>(&f.data) {
+                    self.server_mouse_gate = h.mouse_gate;
                     let (rows, cols) = self.main_size;
                     self.panes = h
                         .panes

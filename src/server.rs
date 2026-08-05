@@ -410,6 +410,20 @@ impl Server {
                 }
             }
             T_RESTORE => self.restore_agents(),
+            T_MOUSE => {
+                // Mouse reports reach a pane only while a real application
+                // owns its pty. The client already checks that the pane's
+                // emulator asked for mouse reporting, but that flag is
+                // sticky: a program that enabled tracking and died without
+                // turning it back off (crash, kill -9) would leave the pane
+                // in mouse mode for good, and every pointer twitch would be
+                // typed at the shell prompt as `35;8;19M`-shaped junk.
+                if let Some(p) = self.pane_mut(f.id) {
+                    if p.app_foreground() {
+                        p.write_input(&f.data);
+                    }
+                }
+            }
             T_RESIZE => {
                 if f.data.len() >= 4 {
                     let rows = u16::from_le_bytes([f.data[0], f.data[1]]);
@@ -675,6 +689,7 @@ impl Server {
 
         let hello = Hello {
             active: self.active,
+            mouse_gate: true,
             panes: self
                 .panes
                 .iter()

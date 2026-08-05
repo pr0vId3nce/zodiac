@@ -19,6 +19,10 @@ pub const T_READ_SCREEN: u8 = 12; // request rendered screen text of pane id
 pub const T_AUTORESUME: u8 = 13; // payload[0]: 0 = off, 1 = on (per pane)
 pub const T_WATCH: u8 = 14; // become a read-only observer (state + replay + live output)
 pub const T_RESTORE: u8 = 15; // re-launch the agents from the last snapshot (see snapshot.rs)
+/// Encoded mouse report for pane id. Separate from `T_INPUT` so the server
+/// can drop it when no application owns the pane's pty — see the gate in
+/// `Server::handle` and `Pane::app_foreground`.
+pub const T_MOUSE: u8 = 16;
 
 // server -> client
 pub const T_HELLO: u8 = 20; // payload: Hello JSON
@@ -105,6 +109,12 @@ pub struct HelloPane {
 pub struct Hello {
     pub panes: Vec<HelloPane>,
     pub active: u64,
+    /// This server understands `T_MOUSE`. Missing from an older server's
+    /// hello, where the client keeps sending mouse reports as `T_INPUT`
+    /// (ungated, as before) rather than into a frame type that would be
+    /// silently dropped.
+    #[serde(default)]
+    pub mouse_gate: bool,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -268,4 +278,44 @@ pub fn state_dir(session: &str) -> PathBuf {
             PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/state")
         });
     base.join("zodiac").join(session)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hello_from_an_old_server_has_no_mouse_gate() {
+        // Pre-T_MOUSE servers send a hello without the field; the client
+        // must read that as "no gate" and keep using T_INPUT, or mouse
+        // reports would vanish into a frame type the server ignores.
+        let h: Hello = serde_json::from_str(r#"{"panes":[],"active":0}"#).unwrap();
+        assert!(!h.mouse_gate);
+    }
+
+    #[test]
+    fn hello_round_trips_mouse_gate() {
+        let json = serde_json::to_string(&Hello {
+            panes: Vec::new(),
+            active: 3,
+            mouse_gate: true,
+        })
+        .unwrap();
+        let back: Hello = serde_json::from_str(&json).unwrap();
+        assert!(back.mouse_gate);
+        assert_eq!(back.active, 3);
+    }
+
+    #[test]
+    fn client_frame_types_are_distinct() {
+        let types = [
+            T_INPUT, T_RESIZE, T_NEW_PANE, T_CLOSE_PANE, T_RENAME, T_MOVE, T_FOCUS, T_DETACH,
+            T_SHUTDOWN, T_ATTACH, T_QUERY, T_READ_SCREEN, T_AUTORESUME, T_WATCH, T_RESTORE,
+            T_MOUSE,
+        ];
+        let mut seen = types.to_vec();
+        seen.sort_unstable();
+        seen.dedup();
+        assert_eq!(seen.len(), types.len(), "two client frame types collide");
+    }
 }

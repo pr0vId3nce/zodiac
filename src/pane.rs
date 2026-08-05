@@ -532,6 +532,13 @@ impl SrvPane {
         Some(name)
     }
 
+    /// Whether a real application — rather than the shell sitting at its
+    /// prompt — currently owns this pane's terminal. Gates mouse reports:
+    /// see the `T_MOUSE` arm in `server::Server::handle`.
+    pub fn app_foreground(&self) -> bool {
+        self.fg_app().is_some()
+    }
+
     /// What this pane should be called when the user hasn't named it:
     /// the agent running here (with its selected model, when known — e.g.
     /// `fable 5` instead of `claude`), else the ssh destination, else the

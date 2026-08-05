@@ -53,7 +53,7 @@ export default function App() {
   const renderHerd = (): ReactNode => (
     <>
       <header className="safe-top sticky top-0 z-10 flex items-center gap-2 border-b border-card-edge bg-sky-mid/70 px-4 py-3 backdrop-blur">
-        <span className="font-serif text-lg font-bold text-gold">Astrolabe</span>
+        <span className="font-serif text-lg font-bold text-gold">zodiac</span>
         <span className="text-sm text-zinc-500">✶ {astrolabe.session}</span>
         <span
           className={cn(

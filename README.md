@@ -237,7 +237,8 @@ state, replay and live output without ever disturbing the attached UI.
 Pairing is by QR (`Alt+P`) carrying a token the server mints per launch.
 
 Three pieces: a TypeScript **bridge** (zodiac's socket on one side, HTTP +
-WebSocket on the other), a React **PWA**, and a native **iOS** app that holds
+WebSocket on the other), a React **PWA**, and a native **iOS** app — named
+zodiac on the phone too — that holds
 a list of paired computers, delivers push notifications, and shows the
 selected machine's uptime, battery, CPU and memory in its title bar. The iOS
 sources live outside this repo; everything they talk to is here. See
@@ -250,8 +251,8 @@ OpenAI-compatible endpoint over your tailnet (a llama-server, by default).
 It's a general assistant, not a session narrator: the pane overview isn't fed
 to it unless the question sounds like it concerns the session, plus one turn
 of momentum so follow-ups still land. It can pull the overview in itself via
-a `read_spread` tool, and `/why <n>` attaches it outright. `/wake` and
-`/dispell` start and stop the model's systemd unit over ssh.
+a `read_panes` tool, and `/why <n>` attaches it outright. `/wake` and
+`/sleep` start and stop the model's systemd unit over ssh.
 
 It can also search the web and fetch URLs when a question turns on facts it
 doesn't have — three tool rounds per question, then it has to answer.
@@ -259,23 +260,26 @@ Searching shells out to `curl`, which must be on the PATH of whatever machine
 runs the client.
 
 These have no settings-page rows; they live in
-`~/.config/zodiac/config.json`. The keys keep a `wizard_` prefix for
-historical reasons:
+`~/.config/zodiac/config.json`:
 
 | key | default | what |
 | --- | --- | --- |
-| `wizard_chat` | `true` | show the panel at all |
-| `wizard_endpoint` | `http://bigbox:8091` | OpenAI-compatible endpoint |
-| `wizard_model` | `qwen3.6-35b-a3b` | model name sent with each request |
-| `wizard_ssh` | `des@bigbox` | where `/wake` and `/dispell` ssh to |
-| `wizard_service` | `llama-server` | the systemd --user unit they start/stop |
-| `wizard_width` | `40` | panel width in cells |
-| `wizard_search_url` | *(empty)* | Wikipedia when empty; a SearXNG base URL (needs `json` in `search.formats`) or `https://api.search.brave.com` otherwise |
-| `wizard_search_key` | *(empty)* | API key, for backends that want one |
-| `wizard_watch` | `true` | the background summarizer and stuck-pane check (see below) |
-| `wizard_act` | `false` | allow `prompt_pane`/`send_keys` — see below |
+| `chat_panel` | `true` | show the panel at all |
+| `chat_endpoint` | `http://bigbox:8091` | OpenAI-compatible endpoint |
+| `chat_model` | `qwen3.6-35b-a3b` | model name sent with each request |
+| `chat_ssh` | `des@bigbox` | where `/wake` and `/sleep` ssh to |
+| `chat_service` | `llama-server` | the systemd --user unit they start/stop |
+| `chat_width` | `40` | panel width in cells |
+| `chat_search_url` | *(empty)* | Wikipedia when empty; a SearXNG base URL (needs `json` in `search.formats`) or `https://api.search.brave.com` otherwise |
+| `chat_search_key` | *(empty)* | API key, for backends that want one |
+| `pane_monitor` | `true` | the background summarizer and stuck-pane check (see below) |
+| `chat_act` | `false` | allow `prompt_pane`/`send_keys` — see below |
 
-With `wizard_act` on, the panel can offer to submit a prompt to a pane or
+These were once named `wizard_*`; a config using the old names still loads
+(each key kept an alias), and gets rewritten to the new ones the next time
+settings are saved.
+
+With `chat_act` on, the panel can offer to submit a prompt to a pane or
 send raw keystrokes, but neither ever fires on its own: each call shows a
 consent line in the transcript and waits for `y` or `n`. No timeout, no
 auto-accept.
@@ -288,8 +292,8 @@ one-line summary under each pane's status and to flag panes that have been
 pane — it produces a notification and a log line, nothing more.
 
 This one is not configurable yet: the host, port and model name are constants
-in `src/familiar.rs`, pointing at a CPU-only llama-server on the author's
-tailnet. Edit those (or set `wizard_watch: false`) until it grows real
+in `src/monitor.rs`, pointing at a CPU-only llama-server on the author's
+tailnet. Edit those (or set `pane_monitor: false`) until it grows real
 settings.
 
 ## Settings
@@ -318,7 +322,7 @@ carries a keybinding reference in its right column.
 | Conn-error resume | Immediate `--resume` on "Connection closed mid-response" |
 | Cursor type / blink / color | Follow the inner app or force block/underline/bar; blink on/off; focused-pane tint |
 | Bottom controls | Hide the keybinding hints in the status bar |
-| Chat character | The face on the chat panel |
+| Chat character | Who answers in the chat panel: a plain `assistant`, an ascii `oracle`, or `hal` |
 
 ## Mouse
 
@@ -359,7 +363,7 @@ why some TUIs used to take seconds to start inside a multiplexer.
   in the alternate screen (foot, kitty, alacritty all do).
 - Scrollback is 10,000 lines per pane, in memory. Older lines are gone.
 - Desktop notifications need `notify-send`, so macOS is silent for now.
-- The background summarizer's endpoint is hardcoded in `src/familiar.rs`
+- The background summarizer's endpoint is hardcoded in `src/monitor.rs`
   rather than configurable.
 - Two claude panes in the *same* directory share a project folder, so
   model-based naming shows whichever session wrote most recently — right when

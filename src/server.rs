@@ -23,11 +23,11 @@ pub enum SrvEvent {
     /// Result of an async `<agent> --version` probe (agent name, first line).
     AgentVersion(String, String),
     /// Result of an async background classification (pane id, pane name at
-    /// the time it was sent, the model's verdict). See `familiar.rs`.
-    WizardVerdict(u64, String, crate::familiar::Verdict),
+    /// the time it was sent, the model's verdict). See `monitor.rs`.
+    MonitorVerdict(u64, String, crate::monitor::Verdict),
     /// Result of an async background subtitle summarization (pane id, the
-    /// ≤6-word summary). See `familiar.rs`.
-    WizardSubtitle(u64, String),
+    /// ≤6-word summary). See `monitor.rs`.
+    MonitorSubtitle(u64, String),
     Exited(u64),
 }
 
@@ -212,7 +212,7 @@ pub fn run(session: &str) -> Result<()> {
             last_stall_check = Instant::now();
             srv.autoresume_tick();
             srv.finish_tick();
-            srv.wizard_tick();
+            srv.monitor_tick();
             srv.subtitle_tick();
             srv.auto_name_tick();
         }
@@ -351,10 +351,10 @@ impl Server {
             SrvEvent::AgentVersion(agent, version) => {
                 self.versions.insert(agent, Some(version));
             }
-            SrvEvent::WizardVerdict(id, name, verdict) => {
-                self.handle_wizard_verdict(id, name, verdict)
+            SrvEvent::MonitorVerdict(id, name, verdict) => {
+                self.handle_monitor_verdict(id, name, verdict)
             }
-            SrvEvent::WizardSubtitle(id, subtitle) => {
+            SrvEvent::MonitorSubtitle(id, subtitle) => {
                 if let Some(p) = self.pane_mut(id) {
                     p.subtitle = Some(subtitle);
                 }
@@ -554,38 +554,38 @@ impl Server {
     /// kick off a background classification for each. Advisory only — this
     /// never writes to a pane, only logs and notifies. Re-read from settings
     /// every tick so the on/off toggle applies live.
-    fn wizard_tick(&mut self) {
-        if !crate::settings::Settings::load().wizard_watch {
+    fn monitor_tick(&mut self) {
+        if !crate::settings::Settings::load().pane_monitor {
             return;
         }
         let now = Instant::now();
-        let policy = crate::familiar::policy_text();
+        let policy = crate::monitor::policy_text();
         let session = self.session.clone();
         let tx = self.tx.clone();
         for p in &mut self.panes {
             let status = p.status();
             let hash = p.screen_hash();
-            let stable_since = match p.wizard_screen_hash {
-                Some(h) if h == hash => p.wizard_screen_since,
+            let stable_since = match p.monitor_screen_hash {
+                Some(h) if h == hash => p.monitor_screen_since,
                 _ => {
-                    p.wizard_screen_hash = Some(hash);
-                    p.wizard_screen_since = Some(now);
+                    p.monitor_screen_hash = Some(hash);
+                    p.monitor_screen_since = Some(now);
                     Some(now)
                 }
             };
             let stalled_working = status == "working"
-                && stable_since.is_some_and(|t| now.duration_since(t) >= crate::familiar::STALL_WORKING_AFTER);
+                && stable_since.is_some_and(|t| now.duration_since(t) >= crate::monitor::STALL_WORKING_AFTER);
             if status != "needs_input" && !stalled_working {
                 continue;
             }
-            if p.wizard_checked_at
-                .is_some_and(|t| now.duration_since(t) < crate::familiar::RECHECK_INTERVAL)
+            if p.monitor_checked_at
+                .is_some_and(|t| now.duration_since(t) < crate::monitor::RECHECK_INTERVAL)
             {
                 continue;
             }
             let Some(screen) = p.tail_text(20) else { continue };
-            p.wizard_checked_at = Some(now);
-            crate::familiar::classify_async(
+            p.monitor_checked_at = Some(now);
+            crate::monitor::classify_async(
                 tx.clone(),
                 session.clone(),
                 p.id,
@@ -597,22 +597,22 @@ impl Server {
     }
 
     /// A background classification came back: log already happened on the
-    /// worker thread (see `familiar::classify_async`); here we just decide
+    /// worker thread (see `monitor::classify_async`); here we just decide
     /// whether it's worth interrupting you about, deduping on the pane's
     /// last reason so a still-stuck pane doesn't renotify every 90s with the
     /// same text.
-    fn handle_wizard_verdict(&mut self, id: u64, name: String, v: crate::familiar::Verdict) {
+    fn handle_monitor_verdict(&mut self, id: u64, name: String, v: crate::monitor::Verdict) {
         if matches!(v.classification.as_str(), "actually_working" | "finished") {
             return;
         }
         let quiet = self
             .pane_mut(id)
-            .is_some_and(|p| p.wizard_last_reason.as_deref() == Some(v.reason.as_str()));
+            .is_some_and(|p| p.monitor_last_reason.as_deref() == Some(v.reason.as_str()));
         if quiet {
             return;
         }
         if let Some(p) = self.pane_mut(id) {
-            p.wizard_last_reason = Some(v.reason.clone());
+            p.monitor_last_reason = Some(v.reason.clone());
         }
         let body = match v.policy_verdict.as_str() {
             "safe" => format!("{} — matches your policy: {}", v.reason, v.policy_reason),
@@ -654,7 +654,7 @@ impl Server {
     }
 
     fn subtitle_tick(&mut self) {
-        if !crate::settings::Settings::load().wizard_watch {
+        if !crate::settings::Settings::load().pane_monitor {
             return;
         }
         let now = Instant::now();
@@ -664,7 +664,7 @@ impl Server {
                 continue;
             }
             if p.subtitle_checked_at
-                .is_some_and(|t| now.duration_since(t) < crate::familiar::SUBTITLE_INTERVAL)
+                .is_some_and(|t| now.duration_since(t) < crate::monitor::SUBTITLE_INTERVAL)
             {
                 continue;
             }
@@ -675,7 +675,7 @@ impl Server {
             }
             p.subtitle_hash = Some(hash);
             let Some(screen) = p.tail_text(20) else { continue };
-            crate::familiar::summarize_async(tx.clone(), p.id, screen);
+            crate::monitor::summarize_async(tx.clone(), p.id, screen);
         }
     }
 

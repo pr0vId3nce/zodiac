@@ -1,5 +1,5 @@
 mod cli;
-mod familiar;
+mod monitor;
 mod gfx;
 mod client;
 mod kitty;
@@ -10,7 +10,7 @@ mod server;
 mod settings;
 mod snapshot;
 mod term;
-mod wizard;
+mod chat;
 
 use anyhow::{Context, Result};
 use crossterm::event::{
@@ -73,10 +73,13 @@ fn remote(rest: &[String]) -> Result<()> {
     Err(err).context("failed to exec ssh")
 }
 
-/// One-time migration from the old on-disk name (`coop`): rename the config
-/// and state dirs to `zodiac` when the old ones exist and the new ones don't.
-/// Sockets are ephemeral and need no migration — but a server started under
-/// the old name keeps its old socket, so shut old sessions down first.
+/// One-time migrations of renamed paths, each a rename only when the old
+/// path exists and the new one doesn't:
+///   - the config and state dirs from the pre-rebrand `coop` name (sockets
+///     are ephemeral and need none — but a server started under the old name
+///     keeps its old socket, so shut old sessions down first);
+///   - the chat panel and pane monitor's files, from when both were themed
+///     ("wizard"/"familiar") and named for it.
 fn migrate_legacy_dirs() {
     use std::path::PathBuf;
     let home = PathBuf::from(std::env::var_os("HOME").unwrap_or_default());
@@ -86,10 +89,28 @@ fn migrate_legacy_dirs() {
     let state = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| home.join(".local/state"));
-    for base in [config, state] {
+    for base in [config.clone(), state.clone()] {
         let (old, new) = (base.join("coop"), base.join("zodiac"));
         if old.is_dir() && !new.exists() {
             let _ = std::fs::rename(&old, &new);
+        }
+    }
+    let renamed = [
+        (config.join("zodiac/wizard-policy.md"), config.join("zodiac/monitor-policy.md")),
+        (state.join("zodiac/wizard"), state.join("zodiac/monitor")),
+    ];
+    for (old, new) in renamed {
+        if old.exists() && !new.exists() {
+            let _ = std::fs::rename(&old, &new);
+        }
+    }
+    // Per-session chat transcripts, one file per session dir.
+    if let Ok(sessions) = std::fs::read_dir(state.join("zodiac")) {
+        for dir in sessions.flatten().map(|e| e.path()).filter(|p| p.is_dir()) {
+            let (old, new) = (dir.join("wizard-chat.json"), dir.join("chat-history.json"));
+            if old.exists() && !new.exists() {
+                let _ = std::fs::rename(&old, &new);
+            }
         }
     }
 }

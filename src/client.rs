@@ -20,7 +20,7 @@ const SIDEBAR_WIDTH: u16 = 24;
 const SIDEBAR_COLLAPSED: u16 = 4;
 const CLIENT_SCROLLBACK: usize = 10_000;
 
-/// How much terminal text the wizard's digest may carry, and how many rows
+/// How much terminal text the chat digest may carry, and how many rows
 /// each card contributes. The cap keeps a spread of busy panes from eating
 /// the model's context; the tail of a screen is where the answer lives.
 const EXCERPT_BUDGET: usize = 4000;
@@ -62,18 +62,18 @@ const CONTROLS: &[(&str, &str)] = &[
     ("Alt+~", "home page"),
     ("⇧PgUp/Dn", "scroll"),
     ("Ctrl+S", "settings"),
-    ("Alt+G", "wizard chat"),
+    ("Alt+G", "chat panel"),
     ("Alt+Q", "detach"),
     ("Alt+⇧Q", "kill session"),
 ];
 
-/// Wizard transcript roles.
-const WIZ_USER: u8 = 0;
-const WIZ_WIZARD: u8 = 1;
-const WIZ_NOTE: u8 = 2;
-const WIZ_ERROR: u8 = 3;
-/// A pending prompt_pane/send_keys consent chip — "▸ cast: ... [y/n]".
-const WIZ_CAST: u8 = 4;
+/// Chat transcript roles.
+const CHAT_USER: u8 = 0;
+const CHAT_REPLY: u8 = 1;
+const CHAT_NOTE: u8 = 2;
+const CHAT_ERROR: u8 = 3;
+/// A pending prompt_pane/send_keys consent chip — "▸ run: ... [y/n]".
+const CHAT_ACTION: u8 = 4;
 
 const CURSOR_TYPES: &[&str] =
     &["auto", "block", "underline", "bar", "orb", "circle", "aleph"];
@@ -193,9 +193,9 @@ const CARD_SIZES: &[(&str, u16, u16)] = &[
 /// Column cap for the home grid; "auto" packs as many as fit.
 const CARD_COLUMNS: &[&str] = &["auto", "1", "2", "3", "4", "5", "6"];
 const HOME_VIEWS: &[&str] = &["cards", "list", "blocks"];
-/// Chat panel personas: the robed Wizard portrait, an ascii Oracle orb, or
+/// Chat panel characters: a plain assistant, an ascii Oracle orb, or
 /// HAL 9000's red eye.
-const CHAT_FACES: &[&str] = &["wizard", "oracle", "hal"];
+const CHAT_FACES: &[&str] = &["assistant", "oracle", "hal"];
 const HOME_GAP_X: u16 = 3;
 const HOME_GAP_Y: u16 = 1;
 /// Card-art glow colors by accent index: needs approval, thinking,
@@ -278,7 +278,7 @@ enum AppEvent {
     Term(Event),
     Srv(SrvFrame),
     SrvGone,
-    Wizard(crate::wizard::WizardEvent),
+    Chat(crate::chat::ChatEvent),
 }
 
 enum Mode {
@@ -475,30 +475,30 @@ struct App {
     /// Orb placement currently on the terminal:
     /// (cell x, cell y, image id, col span, row span).
     orb_placed: Option<(u16, u16, u32, u16, u16)>,
-    // The Wizard chat panel (home page, right side).
-    wiz_tx: Option<Sender<crate::wizard::WizardCmd>>,
+    // The chat panel (home page, right side).
+    chat_tx: Option<Sender<crate::chat::ChatCmd>>,
     /// Set to cut the in-flight stream short — Esc while streaming.
-    wiz_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    chat_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// A prompt_pane/send_keys call awaiting a y/n — the worker is blocked
     /// on the sender's paired receiver until one arrives.
-    wiz_cast: Option<(crate::wizard::CastAction, std::sync::mpsc::Sender<crate::wizard::CastOutcome>)>,
-    wiz_status: Option<crate::wizard::WizardStatus>,
+    chat_action: Option<(crate::chat::ActionRequest, std::sync::mpsc::Sender<crate::chat::ActionOutcome>)>,
+    chat_status: Option<crate::chat::ChatStatus>,
     /// Transcript: (role, text) — see the WIZ_* role constants.
-    wiz_log: Vec<(u8, String)>,
+    chat_log: Vec<(u8, String)>,
     /// The reply currently streaming in, not yet committed to the log.
-    wiz_stream: String,
-    wiz_streaming: bool,
-    wiz_input: String,
-    wiz_focus: bool,
+    chat_stream: String,
+    chat_streaming: bool,
+    chat_input: String,
+    chat_focus: bool,
     /// Transcript scroll offset in wrapped lines, from the bottom.
-    wiz_scroll: usize,
+    chat_scroll: usize,
     chat_rect: Rect,
     /// Where the portrait image goes (inside the chat panel).
-    wiz_art_rect: Rect,
+    chat_art_rect: Rect,
     /// Portrait image data transmitted this attach: (px_w, px_h, image id).
-    wiz_sent: std::collections::HashSet<(u32, u32, u32)>,
+    chat_sent: std::collections::HashSet<(u32, u32, u32)>,
     /// Portrait placement currently alive terminal-side.
-    wiz_placed: Option<(Rect, u32)>,
+    chat_placed: Option<(Rect, u32)>,
     /// This server gates mouse reports on the pane's foreground app (its
     /// hello said so). Older servers don't know `T_MOUSE` and would drop it
     /// on the floor, so against those we keep sending plain `T_INPUT`.
@@ -519,7 +519,7 @@ struct App {
     /// (px_w, px_h, rgba, image id) for the current pair_qr_src.
     pair_qr: Option<(u32, u32, Vec<u8>, u32)>,
     /// Where the QR image goes, from the last draw — kitty_overlay() places
-    /// it there, same handoff shape as home_cards/home_mascots/wiz_art_rect.
+    /// it there, same handoff shape as home_cards/home_mascots/chat_art_rect.
     pair_rect: Rect,
     sock: UnixStream,
     rx: Receiver<AppEvent>,
@@ -545,15 +545,15 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
             }
         });
     }
-    // The Wizard's network worker reports through the same channel.
+    // The chat panel's network worker reports through the same channel.
     let settings = Settings::load();
-    let (wiz_tx, wiz_cancel) = if settings.wizard_chat {
+    let (chat_tx, chat_cancel) = if settings.chat_panel {
         let txw = tx.clone();
-        let (tx, cancel) = crate::wizard::spawn(
-            crate::wizard::WizardCfg::from_settings(&settings),
+        let (tx, cancel) = crate::chat::spawn(
+            crate::chat::ChatCfg::from_settings(&settings),
             session.to_string(),
             move |ev| {
-                let _ = txw.send(AppEvent::Wizard(ev));
+                let _ = txw.send(AppEvent::Chat(ev));
             },
         );
         (Some(tx), Some(cancel))
@@ -616,20 +616,20 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         cursor_applied: None,
         orb_cfg: None,
         orb_placed: None,
-        wiz_tx,
-        wiz_cancel,
-        wiz_cast: None,
-        wiz_status: None,
-        wiz_log: Vec::new(),
-        wiz_stream: String::new(),
-        wiz_streaming: false,
-        wiz_input: String::new(),
-        wiz_focus: false,
-        wiz_scroll: 0,
+        chat_tx,
+        chat_cancel,
+        chat_action: None,
+        chat_status: None,
+        chat_log: Vec::new(),
+        chat_stream: String::new(),
+        chat_streaming: false,
+        chat_input: String::new(),
+        chat_focus: false,
+        chat_scroll: 0,
         chat_rect: Rect::default(),
-        wiz_art_rect: Rect::default(),
-        wiz_sent: std::collections::HashSet::new(),
-        wiz_placed: None,
+        chat_art_rect: Rect::default(),
+        chat_sent: std::collections::HashSet::new(),
+        chat_placed: None,
         server_mouse_gate: false,
         pair_open: false,
         pair_endpoint: None,
@@ -659,7 +659,7 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         app.kitty_overlay();
         app.pane_overlay();
         app.orb_overlay();
-        app.wizard_overlay();
+        app.chat_overlay();
         app.cursor_sync();
         if app.main_size != app.sent_size {
             app.send_resize();
@@ -676,9 +676,9 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         // Fast ticks only while an animation is on screen (working panes or
         // the settings preview); otherwise wake for the next eye blink.
         let tick = if app.home {
-            if app.wiz_streaming {
+            if app.chat_streaming {
                 50 // keep streamed tokens flowing onto the screen
-            } else if app.wiz_status == Some(crate::wizard::WizardStatus::Waking) {
+            } else if app.chat_status == Some(crate::chat::ChatStatus::Waking) {
                 120 // waking portrait pulse
             } else {
                 250
@@ -865,17 +865,17 @@ impl App {
                 }
             }
             AppEvent::Srv(f) => self.handle_frame(f),
-            AppEvent::Wizard(ev) => self.handle_wizard(ev),
+            AppEvent::Chat(ev) => self.handle_chat(ev),
             AppEvent::Term(event) => match event {
                 Event::Key(key) => self.handle_key(key),
                 Event::Mouse(m) => self.handle_mouse(m),
                 Event::Paste(text) => {
-                    if self.home && self.wiz_focus {
+                    if self.home && self.chat_focus {
                         for c in text.chars() {
-                            if self.wiz_input.chars().count() >= 500 {
+                            if self.chat_input.chars().count() >= 500 {
                                 break;
                             }
-                            self.wiz_input.push(if c == '\n' { ' ' } else { c });
+                            self.chat_input.push(if c == '\n' { ' ' } else { c });
                         }
                         return;
                     }
@@ -914,15 +914,15 @@ impl App {
             // Chat panel: click focuses, wheel scrolls the transcript.
             if self.chat_rect.width > 0 && self.chat_rect.contains(pos) {
                 match m.kind {
-                    K::Down(MouseButton::Left) => self.wiz_focus = true,
-                    K::ScrollUp => self.wiz_scroll_by(3),
-                    K::ScrollDown => self.wiz_scroll_by(-3),
+                    K::Down(MouseButton::Left) => self.chat_focus = true,
+                    K::ScrollUp => self.chat_scroll_by(3),
+                    K::ScrollDown => self.chat_scroll_by(-3),
                     _ => {}
                 }
                 return;
             }
             if let K::Down(MouseButton::Left) = m.kind {
-                self.wiz_focus = false;
+                self.chat_focus = false;
                 if let Some(i) = self
                     .home_cards
                     .iter()
@@ -1442,52 +1442,52 @@ impl App {
         }
         // Alt+G: speak with the wizard (jumps to the home page if needed).
         if alt && !ctrl && matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G')) {
-            if self.wiz_tx.is_some() {
+            if self.chat_tx.is_some() {
                 if !self.home {
                     self.toggle_home();
-                    self.wiz_focus = true;
+                    self.chat_focus = true;
                 } else {
-                    self.wiz_focus = !self.wiz_focus;
+                    self.chat_focus = !self.chat_focus;
                 }
             }
             return;
         }
         // A pending cast chip takes every key as y/n until it's answered —
         // no typing past it, no scrolling around it.
-        if self.home && self.wiz_focus && !alt && self.wiz_cast.is_some() {
+        if self.home && self.chat_focus && !alt && self.chat_action.is_some() {
             match key.code {
-                KeyCode::Char('y') | KeyCode::Char('Y') => self.wiz_decide(true),
-                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => self.wiz_decide(false),
+                KeyCode::Char('y') | KeyCode::Char('Y') => self.chat_decide(true),
+                KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => self.chat_decide(false),
                 _ => {}
             }
             return;
         }
         // A focused chatbox swallows all plain keys.
-        if self.home && self.wiz_focus && !alt {
+        if self.home && self.chat_focus && !alt {
             match key.code {
                 KeyCode::Esc => {
                     // Mid-stream, Esc cuts the reply short instead of
                     // leaving the panel — a second Esc leaves it once the
                     // stream has actually stopped.
-                    if self.wiz_streaming {
-                        if let Some(c) = &self.wiz_cancel {
+                    if self.chat_streaming {
+                        if let Some(c) = &self.chat_cancel {
                             c.store(true, std::sync::atomic::Ordering::Relaxed);
                         }
                     } else {
-                        self.wiz_focus = false;
+                        self.chat_focus = false;
                     }
                 }
-                KeyCode::Enter => self.wizard_submit(),
+                KeyCode::Enter => self.chat_submit(),
                 KeyCode::Backspace => {
-                    self.wiz_input.pop();
+                    self.chat_input.pop();
                 }
-                KeyCode::Up => self.wiz_scroll_by(1),
-                KeyCode::Down => self.wiz_scroll_by(-1),
-                KeyCode::PageUp => self.wiz_scroll_by(10),
-                KeyCode::PageDown => self.wiz_scroll_by(-10),
+                KeyCode::Up => self.chat_scroll_by(1),
+                KeyCode::Down => self.chat_scroll_by(-1),
+                KeyCode::PageUp => self.chat_scroll_by(10),
+                KeyCode::PageDown => self.chat_scroll_by(-10),
                 KeyCode::Char(c) if !ctrl => {
-                    if self.wiz_input.chars().count() < 500 {
-                        self.wiz_input.push(c);
+                    if self.chat_input.chars().count() < 500 {
+                        self.chat_input.push(c);
                     }
                 }
                 _ => {}
@@ -1691,7 +1691,7 @@ impl App {
     fn leave_home(&mut self) {
         self.home = false;
         self.selection = None;
-        self.wiz_focus = false;
+        self.chat_focus = false;
     }
 
     /// Opens the pairing QR overlay, re-reading the astrolabe bridge's
@@ -1751,20 +1751,20 @@ impl App {
     // ------------------------------------------------------------------
     // The Wizard chat panel.
 
-    fn wiz_note(&mut self, role: u8, text: impl Into<String>) {
-        self.wiz_log.push((role, text.into()));
-        if self.wiz_log.len() > 400 {
-            self.wiz_log.drain(..self.wiz_log.len() - 400);
+    fn chat_note(&mut self, role: u8, text: impl Into<String>) {
+        self.chat_log.push((role, text.into()));
+        if self.chat_log.len() > 400 {
+            self.chat_log.drain(..self.chat_log.len() - 400);
         }
-        self.wiz_scroll = 0;
+        self.chat_scroll = 0;
     }
 
-    fn handle_wizard(&mut self, ev: crate::wizard::WizardEvent) {
-        use crate::wizard::{WizardEvent as E, WizardStatus as S};
+    fn handle_chat(&mut self, ev: crate::chat::ChatEvent) {
+        use crate::chat::{ChatEvent as E, ChatStatus as S};
         match ev {
             E::Status(s) => {
-                let old = self.wiz_status;
-                self.wiz_status = Some(s);
+                let old = self.chat_status;
+                self.chat_status = Some(s);
                 // The status line above the transcript already shows the
                 // current state, so waking up is silent there too — only
                 // sleeping/away get a note, since those explain why a
@@ -1777,35 +1777,35 @@ impl App {
                         S::Away => Some("the wizard has gone away"),
                     };
                     if let Some(note) = note {
-                        self.wiz_note(WIZ_NOTE, note);
+                        self.chat_note(CHAT_NOTE, note);
                     }
                 }
             }
             E::Token(t) => {
-                self.wiz_stream.push_str(&t);
-                self.wiz_scroll = 0;
+                self.chat_stream.push_str(&t);
+                self.chat_scroll = 0;
             }
             E::Done => {
-                self.wiz_streaming = false;
-                if !self.wiz_stream.is_empty() {
-                    let t = std::mem::take(&mut self.wiz_stream);
-                    self.wiz_note(WIZ_WIZARD, t);
+                self.chat_streaming = false;
+                if !self.chat_stream.is_empty() {
+                    let t = std::mem::take(&mut self.chat_stream);
+                    self.chat_note(CHAT_REPLY, t);
                 }
             }
-            E::Note(t) => self.wiz_note(WIZ_NOTE, t),
+            E::Note(t) => self.chat_note(CHAT_NOTE, t),
             E::Error(t) => {
-                self.wiz_streaming = false;
-                self.wiz_note(WIZ_ERROR, t);
+                self.chat_streaming = false;
+                self.chat_note(CHAT_ERROR, t);
             }
             E::Restored(turns) => {
                 for (role, text) in turns {
-                    let wiz_role = if role == "user" { WIZ_USER } else { WIZ_WIZARD };
-                    self.wiz_note(wiz_role, text);
+                    let wiz_role = if role == "user" { CHAT_USER } else { CHAT_REPLY };
+                    self.chat_note(wiz_role, text);
                 }
             }
             E::Cast { desc, action, decision } => {
-                self.wiz_cast = Some((action, decision));
-                self.wiz_note(WIZ_CAST, format!("▸ cast: {desc}  [y/n]"));
+                self.chat_action = Some((action, decision));
+                self.chat_note(CHAT_ACTION, format!("▸ run: {desc}  [y/n]"));
             }
         }
     }
@@ -1852,7 +1852,7 @@ impl App {
     /// screen excerpts from the cards worth reading. `force` (a 1-based card
     /// number) always gets a generous excerpt — used by `/why`, where one
     /// card is the whole question.
-    fn wizard_digest_with(&self, force: Option<usize>) -> String {
+    fn chat_digest_with(&self, force: Option<usize>) -> String {
         let Some(state) = &self.home_state else {
             return "(no card data yet)".into();
         };
@@ -1936,17 +1936,17 @@ impl App {
     /// names a card by the 1-based number the model saw in the spread;
     /// resolved to a pane id here, since the worker has no socket of its
     /// own to send `T_INPUT` with.
-    fn wiz_decide(&mut self, yes: bool) {
-        use crate::wizard::{CastAction, CastOutcome};
-        let Some((action, decision)) = self.wiz_cast.take() else {
+    fn chat_decide(&mut self, yes: bool) {
+        use crate::chat::{ActionRequest, ActionOutcome};
+        let Some((action, decision)) = self.chat_action.take() else {
             return;
         };
         let outcome = if !yes {
-            self.wiz_note(WIZ_NOTE, "cast declined".to_string());
-            CastOutcome::Declined
+            self.chat_note(CHAT_NOTE, "cast declined".to_string());
+            ActionOutcome::Declined
         } else {
             match &action {
-                CastAction::PromptPane { pane, text } => match self.card_pane(*pane) {
+                ActionRequest::PromptPane { pane, text } => match self.card_pane(*pane) {
                     Some((id, _)) => {
                         self.send(T_INPUT, id, text.as_bytes());
                         // Same pacing `zodiac prompt` uses: give the pane's
@@ -1954,25 +1954,25 @@ impl App {
                         // block before the Enter that submits it.
                         std::thread::sleep(std::time::Duration::from_millis(200));
                         self.send(T_INPUT, id, b"\r");
-                        self.wiz_note(WIZ_NOTE, format!("cast: sent to card {pane}"));
-                        CastOutcome::Sent
+                        self.chat_note(CHAT_NOTE, format!("sent to pane {pane}"));
+                        ActionOutcome::Sent
                     }
                     None => {
                         let msg = format!("no such card {pane}");
-                        self.wiz_note(WIZ_ERROR, format!("cast failed: {msg}"));
-                        CastOutcome::Failed(msg)
+                        self.chat_note(CHAT_ERROR, format!("cast failed: {msg}"));
+                        ActionOutcome::Failed(msg)
                     }
                 },
-                CastAction::SendKeys { pane, keys } => match self.card_pane(*pane) {
+                ActionRequest::SendKeys { pane, keys } => match self.card_pane(*pane) {
                     Some((id, _)) => {
                         self.send(T_INPUT, id, &decode_keys(keys));
-                        self.wiz_note(WIZ_NOTE, format!("cast: sent to card {pane}"));
-                        CastOutcome::Sent
+                        self.chat_note(CHAT_NOTE, format!("sent to pane {pane}"));
+                        ActionOutcome::Sent
                     }
                     None => {
                         let msg = format!("no such card {pane}");
-                        self.wiz_note(WIZ_ERROR, format!("cast failed: {msg}"));
-                        CastOutcome::Failed(msg)
+                        self.chat_note(CHAT_ERROR, format!("cast failed: {msg}"));
+                        ActionOutcome::Failed(msg)
                     }
                 },
             }
@@ -1980,15 +1980,15 @@ impl App {
         let _ = decision.send(outcome);
     }
 
-    fn wizard_submit(&mut self) {
-        use crate::wizard::{WizardCmd, WizardStatus as S};
-        let text = std::mem::take(&mut self.wiz_input).trim().to_string();
+    fn chat_submit(&mut self) {
+        use crate::chat::{ChatCmd, ChatStatus as S};
+        let text = std::mem::take(&mut self.chat_input).trim().to_string();
         if text.is_empty() {
             return;
         }
-        self.wiz_scroll = 0;
-        let Some(tx) = self.wiz_tx.clone() else {
-            self.wiz_note(WIZ_ERROR, "the wizard is not configured");
+        self.chat_scroll = 0;
+        let Some(tx) = self.chat_tx.clone() else {
+            self.chat_note(CHAT_ERROR, "the wizard is not configured");
             return;
         };
         let lower = text.to_ascii_lowercase();
@@ -1998,24 +1998,25 @@ impl App {
         };
         match verb {
             "/wake" | "/rise" => {
-                let _ = tx.send(WizardCmd::Wake);
+                let _ = tx.send(ChatCmd::Wake);
             }
-            "/dispell" | "/dispel" | "/banish" | "/sleep" => {
-                let _ = tx.send(WizardCmd::Dispell);
+            // /dispell and friends are the old names, still accepted.
+            "/sleep" | "/dispell" | "/dispel" | "/banish" => {
+                let _ = tx.send(ChatCmd::Sleep);
             }
             "/clear" => {
-                self.wiz_log.clear();
-                self.wiz_stream.clear();
+                self.chat_log.clear();
+                self.chat_stream.clear();
             }
             // Scry a card into the transcript — purely local, no model.
             "/read" | "/scry" => {
-                self.wiz_note(WIZ_USER, text.clone());
+                self.chat_note(CHAT_USER, text.clone());
                 match rest.parse::<usize>().ok().and_then(|n| self.card_pane(n)) {
                     Some((id, name)) => match self.pane_excerpt(id, EXCERPT_FOCUSED) {
-                        Some(t) => self.wiz_note(WIZ_NOTE, format!("card '{name}':\n{t}")),
-                        None => self.wiz_note(WIZ_NOTE, format!("card '{name}' is blank")),
+                        Some(t) => self.chat_note(CHAT_NOTE, format!("card '{name}':\n{t}")),
+                        None => self.chat_note(CHAT_NOTE, format!("card '{name}' is blank")),
                     },
-                    None => self.wiz_note(WIZ_ERROR, "no such card — try /read 3"),
+                    None => self.chat_note(CHAT_ERROR, "no such card — try /read 3"),
                 }
             }
             _ => {
@@ -2029,52 +2030,52 @@ impl App {
                     None => text,
                 };
                 if verb == "/why" && force.is_none() {
-                    self.wiz_note(WIZ_ERROR, "no such card — try /why 3");
+                    self.chat_note(CHAT_ERROR, "no such card — try /why 3");
                     return;
                 }
-                self.wiz_note(WIZ_USER, text.clone());
-                match self.wiz_status {
+                self.chat_note(CHAT_USER, text.clone());
+                match self.chat_status {
                     Some(S::Awake) => {
-                        self.wiz_streaming = true;
-                        let digest = self.wizard_digest_with(force);
+                        self.chat_streaming = true;
+                        let digest = self.chat_digest_with(force);
                         // `/why` is a card question by construction; anything
                         // else has to earn the spread.
-                        let _ = tx.send(WizardCmd::Chat {
+                        let _ = tx.send(ChatCmd::Chat {
                             text,
                             digest,
-                            force_spread: force.is_some(),
+                            force_panes: force.is_some(),
                             face: self.chat_face().to_string(),
                         });
                     }
                     Some(S::Waking) => {
-                        self.wiz_note(WIZ_NOTE, "the wizard is still waking — a moment…")
+                        self.chat_note(CHAT_NOTE, "the wizard is still waking — a moment…")
                     }
                     Some(S::Sleeping) => self
-                        .wiz_note(WIZ_NOTE, "the wizard is sleeping — cast /wake to rouse him"),
+                        .chat_note(CHAT_NOTE, "the wizard is sleeping — cast /wake to rouse him"),
                     Some(S::Away) | None => self
-                        .wiz_note(WIZ_NOTE, "the wizard is away — the tower does not answer"),
+                        .chat_note(CHAT_NOTE, "the wizard is away — the tower does not answer"),
                 }
             }
         }
     }
 
-    fn wiz_scroll_by(&mut self, delta: isize) {
-        self.wiz_scroll = if delta > 0 {
+    fn chat_scroll_by(&mut self, delta: isize) {
+        self.chat_scroll = if delta > 0 {
             // Clamped against the transcript length at draw time.
-            self.wiz_scroll.saturating_add(delta as usize)
+            self.chat_scroll.saturating_add(delta as usize)
         } else {
-            self.wiz_scroll.saturating_sub(delta.unsigned_abs())
+            self.chat_scroll.saturating_sub(delta.unsigned_abs())
         };
     }
 
     /// Panel width for the current terminal width; 0 hides the panel.
-    fn wizard_panel_width(&self, body_w: u16) -> u16 {
-        if self.wiz_tx.is_none() {
+    fn chat_panel_width(&self, body_w: u16) -> u16 {
+        if self.chat_tx.is_none() {
             return 0;
         }
         let pref: u16 = self
             .settings
-            .wizard_width
+            .chat_width
             .parse()
             .unwrap_or(40)
             .clamp(28, 70);
@@ -2287,7 +2288,12 @@ impl App {
     }
 
     fn chat_face(&self) -> &'static str {
-        pick(CHAT_FACES, &self.settings.chat_face, "wizard")
+        // "wizard" is the old name for the plain assistant; map it forward so an
+        // existing config keeps working.
+        if self.settings.chat_face == "wizard" {
+            return "assistant";
+        }
+        pick(CHAT_FACES, &self.settings.chat_face, "assistant")
     }
 
     /// The sidebar's Block per the frame/weight/color settings. Rounding
@@ -2544,7 +2550,7 @@ impl App {
         if self.home {
             self.sidebar_rect = Rect::default();
             self.main_rect = Rect::default();
-            let chat_w = self.wizard_panel_width(body.width);
+            let chat_w = self.chat_panel_width(body.width);
             if chat_w > 0 {
                 let [cards, chat] =
                     Layout::horizontal([Constraint::Min(1), Constraint::Length(chat_w)])
@@ -2553,7 +2559,7 @@ impl App {
                 self.draw_chat(f, chat);
             } else {
                 self.chat_rect = Rect::default();
-                self.wiz_art_rect = Rect::default();
+                self.chat_art_rect = Rect::default();
                 self.draw_home(f, body);
             }
             self.draw_status(f, status);
@@ -3180,7 +3186,7 @@ impl App {
                 height: 1,
             };
             f.render_widget(
-                Paragraph::new("☾ gathering the arcana…")
+                Paragraph::new("☾ connecting…")
                     .alignment(Alignment::Center)
                     .style(Style::default().fg(Color::DarkGray)),
                 mid,
@@ -3797,16 +3803,16 @@ impl App {
     /// The Wizard's chat panel on the right edge of the home page:
     /// portrait (kitty image), status line, transcript, input box.
     fn draw_chat(&mut self, f: &mut Frame, area: Rect) {
-        use crate::wizard::WizardStatus as S;
+        use crate::chat::ChatStatus as S;
         self.chat_rect = area;
         let violet = Color::Indexed(135);
         let gold = Color::Indexed(179);
-        let border_style = if self.wiz_focus {
+        let border_style = if self.chat_focus {
             Style::default().fg(violet)
         } else {
             Style::default().fg(Color::Indexed(60))
         };
-        let title_style = if self.wiz_status == Some(S::Awake) {
+        let title_style = if self.chat_status == Some(S::Awake) {
             Style::default().fg(Color::Indexed(220)).bold()
         } else {
             Style::default().fg(Color::Indexed(246)).bold()
@@ -3818,14 +3824,14 @@ impl App {
             .title(match self.chat_face() {
                 "oracle" => " ✦ The Oracle ✦ ",
                 "hal" => " ◉ HAL 9000 ◉ ",
-                _ => " ✦ The Wizard ✦ ",
+                _ => " ✦ assistant ✦ ",
             })
             .title_alignment(Alignment::Center)
             .title_style(title_style);
         let inner = block.inner(area);
         f.render_widget(block, area);
         if inner.width < 10 || inner.height < 6 {
-            self.wiz_art_rect = Rect::default();
+            self.chat_art_rect = Rect::default();
             return;
         }
         let face = self.chat_face();
@@ -3839,27 +3845,30 @@ impl App {
             f.render_widget(Block::default().style(Style::default().bg(OLED_BLACK)), inner);
         }
         let mut y = inner.y;
-        // Portrait zone — the wizard/HAL images are painted by
-        // wizard_overlay; the Oracle is pure text and needs no kitty.
-        let art_h: u16 = if (self.kitty_on || face == "oracle") && inner.height >= 20 {
+        // Portrait zone — HAL's image is painted by chat_overlay; the
+        // oracle's orb is pure text and needs no kitty; the plain assistant
+        // gets the one-line status glyph below instead.
+        let art_h: u16 = if inner.height >= 20
+            && ((self.kitty_on && face == "hal") || face == "oracle")
+        {
             9
         } else {
             0
         };
         if art_h > 0 {
-            self.wiz_art_rect = Rect {
+            self.chat_art_rect = Rect {
                 x: inner.x + 1,
                 y,
                 width: inner.width.saturating_sub(2),
                 height: art_h,
             };
             if face == "oracle" {
-                self.draw_oracle(f, self.wiz_art_rect);
+                self.draw_oracle(f, self.chat_art_rect);
             }
             y += art_h;
         } else {
-            self.wiz_art_rect = Rect::default();
-            let glyph = match self.wiz_status {
+            self.chat_art_rect = Rect::default();
+            let glyph = match self.chat_status {
                 Some(S::Awake) => "✦",
                 Some(S::Waking) => "☀",
                 Some(S::Sleeping) => "☾",
@@ -3877,9 +3886,9 @@ impl App {
         let who = match face {
             "oracle" => "the oracle",
             "hal" => "HAL",
-            _ => "the wizard",
+            _ => "the assistant",
         };
-        let (stxt, scol) = match self.wiz_status {
+        let (stxt, scol) = match self.chat_status {
             Some(S::Awake) => (format!("{who} is awake"), violet),
             Some(S::Waking) => (format!("{who} is waking…"), Color::Indexed(220)),
             Some(S::Sleeping) => (format!("{who} is sleeping"), Color::Indexed(68)),
@@ -3906,7 +3915,7 @@ impl App {
         let wrapw = inner.width.saturating_sub(1).max(8) as usize;
         let mut lines: Vec<Line> = Vec::new();
         let msg_styles = |role: u8| -> (&'static str, Style, Style) {
-            if role == WIZ_USER {
+            if role == CHAT_USER {
                 (
                     "❯ ",
                     Style::default().fg(gold).bold(),
@@ -3920,10 +3929,10 @@ impl App {
                 )
             }
         };
-        for (role, text) in &self.wiz_log {
+        for (role, text) in &self.chat_log {
             match *role {
-                WIZ_NOTE | WIZ_ERROR => {
-                    let st = if *role == WIZ_ERROR {
+                CHAT_NOTE | CHAT_ERROR => {
+                    let st = if *role == CHAT_ERROR {
                         Style::default().fg(Color::Indexed(203)).italic()
                     } else {
                         Style::default().fg(Color::Indexed(245)).italic()
@@ -3934,7 +3943,7 @@ impl App {
                         );
                     }
                 }
-                WIZ_CAST => {
+                CHAT_ACTION => {
                     // Left-aligned and bold, unlike the centered italic
                     // notes — this is the one line in the transcript that
                     // wants a keypress, not just a read.
@@ -3963,8 +3972,8 @@ impl App {
                 }
             }
         }
-        if self.wiz_streaming {
-            if self.wiz_stream.is_empty() {
+        if self.chat_streaming {
+            if self.chat_stream.is_empty() {
                 let pondering = match face {
                     "oracle" => "✦ the oracle is divining…",
                     "hal" => "◉ HAL computes…",
@@ -3975,8 +3984,8 @@ impl App {
                     Style::default().fg(violet).italic(),
                 )));
             } else {
-                let (pfx, pst, st) = msg_styles(WIZ_WIZARD);
-                let mut runs = parse_md(&self.wiz_stream);
+                let (pfx, pst, st) = msg_styles(CHAT_REPLY);
+                let mut runs = parse_md(&self.chat_stream);
                 // The cursor block always renders plain — an unterminated
                 // bold/code marker still streaming in shouldn't catch it.
                 runs.push(("▌".to_string(), MdStyle::default()));
@@ -3995,8 +4004,8 @@ impl App {
             lines.pop(); // no trailing blank against the input line
         }
         let max = lines.len().saturating_sub(rows);
-        self.wiz_scroll = self.wiz_scroll.min(max);
-        let end = lines.len() - self.wiz_scroll;
+        self.chat_scroll = self.chat_scroll.min(max);
+        let end = lines.len() - self.chat_scroll;
         let start = end.saturating_sub(rows);
         let shown = (end - start) as u16;
         if shown > 0 {
@@ -4011,9 +4020,9 @@ impl App {
             );
         }
 
-        let input_line = if self.wiz_focus {
+        let input_line = if self.chat_focus {
             let budget = inner.width.saturating_sub(4) as usize;
-            let cs: Vec<char> = self.wiz_input.chars().collect();
+            let cs: Vec<char> = self.chat_input.chars().collect();
             let tail: String = cs[cs.len().saturating_sub(budget)..].iter().collect();
             Line::from(vec![
                 Span::styled("❯ ", Style::default().fg(gold).bold()),
@@ -4022,7 +4031,7 @@ impl App {
             ])
         } else {
             Line::from(Span::styled(
-                "❯ Alt+G · /wake · /dispell",
+                "❯ Alt+G · /wake · /sleep",
                 Style::default().fg(Color::Indexed(240)),
             ))
         };
@@ -4056,7 +4065,7 @@ impl App {
                 // drop the compositor's tracking so it re-places them.
                 self.placed_gfx.clear();
                 self.orb_placed = None;
-                self.wiz_placed = None;
+                self.chat_placed = None;
             }
             return;
         }
@@ -4172,7 +4181,7 @@ impl App {
             self.kitty_placed.clear();
             self.placed_gfx.clear();
             self.orb_placed = None;
-            self.wiz_placed = None;
+            self.chat_placed = None;
         }
         // Per-placement diff: place the new image first, then drop the old
         // one, so the card never shows bare background (no flicker).
@@ -4371,9 +4380,9 @@ impl App {
                 let _ = crate::kitty::delete_image(&mut buf, crate::kitty::ORB_BASE + i);
             }
         }
-        let wiz_ids: std::collections::HashSet<u32> =
-            self.wiz_sent.drain().map(|(_, _, i)| i).collect();
-        for id in wiz_ids {
+        let chat_ids: std::collections::HashSet<u32> =
+            self.chat_sent.drain().map(|(_, _, i)| i).collect();
+        for id in chat_ids {
             let _ = crate::kitty::delete_image(&mut buf, id);
         }
         if !buf.is_empty() {
@@ -4440,13 +4449,13 @@ impl App {
     /// graphics. Bands of light drift through the glass; the palette
     /// follows the model's status.
     fn draw_oracle(&self, f: &mut Frame, rect: Rect) {
-        use crate::wizard::WizardStatus as S;
+        use crate::chat::ChatStatus as S;
         let t = self.anim_start.elapsed().as_millis() as f32 / 1000.0;
         // Hue arc + saturation the glass drifts across, per status — a
         // range rather than two fixed points, so the fusion never settles
         // on one color. Hues in turns (0.0-1.0): ~0.75 violet, ~0.52 cyan,
         // ~0.08 amber, ~0.65 indigo.
-        let (hue_lo, hue_hi, sat_max): (f32, f32, f32) = match self.wiz_status {
+        let (hue_lo, hue_hi, sat_max): (f32, f32, f32) = match self.chat_status {
             Some(S::Awake) => (0.52, 0.80, 0.75),
             Some(S::Waking) => (0.05, 0.14, 0.70),
             Some(S::Sleeping) => (0.60, 0.70, 0.45),
@@ -4504,23 +4513,24 @@ impl App {
         );
     }
 
-    fn wizard_overlay(&mut self) {
+    fn chat_overlay(&mut self) {
         if !self.kitty_on {
             return;
         }
-        use crate::wizard::WizardStatus as S;
+        use crate::chat::ChatStatus as S;
         use std::io::Write as _;
         let mut out = std::io::stdout();
-        let rect = self.wiz_art_rect;
+        let rect = self.chat_art_rect;
         let want = self.home
             && !matches!(self.mode, Mode::Settings)
             && self.chat_rect.width > 0
             && rect.width >= 8
             && rect.height >= 4
-            // The Oracle is drawn as text by draw_chat — no image to place.
-            && self.chat_face() != "oracle";
+            // Only HAL has a painted portrait; the oracle's orb is drawn as
+            // text by draw_chat, and the plain assistant has none at all.
+            && self.chat_face() == "hal";
         if !want {
-            if let Some((_, id)) = self.wiz_placed.take() {
+            if let Some((_, id)) = self.chat_placed.take() {
                 let _ = crate::kitty::delete_placement(&mut out, id, 1);
                 let _ = out.flush();
             }
@@ -4529,7 +4539,7 @@ impl App {
         let Some((cw, ch)) = crate::kitty::cell_size() else {
             return;
         };
-        let sidx = match self.wiz_status {
+        let sidx = match self.chat_status {
             Some(S::Awake) => 0,
             Some(S::Waking) => 1,
             Some(S::Sleeping) => 2,
@@ -4537,43 +4547,19 @@ impl App {
         };
         let (pw, ph) = (rect.width as u32 * cw as u32, rect.height as u32 * ch as u32);
         let mut buf: Vec<u8> = Vec::new();
-        let id = if self.chat_face() == "hal" {
-            // HAL idles with a slow blink: ~3.2s of steady red, then a
-            // 400ms shutter sweep (close, shut, open).
-            let t = self.anim_start.elapsed().as_millis() as u64 % 3600;
-            let frame = if t < 3200 { 0 } else { (((t - 3200) / 100) % 4).min(3) as u32 };
-            let open = [1.0f32, 0.45, 0.05, 0.45][frame as usize];
-            let id = crate::kitty::hal_id(sidx, frame);
-            if !self.wiz_sent.contains(&(pw, ph, id)) {
-                self.wiz_sent.retain(|&(_, _, i)| i != id);
-                let rgba = crate::kitty::hal_rgba(pw, ph, sidx, open);
-                let _ = crate::kitty::transmit(&mut buf, id, pw, ph, &rgba);
-                self.wiz_sent.insert((pw, ph, id));
-            }
-            id
-        } else {
-            let pulse = matches!(self.wiz_status, Some(S::Waking))
-                || (sidx == 0 && self.wiz_streaming);
-            let frame = if pulse {
-                let per = (ORB_PERIOD_MS / crate::kitty::WIZ_FRAMES as u64).max(1);
-                ((self.anim_start.elapsed().as_millis() as u64 / per)
-                    % crate::kitty::WIZ_FRAMES as u64) as u32
-            } else if sidx == 0 {
-                crate::kitty::WIZ_STEADY
-            } else {
-                0
-            };
-            let id = crate::kitty::wizard_id(sidx, frame);
-            if !self.wiz_sent.contains(&(pw, ph, id)) {
-                self.wiz_sent.retain(|&(_, _, i)| i != id);
-                let phase = frame as f32 / crate::kitty::WIZ_FRAMES as f32;
-                let rgba = crate::kitty::wizard_rgba(pw, ph, sidx, phase);
-                let _ = crate::kitty::transmit(&mut buf, id, pw, ph, &rgba);
-                self.wiz_sent.insert((pw, ph, id));
-            }
-            id
-        };
-        if self.wiz_placed != Some((rect, id)) {
+        // HAL idles with a slow blink: ~3.2s of steady red, then a 400ms
+        // shutter sweep (close, shut, open).
+        let t = self.anim_start.elapsed().as_millis() as u64 % 3600;
+        let frame = if t < 3200 { 0 } else { (((t - 3200) / 100) % 4).min(3) as u32 };
+        let open = [1.0f32, 0.45, 0.05, 0.45][frame as usize];
+        let id = crate::kitty::hal_id(sidx, frame);
+        if !self.chat_sent.contains(&(pw, ph, id)) {
+            self.chat_sent.retain(|&(_, _, i)| i != id);
+            let rgba = crate::kitty::hal_rgba(pw, ph, sidx, open);
+            let _ = crate::kitty::transmit(&mut buf, id, pw, ph, &rgba);
+            self.chat_sent.insert((pw, ph, id));
+        }
+        if self.chat_placed != Some((rect, id)) {
             let _ = crate::kitty::place_at(
                 &mut buf,
                 rect.y + 1,
@@ -4587,12 +4573,12 @@ impl App {
                 0,
                 0,
             );
-            if let Some((_, old)) = self.wiz_placed {
+            if let Some((_, old)) = self.chat_placed {
                 if old != id {
                     let _ = crate::kitty::delete_placement(&mut buf, old, 1);
                 }
             }
-            self.wiz_placed = Some((rect, id));
+            self.chat_placed = Some((rect, id));
         }
         if !buf.is_empty() {
             let _ = out.write_all(b"\x1b7");
@@ -4901,9 +4887,9 @@ impl App {
             ));
             let hints = if self.settings.hide_controls {
                 format!(" · {} panes", self.panes.len())
-            } else if self.wiz_focus {
+            } else if self.chat_focus {
                 format!(
-                    " · {} panes · wizard: Enter send · Esc leave · /wake /dispell",
+                    " · {} panes · chat: Enter send · Esc leave · /wake /sleep",
                     self.panes.len()
                 )
             } else {

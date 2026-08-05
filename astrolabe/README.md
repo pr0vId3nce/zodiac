@@ -25,7 +25,8 @@ Astrolabe ships none of its own.
   tailnet-only by construction.
 - **web** (`web/`): Vite + React + Tailwind PWA with an xterm.js mirror.
 - **ios** (not in this repo — it ships through the App Store separately):
-  a native shell holding a *list of paired computers*. Pair by scanning
+  a native shell holding a *list of paired computers*, called **zodiac** on
+  the phone, since that's the thing it shows you. Pair by scanning
   zodiac's QR (Alt+P), tap one to open a WKWebView on that computer's web
   UI, unchanged. It adds APNs push ("agent needs you", with lock-screen
   inline reply and numbered-answer buttons; badge = panes waiting across

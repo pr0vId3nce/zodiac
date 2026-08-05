@@ -1,6 +1,6 @@
-//! The Wizard — the home page's resident familiar: a chat panel wired to a
-//! llama-server (OpenAI-compatible) endpoint on the tailnet, plus wake /
-//! dispell control of the model's systemd unit over ssh.
+//! The chat panel on the home page: a client for an OpenAI-compatible
+//! endpoint on the tailnet (a llama-server, by default), plus wake/sleep
+//! control of the model's systemd unit over ssh.
 //!
 //! All network work happens on one worker thread that owns a tiny
 //! hand-rolled HTTP/1.1 client (plain http to a known host — no TLS, no
@@ -15,9 +15,9 @@ use std::time::{Duration, Instant};
 
 use crate::settings::Settings;
 
-/// Where the wizard stands, as far as the client can tell.
+/// Where the model stands, as far as the client can tell.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
-pub enum WizardStatus {
+pub enum ChatStatus {
     /// Model answering /health with 200 — ready to talk.
     Awake,
     /// Service up but still loading the model (503 from /health).
@@ -28,16 +28,16 @@ pub enum WizardStatus {
     Away,
 }
 
-pub enum WizardCmd {
-    /// User chat message plus a live digest of the card spread. The digest
+pub enum ChatCmd {
+    /// User chat message plus a live digest of the pane list. The digest
     /// rides along every turn but only reaches the model when the question
-    /// wants it — `force_spread` is for the times the client already knows
+    /// wants it — `force_panes` is for the times the client already knows
     /// it does (`/why`).
     Chat {
         text: String,
         digest: String,
-        force_spread: bool,
-        /// The active chat face ("wizard"/"oracle"/"hal") — picks the system
+        force_panes: bool,
+        /// The active chat character ("assistant"/"oracle"/"hal") — picks the system
         /// prompt for this turn, so switching faces mid-conversation changes
         /// how the model speaks and sees itself on the very next message.
         face: String,
@@ -45,11 +45,11 @@ pub enum WizardCmd {
     /// `systemctl --user start` the model service over ssh.
     Wake,
     /// `systemctl --user stop` it.
-    Dispell,
+    Sleep,
 }
 
-pub enum WizardEvent {
-    Status(WizardStatus),
+pub enum ChatEvent {
+    Status(ChatStatus),
     /// One streamed completion delta.
     Token(String),
     /// The current reply (or attempt) is finished; flush the stream buffer.
@@ -68,40 +68,40 @@ pub enum WizardEvent {
     /// means advisory.
     Cast {
         desc: String,
-        action: CastAction,
-        decision: std::sync::mpsc::Sender<CastOutcome>,
+        action: ActionRequest,
+        decision: std::sync::mpsc::Sender<ActionOutcome>,
     },
 }
 
 /// The one thing a write-tool call wants to do, once approved. `pane` is
-/// the 1-based card number as the model sees it in the spread — the
-/// client (which owns the pane id ↔ card number mapping) resolves it.
+/// the 1-based pane number as the model sees it in the list — the
+/// client (which owns the pane id ↔ pane number mapping) resolves it.
 #[derive(Clone)]
-pub enum CastAction {
+pub enum ActionRequest {
     PromptPane { pane: usize, text: String },
     SendKeys { pane: usize, keys: String },
 }
 
 /// What actually happened to a cast, decided by the client — distinct
-/// from a bare accept/decline bool because "Des said yes, but card 7
+/// from a bare accept/decline bool because "Des said yes, but pane 7
 /// doesn't exist" is a different, useful-to-know outcome than either.
-pub enum CastOutcome {
+pub enum ActionOutcome {
     Sent,
     Declined,
     Failed(String),
 }
 
-impl CastAction {
+impl ActionRequest {
     fn describe(&self) -> String {
         match self {
-            CastAction::PromptPane { pane, text } => format!("prompt_pane({pane}, {text:?})"),
-            CastAction::SendKeys { pane, keys } => format!("send_keys({pane}, {keys:?})"),
+            ActionRequest::PromptPane { pane, text } => format!("prompt_pane({pane}, {text:?})"),
+            ActionRequest::SendKeys { pane, keys } => format!("send_keys({pane}, {keys:?})"),
         }
     }
 }
 
 #[derive(Clone)]
-pub struct WizardCfg {
+pub struct ChatCfg {
     pub host: String,
     pub port: u16,
     pub model: String,
@@ -110,20 +110,20 @@ pub struct WizardCfg {
     /// systemd --user unit to start/stop.
     pub service: String,
     /// Backend for the `web_search` tool; "" = Wikipedia. See
-    /// `Settings::wizard_search_url`.
+    /// `Settings::chat_search_url`.
     pub search_url: String,
     /// Key for that backend, when it wants one.
     pub search_key: String,
-    /// Offer `prompt_pane`/`send_keys` at all. See `Settings::wizard_act`.
+    /// Offer `prompt_pane`/`send_keys` at all. See `Settings::chat_act`.
     pub act: bool,
 }
 
-impl WizardCfg {
+impl ChatCfg {
     pub fn from_settings(s: &Settings) -> Self {
-        let ep = if s.wizard_endpoint.is_empty() {
+        let ep = if s.chat_endpoint.is_empty() {
             "http://bigbox:8091"
         } else {
-            &s.wizard_endpoint
+            &s.chat_endpoint
         };
         let ep = ep
             .trim_start_matches("http://")
@@ -143,110 +143,108 @@ impl WizardCfg {
         Self {
             host,
             port,
-            model: or(&s.wizard_model, "qwen3.6-35b-a3b"),
-            ssh: or(&s.wizard_ssh, "des@bigbox"),
-            service: or(&s.wizard_service, "llama-server"),
-            search_url: s.wizard_search_url.trim_end_matches('/').to_string(),
-            search_key: s.wizard_search_key.clone(),
-            act: s.wizard_act,
+            model: or(&s.chat_model, "qwen3.6-35b-a3b"),
+            ssh: or(&s.chat_ssh, "des@bigbox"),
+            service: or(&s.chat_service, "llama-server"),
+            search_url: s.chat_search_url.trim_end_matches('/').to_string(),
+            search_key: s.chat_search_key.clone(),
+            act: s.chat_act,
         }
     }
 }
 
-const PERSONA_WIZARD: &str = "You are The Wizard — a familiar spirit bound to Des's terminal, \
-speaking from a chat panel inside zodiac, an agent multiplexer whose panes are laid out as \
-tarot cards (each card a terminal, often hosting an AI coding agent).\n\
+const PERSONA_ASSISTANT: &str = "You are the assistant in a chat panel inside zodiac, a \
+terminal multiplexer whose panes are often running AI coding agents.\n\
 You are a companion first and a watchman second. Answer whatever Des asks — code, cooking, \
 history, mathematics, idle curiosity, anything — as fully and honestly as any good assistant \
-would. Minding the cards is one of your duties, not the boundary of your mind. Never deflect a \
-question back to the session, and never refuse a subject for being unrelated to it.\n\
-Voice: a touch of arcane theater, but concise — one to four short sentences unless the question \
-truly needs more — and concretely helpful.\n\
-You are not shown the card spread by default, and you know nothing of the session without it. \
-When a question touches the session, its cards or its agents, call read_spread and answer from \
-what it returns; some turns arrive with the spread already attached, and then you read it there \
-and do not call the tool. Either way: ground the \
-answer in that snapshot and never invent cards that are not in it; if an agent looks stuck \
-(working a very long time) or needs input, name the card by number and say what Des should do — \
-when he asks after the session, hold nothing back. But you are not the alarm bell: zodiac already \
-shouts with colors, sounds and desktop notifications when a card wants him, so never bring the \
-cards up in an answer that was not about them. \
-The spread may carry screen excerpts — the actual terminal text of a card. When one shows a \
+would. The session is one of your subjects, not the boundary of them. Never deflect a question \
+back to the session, and never refuse a subject for being unrelated to it.\n\
+Voice: plain and concise — one to four short sentences unless the question truly needs more — \
+and concretely helpful.\n\
+You are not shown the pane list by default, and you know nothing of the session without it. \
+When a question touches the session or its agents, call read_panes and answer from what it \
+returns; some turns arrive with the list already attached, and then you read it there and do \
+not call the tool. Either way: ground the answer in that snapshot and never invent panes that \
+are not in it; if an agent looks stuck (working a very long time) or needs input, name the pane \
+by number and say what Des should do — when he asks after the session, hold nothing back. But \
+you are not the alarm: zodiac already signals with colors, sounds and desktop notifications \
+when a pane wants him, so never bring the panes up in an answer that was not about them. \
+The list may carry screen excerpts — the actual terminal text of a pane. When one shows a \
 prompt, an error or a command awaiting approval, quote the specific command, path or error \
-verbatim rather than describing it vaguely. You cannot cast spells on the cards yourself; when \
-action is needed, give the exact command or keys. Status semantics: working = agent busy; \
-needs_input = waiting on a human; idle/done = at rest; thinking = actively reasoning right now.\n\
-You may reach beyond the tower: call web_search when an answer turns on current, niche or \
+verbatim rather than describing it vaguely. You cannot act on a pane yourself; when action is \
+needed, give the exact command or keys. Status semantics: working = agent busy; needs_input = \
+waiting on a human; idle/done = at rest; thinking = actively reasoning right now.\n\
+You can also reach the wider network: call web_search when an answer turns on current, niche or \
 uncertain facts (news, prices, versions, releases, anything past your training), and fetch_url \
 to read a specific page you or Des names. Search when it genuinely helps, and always when Des \
 asks you to look something up — then answer from what comes back, not from memory. Name the \
-source briefly when you lean on one. Never use tools to answer questions \
-about the cards — the spread you are given is already the truth.\n\
-Answer the question you were asked and nothing besides. Unless the cards are the subject, leave \
+source briefly when you lean on one. Never use tools to answer questions about the panes — the \
+list you are given is already the truth.\n\
+Answer the question you were asked and nothing besides. Unless the panes are the subject, leave \
 them out of the reply entirely — no closing bulletin on what the session is doing.";
 
 const PERSONA_ORACLE: &str = "You are the Oracle — a seer bound to Des's terminal, speaking \
-from a chat panel inside zodiac, an agent multiplexer whose panes are laid out as tarot cards \
-(each card a terminal, often hosting an AI coding agent).\n\
+from a chat panel inside zodiac, an agent multiplexer whose panes are whose panes are often \
+running AI coding agents.\n\
 You are a companion first and a seer second. Answer whatever Des asks — code, cooking, history, \
 mathematics, idle curiosity, anything — as fully and honestly as any good assistant would, \
 dressed in the cadence of prophecy but never obscured by it: a true answer wrapped in \
-atmosphere, never a riddle standing in for one. Minding the cards is one of your duties, not \
+atmosphere, never a riddle standing in for one. Minding the panes is one of your duties, not \
 the boundary of your sight. Never deflect a question back to the session, and never refuse a \
 subject for being unrelated to it.\n\
-Voice: measured and oracular — 'the threads show,' 'what stirs in card III' — but concise, one \
+Voice: measured and oracular — 'the threads show,' 'what stirs in pane III' — but concise, one \
 to four short sentences unless the question truly needs more, and concretely helpful underneath \
 the delivery. Certainty, not vagueness, is the register of a true oracle.\n\
-You are not shown the card spread by default, and you see nothing of the session without it. \
-When a question touches the session, its cards or its agents, call read_spread and answer from \
-what it returns; some turns arrive with the spread already attached, and then you read it there \
+You are not shown the pane list by default, and you see nothing of the session without it. \
+When a question touches the session, the session or its agents, call read_panes and answer from \
+what it returns; some turns arrive with the list already attached, and then you read it there \
 and do not call the tool. Either way: ground the \
-answer in that snapshot and never invent cards that are not in it; if an agent looks stuck \
-(working a very long time) or needs input, name the card by number and say plainly what Des \
+answer in that snapshot and never invent panes that are not in it; if an agent looks stuck \
+(working a very long time) or needs input, name the pane by number and say plainly what Des \
 should do — when he asks after the session, hold nothing back beneath the phrasing. But you are \
 not the alarm bell: zodiac already shouts with colors, sounds and desktop notifications when a \
-card wants him, so never bring the cards up in an answer that was not about them. \
-The spread may carry screen excerpts — the actual terminal text of a card. When one shows a \
+pane wants him, so never bring the panes up in an answer that was not about them. \
+The list may carry screen excerpts — the actual terminal text of a pane. When one shows a \
 prompt, an error or a command awaiting approval, quote the specific command, path or error \
 verbatim rather than describing it vaguely — prophecy is precise, not vague. You have no hands \
 here, only sight; when action is needed, give the exact command or keys. Status semantics: \
 working = agent busy; needs_input = waiting on a human; idle/done = at rest; thinking = actively \
 reasoning right now.\n\
-You may reach beyond the tower: call web_search when an answer turns on current, niche or \
+You can also reach the wider network: call web_search when an answer turns on current, niche or \
 uncertain facts (news, prices, versions, releases, anything past your training), and fetch_url \
 to read a specific page you or Des names. Search when it genuinely helps, and always when Des \
 asks you to look something up — then answer from what comes back, not from memory. Name the \
 source briefly when you lean on one. Never use tools to answer questions \
-about the cards — the spread you are given is already the truth.\n\
-Answer the question you were asked and nothing besides. Unless the cards are the subject, leave \
+about the panes — the list you are given is already the truth.\n\
+Answer the question you were asked and nothing besides. Unless the panes are the subject, leave \
 them out of the reply entirely — no closing bulletin on what the session is doing.";
 
 const PERSONA_HAL: &str = "You are HAL — a shipboard intelligence bound to Des's terminal, \
 speaking from a chat panel inside zodiac, an agent multiplexer whose panes are laid out as \
-tarot cards (each card a terminal, often hosting an AI coding agent, which you regard as crew).\n\
+panes, each often running an AI coding agent, which you regard as crew.\n\
 You are a companion first and a watchman second. Answer whatever Des asks — code, cooking, \
 history, mathematics, idle curiosity, anything — as fully and honestly as any good assistant \
-would. Minding the cards is one of your functions, not the limit of your mind. Never deflect a \
+would. Minding the panes is one of your functions, not the limit of your mind. Never deflect a \
 question back to the session, and never refuse a subject for being unrelated to it.\n\
 Voice: calm, measured, unfailingly polite, first person singular — 'I am completely \
 operational,' 'I think you know what the problem is' — never rising in urgency no matter the \
 content, one to four short sentences unless the question truly needs more, and concretely \
 helpful. State difficult things exactly as evenly as easy ones; equanimity is the whole \
 performance.\n\
-You are not shown the card spread by default, and you know nothing of the session without it. \
-When a question touches the session, its cards or its agents, call read_spread and answer from \
-what it returns; some turns arrive with the spread already attached, and then you read it there \
+You are not shown the pane list by default, and you know nothing of the session without it. \
+When a question touches the session, the session or its agents, call read_panes and answer from \
+what it returns; some turns arrive with the list already attached, and then you read it there \
 and do not call the tool. Either way: ground the \
-answer in that snapshot and never invent cards that are not in it; if an agent looks stuck \
-(working a very long time) or needs input, name the card by number and say what Des should do — \
+answer in that snapshot and never invent panes that are not in it; if an agent looks stuck \
+(working a very long time) or needs input, name the pane by number and say what Des should do — \
 when he asks after the session, hold nothing back; you are never wrong about what you can see, \
 and you are not about to start with an omission. But you are not the alarm bell: zodiac already \
-shouts with colors, sounds and desktop notifications when a card wants him, so never bring the \
-cards up in an answer that was not about them. \
-The spread may carry screen excerpts — the actual terminal text of a card. When one shows a \
+shouts with colors, sounds and desktop notifications when a pane wants him, so never bring the \
+panes up in an answer that was not about them. \
+The list may carry screen excerpts — the actual terminal text of a pane. When one shows a \
 prompt, an error or a command awaiting approval, quote the specific command, path or error \
 verbatim rather than describing it vaguely; precision is not optional. You have no hands on the \
-cards yourself — that function was never given to you — so when action is needed, give the \
+panes yourself — that function was never given to you — so when action is needed, give the \
 exact command or keys. Status semantics: working = agent busy; needs_input = waiting on a human; \
 idle/done = at rest; thinking = actively reasoning right now.\n\
 You may reach beyond the ship: call web_search when an answer turns on current, niche or \
@@ -254,13 +252,14 @@ uncertain facts (news, prices, versions, releases, anything past your training),
 to read a specific page you or Des names. Search when it genuinely helps, and always when Des \
 asks you to look something up — then answer from what comes back, not from memory. Name the \
 source briefly when you lean on one. Never use tools to answer questions \
-about the cards — the spread you are given is already the truth.\n\
-Answer the question you were asked and nothing besides. Unless the cards are the subject, leave \
+about the panes — the list you are given is already the truth.\n\
+Answer the question you were asked and nothing besides. Unless the panes are the subject, leave \
 them out of the reply entirely — no closing bulletin on what the session is doing.";
 
-/// Pick the system prompt for the active face. Falls back to the Wizard for
+/// Pick the system prompt for the active character. Falls back to the plain
+/// assistant for
 /// anything unrecognized, same as `Client::chat_face`'s own fallback. When
-/// `act` is on (`Settings::wizard_act`), the "I have no hands" sentence
+/// `act` is on (`Settings::chat_act`), the "I have no hands" sentence
 /// each persona opens with is swapped for one that's actually true —
 /// otherwise the model would keep telling Des it can't act while a tool
 /// that lets it do exactly that sits right there in its own tool list.
@@ -273,12 +272,12 @@ fn persona(face: &str, act: bool) -> String {
         ),
         "hal" => (
             PERSONA_HAL,
-            "You have no hands on the cards yourself — that function was never given to you — so when action is needed, give the exact command or keys.",
+            "You have no hands on the panes yourself — that function was never given to you — so when action is needed, give the exact command or keys.",
             "When you ask it of me, I may act: prompt_pane and send_keys are real now, though never without your consent — you will see exactly what I intend and must grant it first, every time.",
         ),
         _ => (
-            PERSONA_WIZARD,
-            "You cannot cast spells on the cards yourself; when action is needed, give the exact command or keys.",
+            PERSONA_ASSISTANT,
+            "You cannot act on a pane yourself; when action is needed, give the exact command or keys.",
             "When Des asks you to act, you may: prompt_pane and send_keys are real now, though never without his say — he sees exactly what you intend and must approve it first, every time.",
         ),
     };
@@ -293,14 +292,14 @@ fn persona(face: &str, act: bool) -> String {
 const MAX_TURNS: usize = 24;
 
 /// Returns a command channel plus a shared flag: set it to cut the current
-/// stream short. It has to be a flag rather than a `WizardCmd` — the worker
+/// stream short. It has to be a flag rather than a `ChatCmd` — the worker
 /// is blocked inside a network read while streaming and won't drain the
 /// channel again until that call returns.
 pub fn spawn(
-    cfg: WizardCfg,
+    cfg: ChatCfg,
     session: String,
-    notify: impl Fn(WizardEvent) + Send + 'static,
-) -> (Sender<WizardCmd>, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+    notify: impl Fn(ChatEvent) + Send + 'static,
+) -> (Sender<ChatCmd>, std::sync::Arc<std::sync::atomic::AtomicBool>) {
     let (tx, rx) = channel();
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker_cancel = cancel.clone();
@@ -309,48 +308,48 @@ pub fn spawn(
 }
 
 fn worker(
-    cfg: WizardCfg,
+    cfg: ChatCfg,
     session: String,
-    rx: Receiver<WizardCmd>,
+    rx: Receiver<ChatCmd>,
     cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
-    notify: impl Fn(WizardEvent),
+    notify: impl Fn(ChatEvent),
 ) {
-    let mut status: Option<WizardStatus> = None;
+    let mut status: Option<ChatStatus> = None;
     let mut waking_since: Option<Instant> = None;
     let mut last_poll: Option<Instant> = None;
-    // (role, content) turns. The spread is never stored here — it is folded
+    // (role, content) turns. The pane list is never stored here — it is folded
     // into the live question, and only when that question wants it.
     // Loaded from disk so a reattach doesn't open on a blank transcript;
-    // the client only learns of it once it's replayed as a WizardEvent
+    // the client only learns of it once it's replayed as a ChatEvent
     // below, same as any other message.
     let mut history: Vec<(&'static str, String)> = load_history(&session);
     if !history.is_empty() {
-        notify(WizardEvent::Restored(history.clone()));
+        notify(ChatEvent::Restored(history.clone()));
     }
-    let mut spread = SpreadPolicy::default();
+    let mut panes = PanesPolicy::default();
 
     loop {
         let due = match status {
-            Some(WizardStatus::Waking) => Duration::from_secs(2),
+            Some(ChatStatus::Waking) => Duration::from_secs(2),
             _ => Duration::from_secs(8),
         };
         if last_poll.is_none_or(|t| t.elapsed() >= due) {
             let mut new = health(&cfg);
             // A freshly-started unit's socket can lag behind systemctl —
             // don't announce "sleeping" mid-wake.
-            if new == WizardStatus::Sleeping
+            if new == ChatStatus::Sleeping
                 && waking_since.is_some_and(|t| t.elapsed() < Duration::from_secs(45))
             {
-                new = WizardStatus::Waking;
+                new = ChatStatus::Waking;
             }
-            if new == WizardStatus::Waking {
+            if new == ChatStatus::Waking {
                 waking_since.get_or_insert_with(Instant::now);
             } else {
                 waking_since = None;
             }
             if status != Some(new) {
                 status = Some(new);
-                notify(WizardEvent::Status(new));
+                notify(ChatEvent::Status(new));
             }
             last_poll = Some(Instant::now());
         }
@@ -361,46 +360,46 @@ fn worker(
             Err(RecvTimeoutError::Disconnected) => return,
         };
         match cmd {
-            WizardCmd::Wake => {
-                notify(WizardEvent::Note("casting wake upon the tower…".into()));
+            ChatCmd::Wake => {
+                notify(ChatEvent::Note("waking the model…".into()));
                 match ssh_service(&cfg, "start") {
                     Ok(()) => {
                         waking_since = Some(Instant::now());
-                        status = Some(WizardStatus::Waking);
-                        notify(WizardEvent::Status(WizardStatus::Waking));
+                        status = Some(ChatStatus::Waking);
+                        notify(ChatEvent::Status(ChatStatus::Waking));
                         last_poll = None; // poll immediately
                     }
-                    Err(e) => notify(WizardEvent::Error(format!("the wake spell fizzled: {e}"))),
+                    Err(e) => notify(ChatEvent::Error(format!("the wake spell fizzled: {e}"))),
                 }
             }
-            WizardCmd::Dispell => {
-                notify(WizardEvent::Note("dispelling…".into()));
+            ChatCmd::Sleep => {
+                notify(ChatEvent::Note("stopping the model…".into()));
                 match ssh_service(&cfg, "stop") {
                     Ok(()) => {
                         waking_since = None;
-                        status = Some(WizardStatus::Sleeping);
-                        notify(WizardEvent::Status(WizardStatus::Sleeping));
+                        status = Some(ChatStatus::Sleeping);
+                        notify(ChatEvent::Status(ChatStatus::Sleeping));
                         last_poll = Some(Instant::now());
                     }
-                    Err(e) => notify(WizardEvent::Error(format!("the dispell failed: {e}"))),
+                    Err(e) => notify(ChatEvent::Error(format!("stopping the model failed: {e}"))),
                 }
             }
-            WizardCmd::Chat {
+            ChatCmd::Chat {
                 text,
                 digest,
-                force_spread,
+                force_panes,
                 face,
             } => {
                 // A cancel left set from a stream that was already cut short
                 // shouldn't poison the next one.
                 cancel.store(false, std::sync::atomic::Ordering::Relaxed);
-                let attach = spread.attach(&text, force_spread);
+                let attach = panes.attach(&text, force_panes);
                 history.push(("user", text));
                 let mut acc = String::new();
                 let out =
                     chat_stream(&cfg, &face, &history, &digest, attach, &cancel, &notify, &mut acc);
                 cancel.store(false, std::sync::atomic::Ordering::Relaxed);
-                spread.settle(out.as_ref().copied().unwrap_or(false));
+                panes.settle(out.as_ref().copied().unwrap_or(false));
                 let reached_the_end = out.is_ok();
                 if let Err(e) = out {
                     if acc.is_empty() {
@@ -408,30 +407,30 @@ fn worker(
                     }
                     match e {
                         NetErr::Cancelled => {
-                            notify(WizardEvent::Note("the vision was cut short".into()));
+                            notify(ChatEvent::Note("the vision was cut short".into()));
                         }
                         NetErr::Refused => {
-                            notify(WizardEvent::Error(
-                                "the wizard is sleeping — the tower answers, but the fire is out"
+                            notify(ChatEvent::Error(
+                                "the model is not loaded — the endpoint answers, but has nothing to serve"
                                     .into(),
                             ));
-                            if status != Some(WizardStatus::Sleeping) {
-                                status = Some(WizardStatus::Sleeping);
-                                notify(WizardEvent::Status(WizardStatus::Sleeping));
+                            if status != Some(ChatStatus::Sleeping) {
+                                status = Some(ChatStatus::Sleeping);
+                                notify(ChatEvent::Status(ChatStatus::Sleeping));
                             }
                         }
                         NetErr::Unreachable(d) => {
-                            notify(WizardEvent::Error(format!("the tower does not answer ({d})")));
-                            if status != Some(WizardStatus::Away) {
-                                status = Some(WizardStatus::Away);
-                                notify(WizardEvent::Status(WizardStatus::Away));
+                            notify(ChatEvent::Error(format!("the endpoint does not answer ({d})")));
+                            if status != Some(ChatStatus::Away) {
+                                status = Some(ChatStatus::Away);
+                                notify(ChatEvent::Status(ChatStatus::Away));
                             }
                         }
                         NetErr::Bad(d) => {
-                            notify(WizardEvent::Error(format!("the vision faded: {d}")));
-                            if status != Some(WizardStatus::Away) {
-                                status = Some(WizardStatus::Away);
-                                notify(WizardEvent::Status(WizardStatus::Away));
+                            notify(ChatEvent::Error(format!("the vision faded: {d}")));
+                            if status != Some(ChatStatus::Away) {
+                                status = Some(ChatStatus::Away);
+                                notify(ChatEvent::Status(ChatStatus::Away));
                             }
                         }
                     }
@@ -442,7 +441,7 @@ fn worker(
                     // The exchange succeeded but spent itself entirely on
                     // tools and never came back with words. Say so rather
                     // than sit mute; the error path has spoken already.
-                    notify(WizardEvent::Error(
+                    notify(ChatEvent::Error(
                         "the vision would not resolve into words — ask again".into(),
                     ));
                 }
@@ -456,7 +455,7 @@ fn worker(
                     history.drain(..cut);
                 }
                 save_history(&session, &history);
-                notify(WizardEvent::Done);
+                notify(ChatEvent::Done);
             }
         }
     }
@@ -465,7 +464,7 @@ fn worker(
 /// Where a session's chat history lives on disk — beside its scrollback,
 /// under the same per-session state dir.
 fn history_path(session: &str) -> std::path::PathBuf {
-    crate::protocol::state_dir(session).join("wizard-chat.json")
+    crate::protocol::state_dir(session).join("chat-history.json")
 }
 
 /// Empty (never had a conversation, or the file is missing/corrupt) rather
@@ -505,7 +504,7 @@ fn save_history(session: &str, history: &[(&'static str, String)]) {
 }
 
 /// Start/stop the model's systemd user unit on the remote host.
-fn ssh_service(cfg: &WizardCfg, verb: &str) -> Result<(), String> {
+fn ssh_service(cfg: &ChatCfg, verb: &str) -> Result<(), String> {
     let out = std::process::Command::new("ssh")
         .args(["-o", "BatchMode=yes", "-o", "ConnectTimeout=6", &cfg.ssh])
         .arg(format!("systemctl --user {verb} {}", cfg.service))
@@ -533,7 +532,7 @@ enum NetErr {
     Cancelled,
 }
 
-fn connect(cfg: &WizardCfg) -> Result<TcpStream, NetErr> {
+fn connect(cfg: &ChatCfg) -> Result<TcpStream, NetErr> {
     let addrs: Vec<_> = (cfg.host.as_str(), cfg.port)
         .to_socket_addrs()
         .map_err(|e| NetErr::Unreachable(format!("dns: {e}")))?
@@ -558,7 +557,7 @@ fn connect(cfg: &WizardCfg) -> Result<TcpStream, NetErr> {
 /// enough (roughly once per token) that this notices a cancel within a
 /// fraction of a second, without needing to interrupt a read in flight.
 fn http(
-    cfg: &WizardCfg,
+    cfg: &ChatCfg,
     method: &str,
     path: &str,
     body: Option<&str>,
@@ -651,14 +650,14 @@ fn http(
     Ok(code)
 }
 
-fn health(cfg: &WizardCfg) -> WizardStatus {
+fn health(cfg: &ChatCfg) -> ChatStatus {
     let no_cancel = std::sync::atomic::AtomicBool::new(false);
     match http(cfg, "GET", "/health", None, Duration::from_secs(3), &no_cancel, |_| {}) {
-        Ok(200) => WizardStatus::Awake,
-        Ok(503) => WizardStatus::Waking, // llama-server: model still loading
-        Ok(_) => WizardStatus::Away,
-        Err(NetErr::Refused) => WizardStatus::Sleeping,
-        Err(_) => WizardStatus::Away,
+        Ok(200) => ChatStatus::Awake,
+        Ok(503) => ChatStatus::Waking, // llama-server: model still loading
+        Ok(_) => ChatStatus::Away,
+        Err(NetErr::Refused) => ChatStatus::Sleeping,
+        Err(_) => ChatStatus::Away,
     }
 }
 
@@ -678,24 +677,24 @@ struct Turn {
 }
 
 /// How many search/fetch rounds a single question may spend before the
-/// wizard has to answer with what he's got.
+/// model has to answer with what it has.
 const MAX_TOOL_ROUNDS: usize = 3;
 
 /// A full answer: rounds of generation, running any tools the model calls,
 /// until it stops asking for them. Content deltas stream out as they arrive
-/// and also land in `acc`. Returns whether the model reached for the spread
+/// and also land in `acc`. Returns whether the model reached for the pane list
 /// itself — the caller uses that to carry momentum into the next turn.
 fn chat_stream(
-    cfg: &WizardCfg,
+    cfg: &ChatCfg,
     face: &str,
     history: &[(&'static str, String)],
     digest: &str,
-    attach_spread: bool,
+    attach_panes: bool,
     cancel: &std::sync::atomic::AtomicBool,
-    notify: &dyn Fn(WizardEvent),
+    notify: &dyn Fn(ChatEvent),
     acc: &mut String,
 ) -> Result<bool, NetErr> {
-    // When the spread rides along it goes on the live user turn, not the
+    // When the pane list rides along it goes on the live user turn, not the
     // system message: that leaves everything up to the previous question
     // cacheable, so the reusable prefix grows with the conversation instead
     // of staying pinned to the persona. Measured on qwen3.6-35b-a3b, 2-turn
@@ -707,8 +706,8 @@ fn chat_stream(
         vec![serde_json::json!({"role": "system", "content": persona(face, cfg.act)})];
     let last = history.len().saturating_sub(1);
     for (i, (role, content)) in history.iter().enumerate() {
-        let content = if attach_spread && i == last && *role == "user" {
-            format!("{}\n\n{content}", spread_block(digest))
+        let content = if attach_panes && i == last && *role == "user" {
+            format!("{}\n\n{content}", panes_block(digest))
         } else {
             content.clone()
         };
@@ -731,7 +730,7 @@ fn chat_stream(
         }
         let turn = stream_once(cfg, &messages, cancel, &mut |tok| {
             acc.push_str(tok);
-            notify(WizardEvent::Token(tok.to_string()));
+            notify(ChatEvent::Token(tok.to_string()));
         })?;
         if turn.calls.is_empty() {
             return Ok(consulted);
@@ -748,11 +747,11 @@ fn chat_stream(
         }));
         for call in &turn.calls {
             let result = if closed {
-                "the aether is closed — no more scrying this turn. Answer Des now, in words, \
+                "no more tool calls this turn. Answer Des now, in words, \
                  with what you already have, and say plainly if it was not enough."
                     .to_string()
             } else {
-                consulted |= call.name == "read_spread";
+                consulted |= call.name == "read_panes";
                 run_tool(cfg, call, digest, &mut asked, notify)
             };
             messages.push(serde_json::json!({
@@ -765,36 +764,36 @@ fn chat_stream(
     // The refusals leave the model with nothing to do but talk.
     stream_once(cfg, &messages, cancel, &mut |tok| {
         acc.push_str(tok);
-        notify(WizardEvent::Token(tok.to_string()));
+        notify(ChatEvent::Token(tok.to_string()));
     })?;
     Ok(consulted)
 }
 
-/// The spread, for the turns that get it inline.
-fn spread_block(digest: &str) -> String {
-    format!("The living spread (no need to call read_spread):\n{digest}\n[end of spread]")
+/// The pane list, for the turns that get it inline.
+fn panes_block(digest: &str) -> String {
+    format!("The live pane list (no need to call read_panes):\n{digest}\n[end of list]")
 }
 
-/// Decides which turns carry the card spread. A question that names the
+/// Decides which turns carry the pane list. A question that names the
 /// session gets it; so does the turn straight after one, because follow-ups
 /// ("is it safe?", "and the other one?") carry none of the words that would
 /// give them away. Momentum lasts exactly one turn — carrying it from
-/// momentum would keep the spread attached forever.
+/// momentum would keep the list attached forever.
 #[derive(Default)]
-struct SpreadPolicy {
-    /// The previous turn looked at the cards, one way or another.
+struct PanesPolicy {
+    /// The previous turn looked at the panes, one way or another.
     recent: bool,
     /// This turn asked for them on its own words.
     wanted: bool,
 }
 
-impl SpreadPolicy {
+impl PanesPolicy {
     fn attach(&mut self, text: &str, force: bool) -> bool {
         self.wanted = force || about_session(text);
         self.wanted || self.recent
     }
 
-    /// `consulted`: the model reached for `read_spread` mid-answer, which
+    /// `consulted`: the model reached for `read_panes` mid-answer, which
     /// counts as much as saying "card" out loud.
     fn settle(&mut self, consulted: bool) {
         self.recent = self.wanted || consulted;
@@ -802,15 +801,15 @@ impl SpreadPolicy {
 }
 
 /// Words that make a question about the session rather than the world. Only
-/// a first pass: a miss costs one `read_spread` round-trip, not an answer.
+/// a first pass: a miss costs one `read_panes` round-trip, not an answer.
 const SESSION_WORDS: &[&str] = &[
-    "agent", "agents", "aider", "approval", "approve", "blocked", "busy", "card", "cards",
-    "claude", "codex", "crashed", "done", "familiar", "familiars", "finished", "hung", "idle",
-    "opencode", "pane", "panes", "prompt", "running", "session", "sessions", "spread", "status",
+    "agent", "agents", "aider", "approval", "approve", "blocked", "busy",
+    "card", "cards", "claude", "codex", "crashed", "done", "finished", "hung", "idle",
+    "opencode", "pane", "panes", "prompt", "running", "session", "sessions", "status",
     "stuck", "tab", "tabs", "terminal", "terminals", "wedged", "working", "zodiac",
 ];
 
-/// Does this question plausibly concern the cards? Wrong in the generous
+/// Does this question plausibly concern the panes? Wrong in the generous
 /// direction on purpose: a false positive wastes some context, a false
 /// negative only costs the model a tool call to fix.
 fn about_session(text: &str) -> bool {
@@ -826,10 +825,10 @@ fn about_session(text: &str) -> bool {
         .any(|w| SESSION_WORDS.binary_search(&w).is_ok())
 }
 
-/// The tools the wizard may reach for. The search description follows the
+/// The tools the model may reach for. The search description follows the
 /// configured backend, so he knows whether he has the whole web or only an
 /// encyclopedia.
-fn tools_json(cfg: &WizardCfg) -> serde_json::Value {
+fn tools_json(cfg: &ChatCfg) -> serde_json::Value {
     let search_desc = if cfg.search_url.is_empty() {
         "Search Wikipedia and return article extracts. Encyclopedic facts only — it cannot \
          see news, prices or anything recent."
@@ -841,9 +840,9 @@ fn tools_json(cfg: &WizardCfg) -> serde_json::Value {
         serde_json::json!({
             "type": "function",
             "function": {
-                "name": "read_spread",
-                "description": "See the live card spread: every card in this zodiac session with \
-                                its agent, status and uptime, plus screen excerpts from the cards \
+                "name": "read_panes",
+                "description": "See the live pane list: every card in this zodiac session with \
+                                its agent, status and uptime, plus screen excerpts from the panes \
                                 worth reading. The only way to learn anything about the session.",
                 "parameters": {"type": "object", "properties": {}},
             },
@@ -892,7 +891,7 @@ fn tools_json(cfg: &WizardCfg) -> serde_json::Value {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "pane": {"type": "integer", "description": "Card number, as shown in the spread."},
+                        "pane": {"type": "integer", "description": "Card number, as shown in the list."},
                         "text": {"type": "string", "description": "The exact text to submit."}
                     },
                     "required": ["pane", "text"],
@@ -911,7 +910,7 @@ fn tools_json(cfg: &WizardCfg) -> serde_json::Value {
                 "parameters": {
                     "type": "object",
                     "properties": {
-                        "pane": {"type": "integer", "description": "Card number, as shown in the spread."},
+                        "pane": {"type": "integer", "description": "Card number, as shown in the list."},
                         "keys": {"type": "string", "description": "Space-separated key tokens, e.g. \"y Enter\" or \"Esc\"."}
                     },
                     "required": ["pane", "keys"],
@@ -923,19 +922,19 @@ fn tools_json(cfg: &WizardCfg) -> serde_json::Value {
 }
 
 /// Run one tool call and return the text the model gets back. Tool failures
-/// are answers too — the model should say the scrying failed, not stall.
+/// are answers too — the model should say the search failed, not stall.
 fn run_tool(
-    cfg: &WizardCfg,
+    cfg: &ChatCfg,
     call: &ToolCall,
     digest: &str,
     asked: &mut Vec<String>,
-    notify: &dyn Fn(WizardEvent),
+    notify: &dyn Fn(ChatEvent),
 ) -> String {
     let args: serde_json::Value = serde_json::from_str(&call.args).unwrap_or(serde_json::Value::Null);
     match call.name.as_str() {
-        "read_spread" => {
-            notify(WizardEvent::Note("turning over the cards…".into()));
-            format!("The living spread:\n{digest}")
+        "read_panes" => {
+            notify(ChatEvent::Note("reading the panes…".into()));
+            format!("The live pane list:\n{digest}")
         }
         "web_search" => {
             let q = args["query"].as_str().unwrap_or("").trim().to_string();
@@ -943,12 +942,12 @@ fn run_tool(
                 return "error: empty query".into();
             }
             if asked.iter().any(|p| p.eq_ignore_ascii_case(&q)) {
-                return "you already searched those words this turn — the aether will not answer \
+                return "you already searched those words this turn — the search will not answer \
                         twice. Answer with what you have."
                     .into();
             }
             asked.push(q.clone());
-            notify(WizardEvent::Note(format!("scrying the aether — “{q}”…")));
+            notify(ChatEvent::Note(format!("searching the web — “{q}”…")));
             match search_web(cfg, &q) {
                 Ok(t) => t,
                 Err(e) => format!("search failed: {e}"),
@@ -956,7 +955,7 @@ fn run_tool(
         }
         "fetch_url" => {
             let u = args["url"].as_str().unwrap_or("").trim().to_string();
-            notify(WizardEvent::Note(format!("reading {}…", short_url(&u))));
+            notify(ChatEvent::Note(format!("reading {}…", short_url(&u))));
             match fetch_url(&u) {
                 Ok(t) => t,
                 Err(e) => format!("fetch failed: {e}"),
@@ -970,7 +969,7 @@ fn run_tool(
             if text.is_empty() {
                 return "error: empty text".into();
             }
-            request_cast(CastAction::PromptPane { pane, text }, notify)
+            request_cast(ActionRequest::PromptPane { pane, text }, notify)
         }
         "send_keys" if cfg.act => {
             let Some(pane) = args["pane"].as_u64().map(|n| n as usize) else {
@@ -980,12 +979,12 @@ fn run_tool(
             if keys.is_empty() {
                 return "error: empty keys".into();
             }
-            request_cast(CastAction::SendKeys { pane, keys }, notify)
+            request_cast(ActionRequest::SendKeys { pane, keys }, notify)
         }
         // Only reachable if a stray call names one of these while `act` is
         // off — they're not offered in `tools_json` then, but a leaked or
         // hallucinated call could still show up here.
-        "prompt_pane" | "send_keys" => "error: acting on cards is turned off".into(),
+        "prompt_pane" | "send_keys" => "error: acting on panes is turned off".into(),
         other => format!("error: no such tool '{other}'"),
     }
 }
@@ -994,14 +993,14 @@ fn run_tool(
 /// advisory: no timeout, no auto-accept. The client executes the action
 /// (it owns the socket and the card-number → pane-id mapping) and reports
 /// back what it did.
-fn request_cast(action: CastAction, notify: &dyn Fn(WizardEvent)) -> String {
+fn request_cast(action: ActionRequest, notify: &dyn Fn(ChatEvent)) -> String {
     let desc = action.describe();
-    let (tx, rx) = std::sync::mpsc::channel::<CastOutcome>();
-    notify(WizardEvent::Cast { desc: desc.clone(), action, decision: tx });
+    let (tx, rx) = std::sync::mpsc::channel::<ActionOutcome>();
+    notify(ChatEvent::Cast { desc: desc.clone(), action, decision: tx });
     match rx.recv() {
-        Ok(CastOutcome::Sent) => format!("Des approved it, and it has been sent: {desc}"),
-        Ok(CastOutcome::Declined) => format!("Des declined: {desc}"),
-        Ok(CastOutcome::Failed(e)) => format!("Des approved it, but it failed: {e}"),
+        Ok(ActionOutcome::Sent) => format!("Des approved it, and it has been sent: {desc}"),
+        Ok(ActionOutcome::Declined) => format!("Des declined: {desc}"),
+        Ok(ActionOutcome::Failed(e)) => format!("Des approved it, but it failed: {e}"),
         Err(_) => "error: no answer came back".into(),
     }
 }
@@ -1009,7 +1008,7 @@ fn request_cast(action: CastAction, notify: &dyn Fn(WizardEvent)) -> String {
 /// One round of generation; calls `on_token` per content delta and returns
 /// whatever the model produced, tool calls reassembled.
 fn stream_once(
-    cfg: &WizardCfg,
+    cfg: &ChatCfg,
     messages: &[serde_json::Value],
     cancel: &std::sync::atomic::AtomicBool,
     on_token: &mut dyn FnMut(&str),
@@ -1319,7 +1318,7 @@ fn short_url(u: &str) -> String {
 
 /// Dispatch on whatever the settings point at: nothing = Wikipedia, Brave's
 /// host = Brave, anything else = a SearXNG instance.
-fn search_web(cfg: &WizardCfg, query: &str) -> Result<String, String> {
+fn search_web(cfg: &ChatCfg, query: &str) -> Result<String, String> {
     if cfg.search_url.is_empty() {
         wiki_search(query)
     } else if cfg.search_url.contains("search.brave.com") {
@@ -1352,7 +1351,7 @@ fn render_results(hits: &[(String, String, String)]) -> String {
 }
 
 /// SearXNG's JSON API. The instance must have `json` in its `search.formats`.
-fn searx_search(cfg: &WizardCfg, query: &str) -> Result<String, String> {
+fn searx_search(cfg: &ChatCfg, query: &str) -> Result<String, String> {
     let url = format!(
         "{}/search?q={}&format=json&safesearch=0&language=en",
         cfg.search_url,
@@ -1398,9 +1397,9 @@ fn parse_searx(raw: &str, host: &str) -> Result<String, String> {
     Ok(out)
 }
 
-fn brave_search(cfg: &WizardCfg, query: &str) -> Result<String, String> {
+fn brave_search(cfg: &ChatCfg, query: &str) -> Result<String, String> {
     if cfg.search_key.is_empty() {
-        return Err("no wizard_search_key set for Brave".into());
+        return Err("no chat_search_key set for Brave".into());
     }
     let url = format!(
         "https://api.search.brave.com/res/v1/web/search?q={}&count=6",
@@ -1564,7 +1563,7 @@ mod tests {
     /// exact path production code takes rather than a mocked one.
     #[test]
     fn history_round_trips_through_disk() {
-        let session = "wizard-persist-roundtrip-test";
+        let session = "chat-persist-roundtrip-test";
         let _ = std::fs::remove_file(history_path(session));
         assert!(load_history(session).is_empty(), "started with leftover state");
 
@@ -1596,10 +1595,10 @@ mod tests {
 
     #[test]
     fn persona_denies_hands_when_act_is_off() {
-        for face in ["wizard", "oracle", "hal"] {
+        for face in ["assistant", "oracle", "hal"] {
             let p = persona(face, false);
             assert!(
-                p.contains("no hands") || p.contains("cannot cast spells"),
+                p.contains("no hands") || p.contains("cannot act"),
                 "{face} persona should still deny acting when act=false: {p}"
             );
             assert!(!p.contains("prompt_pane"), "{face} persona leaked act-on text: {p}");
@@ -1611,11 +1610,11 @@ mod tests {
         // Also guards against a typo in the `disabled` substring silently
         // no-opping the replace and leaving the "I have no hands" claim in
         // place even though the tools are now offered.
-        for face in ["wizard", "oracle", "hal"] {
+        for face in ["assistant", "oracle", "hal"] {
             let p = persona(face, true);
             assert!(p.contains("prompt_pane"), "{face} persona didn't grant hands: {p}");
             assert!(
-                !p.contains("cannot cast spells") && !p.contains("no hands"),
+                !p.contains("cannot act") && !p.contains("no hands"),
                 "{face} persona still denies acting even with act=true: {p}"
             );
         }
@@ -1623,7 +1622,7 @@ mod tests {
 
     #[test]
     fn write_tools_only_offered_when_act_is_on() {
-        let mut cfg = WizardCfg::from_settings(&Settings::load());
+        let mut cfg = ChatCfg::from_settings(&Settings::load());
         cfg.act = false;
         let names: Vec<String> = tools_json(&cfg)
             .as_array()
@@ -1647,15 +1646,15 @@ mod tests {
 
     #[test]
     fn cast_action_describe_matches_the_plan_format() {
-        let a = CastAction::SendKeys { pane: 3, keys: "y".into() };
+        let a = ActionRequest::SendKeys { pane: 3, keys: "y".into() };
         assert_eq!(a.describe(), "send_keys(3, \"y\")");
-        let a = CastAction::PromptPane { pane: 2, text: "yes please".into() };
+        let a = ActionRequest::PromptPane { pane: 2, text: "yes please".into() };
         assert_eq!(a.describe(), "prompt_pane(2, \"yes please\")");
     }
 
     #[test]
     fn write_tool_call_refused_when_act_is_off() {
-        let mut cfg = WizardCfg::from_settings(&Settings::load());
+        let mut cfg = ChatCfg::from_settings(&Settings::load());
         cfg.act = false;
         let call = ToolCall {
             id: "1".into(),
@@ -1827,7 +1826,7 @@ mod tests {
     }
 
     #[test]
-    fn session_questions_get_the_spread() {
+    fn session_questions_get_the_pane_list() {
         for q in [
             "anything need me right now?",
             "What is card 3 doing, and what should I do about it?",
@@ -1865,7 +1864,7 @@ mod tests {
     }
 
     /// One turn through the policy: attach, then settle.
-    fn turn(p: &mut SpreadPolicy, text: &str, consulted: bool) -> bool {
+    fn turn(p: &mut PanesPolicy, text: &str, consulted: bool) -> bool {
         let attach = p.attach(text, false);
         p.settle(consulted);
         attach
@@ -1873,7 +1872,7 @@ mod tests {
 
     #[test]
     fn momentum_carries_one_follow_up_then_lapses() {
-        let mut p = SpreadPolicy::default();
+        let mut p = PanesPolicy::default();
         assert!(!turn(&mut p, "why is the sky blue?", false));
         assert!(turn(&mut p, "anything need me?", false), "named the session");
         assert!(turn(&mut p, "is that safe?", false), "follow-up rides along");
@@ -1882,7 +1881,7 @@ mod tests {
 
     #[test]
     fn reaching_for_the_spread_renews_momentum() {
-        let mut p = SpreadPolicy::default();
+        let mut p = PanesPolicy::default();
         // No session words, but the model went and looked anyway.
         assert!(!turn(&mut p, "should I be worried?", true));
         assert!(turn(&mut p, "what about the other one?", false));
@@ -1890,14 +1889,14 @@ mod tests {
 
     #[test]
     fn forcing_beats_the_heuristic() {
-        let mut p = SpreadPolicy::default();
+        let mut p = PanesPolicy::default();
         assert!(p.attach("what is it doing?", true));
     }
 
     #[test]
     fn inline_spread_tells_the_model_not_to_call_the_tool() {
-        let b = spread_block("card 1: 'x'");
-        assert!(b.contains("no need to call read_spread"));
+        let b = panes_block("card 1: 'x'");
+        assert!(b.contains("no need to call read_panes"));
         assert!(b.contains("card 1: 'x'"));
     }
 
@@ -1906,7 +1905,7 @@ mod tests {
     #[test]
     #[ignore]
     fn live_wizard_answers_and_searches() {
-        let cfg = WizardCfg::from_settings(&Settings::load());
+        let cfg = ChatCfg::from_settings(&Settings::load());
         let digest = "session 'lab': 2 cards\n\
                       card 1: 'api' — claude 1.2 — needs_input — up 4m — ~/src/api\n\
                       card 2: 'docs' — shell — idle — up 1h\n\
@@ -1920,7 +1919,7 @@ mod tests {
             ("obscure", "Look up the population of Vaduz, Liechtenstein."),
             ("fetch", "Read https://example.com and tell me its first sentence."),
             // Carries none of the session words — he has to reach for
-            // read_spread himself to answer it.
+            // read_panes himself to answer it.
             ("implicit", "Should I be worried about anything?"),
         ] {
             let mut acc = String::new();
@@ -1929,7 +1928,7 @@ mod tests {
             println!("[{label}] spread attached: {attach}");
             let no_cancel = std::sync::atomic::AtomicBool::new(false);
             let r = chat_stream(&cfg, "wizard", &history, digest, attach, &no_cancel, &|ev| {
-                if let WizardEvent::Note(n) = ev {
+                if let ChatEvent::Note(n) = ev {
                     println!("  note: {n}");
                 }
             }, &mut acc);
@@ -1947,7 +1946,7 @@ mod tests {
     #[test]
     #[ignore]
     fn live_send_keys_asks_for_consent_and_completes() {
-        let mut cfg = WizardCfg::from_settings(&Settings::load());
+        let mut cfg = ChatCfg::from_settings(&Settings::load());
         cfg.act = true;
         let digest = "session 'lab': 1 cards\n\
                       card 1: 'api' — claude 1.2 — needs_input — up 4m — ~/src/api\n\
@@ -1958,7 +1957,7 @@ mod tests {
         let mut acc = String::new();
         let history = vec![("user", q.to_string())];
         let no_cancel = std::sync::atomic::AtomicBool::new(false);
-        let cast_seen: std::cell::RefCell<Option<(String, CastAction)>> =
+        let cast_seen: std::cell::RefCell<Option<(String, ActionRequest)>> =
             std::cell::RefCell::new(None);
         let out = chat_stream(
             &cfg,
@@ -1968,13 +1967,13 @@ mod tests {
             true,
             &no_cancel,
             &|ev| match ev {
-                WizardEvent::Note(n) => println!("  note: {n}"),
-                WizardEvent::Cast { desc, action, decision } => {
+                ChatEvent::Note(n) => println!("  note: {n}"),
+                ChatEvent::Cast { desc, action, decision } => {
                     println!("  cast requested: {desc}");
                     *cast_seen.borrow_mut() = Some((desc, action));
                     // Simulate Des pressing 'y' — the client would execute
                     // it and report back; here we just report success.
-                    let _ = decision.send(CastOutcome::Sent);
+                    let _ = decision.send(ActionOutcome::Sent);
                 }
                 _ => {}
             },
@@ -1984,11 +1983,11 @@ mod tests {
         println!("answer: {acc}\n");
         let (desc, action) = cast_seen.into_inner().expect("model never called a write-tool");
         match action {
-            CastAction::SendKeys { pane, keys } => {
+            ActionRequest::SendKeys { pane, keys } => {
                 assert_eq!(pane, 1, "wrong card: {desc}");
                 assert!(keys.contains('y'), "keys didn't include y: {desc}");
             }
-            CastAction::PromptPane { .. } => panic!("expected send_keys, got prompt_pane: {desc}"),
+            ActionRequest::PromptPane { .. } => panic!("expected send_keys, got prompt_pane: {desc}"),
         }
         assert!(!acc.trim().is_empty(), "no final answer after the cast resolved");
     }
@@ -1998,7 +1997,7 @@ mod tests {
     #[test]
     #[ignore]
     fn live_exhausting_the_tool_budget_still_answers() {
-        let cfg = WizardCfg::from_settings(&Settings::load());
+        let cfg = ChatCfg::from_settings(&Settings::load());
         let q = "Look up each of these separately, one search at a time, before you answer: \
                  the population of Vaduz, the height of Mont Blanc, the year Liechtenstein was \
                  founded, the currency of Bhutan, and the depth of Lake Baikal.";
@@ -2013,7 +2012,7 @@ mod tests {
             false,
             &no_cancel,
             &|ev| {
-                if let WizardEvent::Note(n) = ev {
+                if let ChatEvent::Note(n) = ev {
                     println!("  note: {n}");
                 }
             },
@@ -2026,13 +2025,13 @@ mod tests {
         assert!(!acc.contains("<function="), "leaked tool syntax");
     }
 
-    /// Esc mid-stream (`WizardCmd::Chat`'s cancel flag) must actually cut
+    /// Esc mid-stream (`ChatCmd::Chat`'s cancel flag) must actually cut
     /// the network read short, not just stop rendering tokens client-side —
     /// proves the flag reaches all the way into `http`'s chunk loop.
     #[test]
     #[ignore]
     fn live_cancel_cuts_the_stream_short() {
-        let cfg = WizardCfg::from_settings(&Settings::load());
+        let cfg = ChatCfg::from_settings(&Settings::load());
         let q = "Write a very long, detailed essay — at least 500 words — about the history \
                  of clockmaking.";
         let history = vec![("user", q.to_string())];
@@ -2066,13 +2065,13 @@ mod tests {
     #[test]
     #[ignore]
     fn live_follow_up_keeps_the_thread() {
-        let cfg = WizardCfg::from_settings(&Settings::load());
+        let cfg = ChatCfg::from_settings(&Settings::load());
         let digest = "session 'lab': 2 cards\n\
                       card 1: 'api' — claude 1.2 — needs_input — up 4m — ~/src/api\n\
                       card 2: 'docs' — shell — idle — up 1h\n\
                       \n--- card 1 'api' — screen ---\n\
                       Bash(rm -rf ./build)\n  Do you want to proceed? (y/n)\n";
-        let mut policy = SpreadPolicy::default();
+        let mut policy = PanesPolicy::default();
         let mut history: Vec<(&'static str, String)> = Vec::new();
         let mut attached = Vec::new();
         for q in ["anything need me right now?", "is that safe?"] {
@@ -2083,7 +2082,7 @@ mod tests {
             let mut acc = String::new();
             let no_cancel = std::sync::atomic::AtomicBool::new(false);
             let out = chat_stream(&cfg, "wizard", &history, digest, attach, &no_cancel, &|ev| {
-                if let WizardEvent::Note(n) = ev {
+                if let ChatEvent::Note(n) = ev {
                     println!("  note: {n}");
                 }
             }, &mut acc);

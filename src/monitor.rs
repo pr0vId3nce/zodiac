@@ -1,6 +1,6 @@
-//! The Familiar — a headless background sentinel that watches stuck panes
+//! The pane monitor — a headless background watcher for stuck panes,
 //! and classifies them against a small local model, purely server-side so it
-//! keeps working while detached. Deliberately independent of `wizard.rs`
+//! keeps working while detached. Deliberately independent of `chat.rs`
 //! (the interactive chat panel): different model, different port, its own
 //! tiny blocking HTTP client — the two never share state or contend for the
 //! same backend.
@@ -48,7 +48,7 @@ pub struct Verdict {
     pub policy_reason: String,
 }
 
-const SYSTEM_PREFIX: &str = "You are a background sentinel watching one terminal pane in a \
+const SYSTEM_PREFIX: &str = "You are a background monitor watching one terminal pane in a \
 coding-agent multiplexer. You are given the tail of its screen. Classify what it is doing. \
 If it is waiting on a permission prompt, also judge the pending action against the \
 operator's policy below and say whether it's safe. Be terse and decisive; when unsure, say \
@@ -56,7 +56,7 @@ so via low confidence rather than guessing.\n\nPolicy:\n";
 
 /// Classify a pane's screen tail against `policy` on a background thread,
 /// logging the evaluation and sending the result back as `SrvEvent::
-/// WizardVerdict` on success. Silent no-op on any network/parse failure —
+/// MonitorVerdict` on success. Silent no-op on any network/parse failure —
 /// the next tick simply tries again.
 pub fn classify_async(
     tx: Sender<SrvEvent>,
@@ -71,7 +71,7 @@ pub fn classify_async(
             return;
         };
         log_decision(&session, &pane_name, &v);
-        let _ = tx.send(SrvEvent::WizardVerdict(pane_id, pane_name, v));
+        let _ = tx.send(SrvEvent::MonitorVerdict(pane_id, pane_name, v));
     });
 }
 
@@ -156,14 +156,14 @@ struct Subtitle {
 }
 
 /// Summarize a pane's screen tail into a ≤6-word subtitle on a background
-/// thread, sending the result back as `SrvEvent::WizardSubtitle` on success.
+/// thread, sending the result back as `SrvEvent::MonitorSubtitle` on success.
 /// Silent no-op on any network/parse failure — the next tick tries again.
 pub fn summarize_async(tx: Sender<SrvEvent>, pane_id: u64, screen: String) {
     std::thread::spawn(move || {
         let Some(subtitle) = summarize(&screen) else {
             return;
         };
-        let _ = tx.send(SrvEvent::WizardSubtitle(pane_id, subtitle));
+        let _ = tx.send(SrvEvent::MonitorSubtitle(pane_id, subtitle));
     });
 }
 
@@ -256,13 +256,13 @@ fn state_dir() -> PathBuf {
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".local/state")))
         .unwrap_or_default()
         .join("zodiac")
-        .join("wizard")
+        .join("monitor")
 }
 
 /// The operator's policy, bootstrapping a sensible default on first run so
-/// the sentinel works out of the box without requiring hand-authored config.
+/// the monitor works out of the box without requiring hand-authored config.
 pub fn policy_text() -> String {
-    let path = config_dir().join("wizard-policy.md");
+    let path = config_dir().join("monitor-policy.md");
     if let Ok(s) = std::fs::read_to_string(&path) {
         if !s.trim().is_empty() {
             return s;

@@ -40,7 +40,7 @@ pub struct Settings {
     /// Color of the line separators in the blocks home view.
     #[serde(default)]
     pub home_sep_color: String,
-    /// Chat panel persona: "wizard", "oracle" (ascii orb), or "hal".
+    /// Chat panel character: "assistant", "oracle" (ascii orb), or "hal".
     #[serde(default)]
     pub chat_face: String,
     /// Size of the emblem painted on home-page cards: small/medium/large/huge.
@@ -88,46 +88,46 @@ pub struct Settings {
     /// (first ringtone alphabetically).
     #[serde(default)]
     pub finish_sound: String,
-    /// The Wizard chat panel on the home page (talks to a llama-server
+    /// The chat panel on the home page (talks to an OpenAI-compatible
     /// endpoint over the tailnet).
-    #[serde(default = "default_true")]
-    pub wizard_chat: bool,
+    #[serde(default = "default_true", alias = "wizard_chat")]
+    pub chat_panel: bool,
     /// OpenAI-compatible endpoint, e.g. "http://bigbox:8091" (the default).
-    #[serde(default)]
-    pub wizard_endpoint: String,
+    #[serde(default, alias = "wizard_endpoint")]
+    pub chat_endpoint: String,
     /// Model name sent in completion requests ("" = qwen3.6-35b-a3b).
-    #[serde(default)]
-    pub wizard_model: String,
-    /// ssh destination used to wake/dispell the model ("" = des@bigbox).
-    #[serde(default)]
-    pub wizard_ssh: String,
+    #[serde(default, alias = "wizard_model")]
+    pub chat_model: String,
+    /// ssh destination used to start/stop the model ("" = des@bigbox).
+    #[serde(default, alias = "wizard_ssh")]
+    pub chat_ssh: String,
     /// systemd --user unit started/stopped over ssh ("" = llama-server).
-    #[serde(default)]
-    pub wizard_service: String,
-    /// Where the wizard's `web_search` tool looks. Empty = Wikipedia only
+    #[serde(default, alias = "wizard_service")]
+    pub chat_service: String,
+    /// Where the chat panel's `web_search` tool looks. Empty = Wikipedia only
     /// (keyless, works anywhere). A SearXNG base URL, e.g.
     /// "http://bigbox:8888", uses its JSON API. "https://api.search.brave.com"
-    /// uses Brave's API and needs `wizard_search_key`.
-    #[serde(default)]
-    pub wizard_search_url: String,
+    /// uses Brave's API and needs `chat_search_key`.
+    #[serde(default, alias = "wizard_search_url")]
+    pub chat_search_url: String,
     /// API key for the search endpoint, when it wants one (Brave).
-    #[serde(default)]
-    pub wizard_search_key: String,
+    #[serde(default, alias = "wizard_search_key")]
+    pub chat_search_key: String,
     /// Chat panel width in cells ("" = 40).
-    #[serde(default)]
-    pub wizard_width: String,
-    /// Headless background sentinel: classifies stuck/needs-input panes
+    #[serde(default, alias = "wizard_width")]
+    pub chat_width: String,
+    /// Background pane monitor: classifies stuck/needs-input panes
     /// against a local policy file and notifies with the reason. Advisory
     /// only — it never touches a pane. Runs server-side against a separate
-    /// CPU-only model, independent of the wizard chat panel above.
-    #[serde(default = "default_true")]
-    pub wizard_watch: bool,
-    /// Lets the interactive Wizard chat panel offer `prompt_pane`/
+    /// CPU-only model, independent of the chat panel above.
+    #[serde(default = "default_true", alias = "wizard_watch")]
+    pub pane_monitor: bool,
+    /// Lets the chat panel offer `prompt_pane`/
     /// `send_keys` — the only way it can ever touch a pane. Off by
     /// default: even enabled, every use still shows a consent chip in the
     /// transcript and waits on a keypress, no timeout, no auto-accept.
-    #[serde(default)]
-    pub wizard_act: bool,
+    #[serde(default, alias = "wizard_act")]
+    pub chat_act: bool,
 }
 
 /// Audio files with these extensions in the ringtones dir are offered as
@@ -236,5 +236,49 @@ impl Settings {
         if let Ok(json) = serde_json::to_vec_pretty(self) {
             let _ = std::fs::write(path, json);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Settings;
+
+    /// A config written before the chat panel and pane monitor were renamed
+    /// still loads: every key kept a serde alias for its old name.
+    #[test]
+    fn legacy_wizard_keys_still_load() {
+        let old = r#"{
+            "wizard_chat": false,
+            "wizard_endpoint": "http://box:9000",
+            "wizard_model": "qwen",
+            "wizard_ssh": "des@box",
+            "wizard_service": "llama",
+            "wizard_width": "50",
+            "wizard_search_url": "http://box:8888",
+            "wizard_search_key": "k",
+            "wizard_watch": false,
+            "wizard_act": true
+        }"#;
+        let s: Settings = serde_json::from_str(old).expect("legacy config parses");
+        assert!(!s.chat_panel);
+        assert_eq!(s.chat_endpoint, "http://box:9000");
+        assert_eq!(s.chat_model, "qwen");
+        assert_eq!(s.chat_ssh, "des@box");
+        assert_eq!(s.chat_service, "llama");
+        assert_eq!(s.chat_width, "50");
+        assert_eq!(s.chat_search_url, "http://box:8888");
+        assert_eq!(s.chat_search_key, "k");
+        assert!(!s.pane_monitor);
+        assert!(s.chat_act);
+    }
+
+    /// New names win when both are present, and defaults hold when neither is.
+    #[test]
+    fn new_keys_and_defaults() {
+        let s: Settings = serde_json::from_str(r#"{"chat_endpoint": "http://new:1"}"#).unwrap();
+        assert_eq!(s.chat_endpoint, "http://new:1");
+        assert!(s.chat_panel, "chat panel defaults on");
+        assert!(s.pane_monitor, "pane monitor defaults on");
+        assert!(!s.chat_act, "acting defaults off");
     }
 }

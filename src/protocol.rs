@@ -142,7 +142,7 @@ pub struct PaneState {
     #[serde(default)]
     pub recap: Option<String>,
     /// A ≤6-word LLM summary of what the pane is doing right now, painted
-    /// on the tarot card under the status line. None for shells, panes with
+    /// on the home-page card under the status line. None for shells, panes with
     /// no agent, or before the first summarization pass completes.
     #[serde(default)]
     pub subtitle: Option<String>,

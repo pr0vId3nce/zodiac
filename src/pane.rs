@@ -43,14 +43,14 @@ pub struct SrvPane {
     stall_since: Option<Instant>,
     stall_fired: Option<Instant>,
     stall_latched: bool,
-    /// Headless background sentinel bookkeeping (see `familiar.rs`) — purely
+    /// Background pane-monitor bookkeeping (see `monitor.rs`) — purely
     /// server-side tracking, not part of the wire protocol.
-    pub wizard_screen_hash: Option<u64>,
-    pub wizard_screen_since: Option<Instant>,
-    pub wizard_checked_at: Option<Instant>,
-    pub wizard_last_reason: Option<String>,
+    pub monitor_screen_hash: Option<u64>,
+    pub monitor_screen_since: Option<Instant>,
+    pub monitor_checked_at: Option<Instant>,
+    pub monitor_last_reason: Option<String>,
     /// Tier 3.1 card subtitle bookkeeping — same idea, separate cadence and
-    /// cache key from the sentinel above (a subtitle refreshes on any screen
+    /// cache key from the monitor above (a subtitle refreshes on any screen
     /// change, not just stalls).
     pub subtitle: Option<String>,
     pub subtitle_hash: Option<u64>,
@@ -153,10 +153,10 @@ impl SrvPane {
             stall_since: None,
             stall_fired: None,
             stall_latched: false,
-            wizard_screen_hash: None,
-            wizard_screen_since: None,
-            wizard_checked_at: None,
-            wizard_last_reason: None,
+            monitor_screen_hash: None,
+            monitor_screen_since: None,
+            monitor_checked_at: None,
+            monitor_last_reason: None,
             subtitle: None,
             subtitle_hash: None,
             subtitle_checked_at: None,

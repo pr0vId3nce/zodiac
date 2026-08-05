@@ -24,6 +24,9 @@ targets:
         # target raw IPs, so allow arbitrary loads (tailnet-only anyway).
         NSAppTransportSecurity:
           NSAllowsArbitraryLoads: true
+        # Scanning a computer's pairing QR (zodiac's Alt+P) to add it to the
+        # list — the only use of the camera anywhere in this app.
+        NSCameraUsageDescription: To scan a computer's pairing QR code
         UISupportedInterfaceOrientations:
           - UIInterfaceOrientationPortrait
           - UIInterfaceOrientationLandscapeLeft

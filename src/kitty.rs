@@ -962,3 +962,80 @@ pub fn place_at(
 pub fn delete_placements(out: &mut impl Write) -> std::io::Result<()> {
     write!(out, "\x1b_Ga=d,d=a,q=2\x1b\\")
 }
+
+/// Image id namespace for the pairing QR overlay (Alt+P). Only one QR is
+/// ever shown at a time, but the id still varies with the encoded string so
+/// kitty_overlay's placement diff naturally retransmits + swaps when the
+/// token (or bridge endpoint) changes while the overlay happens to be open.
+const QR_BASE: u32 = 0x5152_4331; // "QRC1"
+
+pub fn qr_id(data: &str) -> u32 {
+    let mut seed: u64 = 0xcbf2_9ce4_8422_2325; // FNV-1a offset basis
+    for b in data.bytes() {
+        seed ^= b as u64;
+        seed = seed.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    QR_BASE ^ (hash(seed) as u32)
+}
+
+/// Rasterizes `data` as a QR code: hard-edged black modules on white (no
+/// anti-aliasing — a scanner wants crisp edges, not soft ones), with the
+/// spec's minimum 4-module quiet zone. `target_px` is a hint for the
+/// overall side length; the actual returned size is the closest multiple of
+/// a whole-pixel module size, always square. `None` if `data` doesn't fit
+/// in a QR code at all (never expected for a short pairing URL, but the
+/// overlay falls back to a text message rather than unwrapping a panic).
+pub fn qr_rgba(data: &str, target_px: u32) -> Option<(Vec<u8>, u32, u32)> {
+    let code = qrcode::QrCode::new(data.as_bytes()).ok()?;
+    let n = code.width() as u32;
+    let colors = code.to_colors();
+    let quiet = 4u32;
+    let module_px = (target_px / (n + quiet * 2)).max(1);
+    let side = (n + quiet * 2) * module_px;
+    let mut px = vec![255u8; (side * side * 4) as usize];
+    for y in 0..n {
+        for x in 0..n {
+            if colors[(y * n + x) as usize] == qrcode::Color::Dark {
+                let px0 = (x + quiet) * module_px;
+                let py0 = (y + quiet) * module_px;
+                for dy in 0..module_px {
+                    for dx in 0..module_px {
+                        let o = (((py0 + dy) * side + (px0 + dx)) * 4) as usize;
+                        px[o] = 0;
+                        px[o + 1] = 0;
+                        px[o + 2] = 0;
+                    }
+                }
+            }
+        }
+    }
+    Some((px, side, side))
+}
+
+#[cfg(test)]
+mod qr_tests {
+    use super::*;
+
+    #[test]
+    fn qr_rgba_encodes_a_pairing_url_square_and_opaque() {
+        let url = "http://192.0.2.1:7979/?t=deadbeefdeadbeef&cid=abc123&name=examplehost";
+        let (rgba, w, h) = qr_rgba(url, 400).expect("short URL always fits a QR code");
+        assert_eq!(w, h, "qr_rgba must return a square image");
+        assert_eq!(rgba.len(), (w * h * 4) as usize);
+        // Every pixel is fully opaque and either black or white — no
+        // half-transmitted alpha that'd make a real terminal show a hole.
+        assert!(rgba.chunks_exact(4).all(|p| p[3] == 255
+            && ((p[0], p[1], p[2]) == (0, 0, 0) || (p[0], p[1], p[2]) == (255, 255, 255))));
+        // At least some modules are dark — a blank/all-white buffer would
+        // still "round-trip" through every assertion above.
+        assert!(rgba.chunks_exact(4).any(|p| p[0] == 0));
+    }
+
+    #[test]
+    fn qr_id_varies_with_content_but_is_stable_for_the_same_string() {
+        let a = qr_id("http://host/?t=aaaa");
+        let b = qr_id("http://host/?t=bbbb");
+        assert_ne!(a, b, "a rotated token must produce a different image id");
+        assert_eq!(a, qr_id("http://host/?t=aaaa"));
+    }
+}

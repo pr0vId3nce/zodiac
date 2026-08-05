@@ -150,6 +150,13 @@ pub struct SessionState {
     #[serde(default)]
     pub cols: u16,
     pub panes: Vec<PaneState>,
+    /// Random secret generated once per server process (see `server::run`) —
+    /// rides along on every state broadcast so an observer (the astrolabe
+    /// bridge) always knows the current pairing token without a separate
+    /// handshake. Rotates on a fresh process launch, stable across
+    /// detach/reattach, gone when the process exits.
+    #[serde(default)]
+    pub pairing_token: String,
 }
 
 #[derive(PartialEq)]

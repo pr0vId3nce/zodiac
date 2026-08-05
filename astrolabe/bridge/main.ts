@@ -26,6 +26,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { ZodiacLink, type SessionState } from "./zodiac.ts";
 import { scanCommands } from "./commands.ts";
 import { Apns } from "./apns.ts";
+import { publishEndpoint } from "./identity.ts";
 
 const PORT = Number(process.env.ASTROLABE_PORT || 7979);
 const SESSION = process.env.ASTROLABE_SESSION || "main";
@@ -34,24 +35,38 @@ const TOKEN = process.env.ASTROLABE_TOKEN || null;
 const PUSH_REDACT = !!process.env.ASTROLABE_PUSH_REDACT;
 const MAX_CLIENTS = 20;
 
+/** The connected zodiac server's current per-launch pairing token (see
+    src/server.rs's gen_pairing_token / Alt+P in the TUI). Rotates on a
+    fresh zodiac launch, stable across detach/reattach, `null` before the
+    first state arrives or against an old server that predates this field —
+    updated by the `link.on("state", ...)` handler below. */
+let sessionToken: string | null = null;
+
 if (!TOKEN) {
   console.error(
-    "astrolabe: ASTROLABE_TOKEN is not set — the bridge is running with NO authentication. " +
-      "Anyone who can reach this tailnet IP can read and control every pane. Set " +
-      "ASTROLABE_TOKEN in ~/.config/astrolabe/env to close this."
+    "astrolabe: ASTROLABE_TOKEN is not set — until a phone scans a pairing QR " +
+      "(zodiac's Alt+P), or you set one yourself, the bridge is running with NO " +
+      "authentication. Anyone who can reach this tailnet IP can read and control " +
+      "every pane."
   );
 }
 
-/** Constant-time-ish check against a possibly-absent token. `null` (no
-    ASTROLABE_TOKEN configured) always passes — see the startup warning
-    above for why that's a deliberate backward-compat default, not an
-    oversight. */
+function constantTimeEq(a: string, b: string): boolean {
+  const ab = Buffer.from(a);
+  const bb = Buffer.from(b);
+  return ab.length === bb.length && crypto.timingSafeEqual(ab, bb);
+}
+
+/** Accepts either the static ASTROLABE_TOKEN (if configured) or the live
+    per-launch `sessionToken` the connected zodiac server reports — whoever
+    scanned the current QR has this one, without any admin having typed a
+    secret anywhere. If neither is ever set (old zodiac server, or no
+    bridge/zodiac link at all yet), stays unauthenticated for backward
+    compat — see the startup warning above, which fires either way. */
 function tokenOk(supplied: string | null): boolean {
-  if (!TOKEN) return true;
-  if (!supplied) return false;
-  const a = Buffer.from(supplied);
-  const b = Buffer.from(TOKEN);
-  return a.length === b.length && crypto.timingSafeEqual(a, b);
+  const candidates = [TOKEN, sessionToken].filter((t): t is string => !!t);
+  if (candidates.length === 0) return true;
+  return !!supplied && candidates.some((c) => constantTimeEq(supplied, c));
 }
 
 function tailscaleIp(): string | null {
@@ -107,12 +122,15 @@ function maybePush(kind: string, pane: { id: number; name: string }, alert: { ti
       category: "AGENT_PROMPT",
       threadId: `pane-${pane.id}`,
       timeSensitive: kind === "needs_input",
-      extra: { pane: pane.id, session: SESSION },
+      // cid: which paired computer this is, for the iOS shell's
+      // multi-computer routing (which Computer to reply/open against).
+      extra: { pane: pane.id, session: SESSION, cid: identity.cid },
     })
     .catch(() => {});
 }
 
 link.on("state", (state: SessionState) => {
+  sessionToken = state.pairing_token || null;
   const badge = state.panes.filter((p) => p.status === "needs_input").length;
   for (const p of state.panes) {
     const prev = prevStatus.get(p.id);
@@ -159,8 +177,21 @@ function broadcast(msg: unknown, pane?: number) {
   }
 }
 
+/** Strips `pairing_token` before anything touches a web client — the token
+    only ever needs to travel zodiac→bridge (to populate `sessionToken`
+    above) and bridge→phone-camera (the QR image zodiac itself draws).
+    Every WS client here already passed tokenOk() to get this far, but a
+    live secret sitting in client-visible JSON is worth avoiding regardless
+    — devtools, extensions, client-side logging, a future endpoint that
+    echoes state back. */
+function publicState(state: SessionState | null): SessionState | null {
+  if (!state) return state;
+  const { pairing_token, ...rest } = state;
+  return rest;
+}
+
 link.on("link", (up: boolean) => broadcast({ t: "link", up }));
-link.on("state", (state) => broadcast({ t: "state", state }));
+link.on("state", (state) => broadcast({ t: "state", state: publicState(state) }));
 link.on("watch", (supported: boolean) => broadcast({ t: "watch", supported }));
 link.on("pane_closed", (pane: number) => broadcast({ t: "pane_closed", pane }));
 link.on("output", (pane: number, data: Buffer) =>
@@ -430,7 +461,7 @@ wss.on("connection", (ws, req) => {
   sendJson(c, {
     t: "hello",
     session: SESSION,
-    state: link.state,
+    state: publicState(link.state),
     link: link.up,
     watch: link.watchSupported,
     commands: commandsCache,
@@ -473,6 +504,7 @@ async function resolveHost(): Promise<string> {
 }
 
 const host = await resolveHost();
+const identity = publishEndpoint(`http://${host}:${PORT}`);
 link.start();
 server.listen(PORT, host, () => {
   console.log(`astrolabe: serving http://${host}:${PORT} → zodiac session '${SESSION}'`);

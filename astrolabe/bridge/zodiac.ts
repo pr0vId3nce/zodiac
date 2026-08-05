@@ -46,6 +46,11 @@ export interface SessionState {
   rows?: number;
   cols?: number;
   panes: PaneState[];
+  /** Random secret minted once per zodiac server process — rotates on a
+      fresh launch, stable across detach/reattach. Empty string against an
+      old server that predates this field (falls back to ASTROLABE_TOKEN-only
+      or unauthenticated, same as before this existed). */
+  pairing_token?: string;
 }
 
 const RING_CAP = 512 * 1024;

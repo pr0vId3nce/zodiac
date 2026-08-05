@@ -6,8 +6,6 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
-        UserDefaults.standard.register(defaults: ["bridge_url": Bridge.defaultURL])
-
         let center = UNUserNotificationCenter.current()
         center.delegate = self
 
@@ -44,7 +42,17 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         didRegisterForRemoteNotificationsWithDeviceToken deviceToken: Data
     ) {
         let token = deviceToken.map { String(format: "%02x", $0) }.joined()
-        Task { await Bridge.registerToken(token) }
+        Task { @MainActor in
+            let store = ComputerStore.shared
+            store.deviceToken = token
+            // Every paired computer runs its own independent bridge — the
+            // same physical device token has to be registered with each
+            // one separately, best-effort (one unreachable bridge
+            // shouldn't block the rest).
+            for computer in store.computers {
+                await Bridge.registerToken(token, on: computer)
+            }
+        }
     }
 
     func application(
@@ -66,13 +74,17 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
         _ center: UNUserNotificationCenter,
         didReceive response: UNNotificationResponse
     ) async {
-        let pane = response.notification.request.content.userInfo["pane"] as? Int
+        let info = response.notification.request.content.userInfo
+        let pane = info["pane"] as? Int
+        let cid = info["cid"] as? String
+        guard let pane, let cid, let computer = await ComputerStore.shared.computer(cid: cid)
+        else { return }
         if let text = (response as? UNTextInputNotificationResponse)?.userText,
-            response.actionIdentifier == "REPLY", let pane
+            response.actionIdentifier == "REPLY"
         {
-            await Bridge.reply(pane: pane, text: text)
-        } else if response.actionIdentifier == UNNotificationDefaultActionIdentifier, let pane {
-            await Router.shared.open(pane: pane)
+            await Bridge.reply(pane: pane, text: text, on: computer)
+        } else if response.actionIdentifier == UNNotificationDefaultActionIdentifier {
+            await Router.shared.open(cid: cid, pane: pane)
         }
     }
 }

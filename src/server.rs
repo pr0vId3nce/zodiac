@@ -89,6 +89,33 @@ struct Server {
     client_gfx: bool,
     /// Image payloads already delivered this attach: (pane, image, ver).
     gfx_sent: std::collections::HashSet<(u64, u32, u32)>,
+    /// Random secret minted once for this process's lifetime — see
+    /// `gen_pairing_token`. Rides along on every `SessionState` broadcast so
+    /// the astrolabe bridge (and, via it, the phone) can tell a fresh server
+    /// launch apart from a client detach/reattach, which never touches this.
+    pairing_token: String,
+}
+
+/// 16 random bytes, hex-encoded. `/dev/urandom` rather than pulling in a
+/// crate — this only ever runs on the Linux hosts zodiac actually deploys
+/// to.
+fn gen_pairing_token() -> String {
+    use std::io::Read as _;
+    let mut buf = [0u8; 16];
+    if std::fs::File::open("/dev/urandom")
+        .and_then(|mut f| f.read_exact(&mut buf))
+        .is_err()
+    {
+        // Never observed in practice, but a broken source is better than a
+        // panic — falls back to a low-entropy but still per-process value.
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let seed = (std::process::id() as u128) ^ nanos;
+        buf.copy_from_slice(&seed.to_le_bytes()[..16]);
+    }
+    buf.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Output arriving this soon after a resize is treated as the SIGWINCH
@@ -147,6 +174,7 @@ pub fn run(session: &str) -> Result<()> {
         client_cell: (0, 0),
         client_gfx: false,
         gfx_sent: std::collections::HashSet::new(),
+        pairing_token: gen_pairing_token(),
     };
     srv.restore()?;
     srv.save_meta();
@@ -755,6 +783,7 @@ impl Server {
                     ssh: p.ssh_target(),
                 })
                 .collect(),
+            pairing_token: self.pairing_token.clone(),
         }
     }
 

@@ -23,11 +23,13 @@ works in it — Astrolabe ships none of its own.
   Binds to this machine's **tailscale IPv4** by default, so the UI is
   tailnet-only by construction.
 - **web** (`web/`): Vite + React + Tailwind PWA with an xterm.js mirror.
-- **ios** (`ios/`): thin native shell — a WKWebView around the same web UI
-  plus APNs push ("agent needs you" with lock-screen **inline reply**, badge =
-  panes waiting, tap opens the pane). Built with XcodeGen on a Mac; see
-  `ios/README.md`. Push stays off until `ASTROLABE_APNS_*` creds exist in
-  `~/.config/astrolabe/env`.
+- **ios** (`ios/`): native shell holding a *list of paired computers* — pair
+  by scanning zodiac's QR (Alt+P), tap one to open a WKWebView on that
+  computer's web UI, unchanged. Plus APNs push ("agent needs you" with
+  lock-screen **inline reply**, badge = panes waiting across every paired
+  computer, tap opens the right computer's pane). Built with XcodeGen on a
+  Mac; see `ios/README.md`. Push stays off until `ASTROLABE_APNS_*` creds
+  exist in `~/.config/astrolabe/env`.
 
 ## Install
 
@@ -49,7 +51,7 @@ Env knobs (set in `~/.config/systemd/user/astrolabe.service`):
 | `ASTROLABE_APNS_KEY_ID` / `ASTROLABE_APNS_TEAM_ID` | — | from the developer portal |
 | `ASTROLABE_APNS_TOPIC` | — | app bundle id (`dev.d3s.Astrolabe`) |
 | `ASTROLABE_APNS_ENV` | `sandbox` | `production` for TestFlight builds |
-| `ASTROLABE_TOKEN` | — | shared secret required on `/ws` and `/api/*` — see **Security** below |
+| `ASTROLABE_TOKEN` | — | optional *static* shared secret, on top of the default pairing token — see **Security** below |
 | `ASTROLABE_PUSH_REDACT` | — | set to hide pane content in push bodies (generic text instead) |
 
 The `ASTROLABE_APNS_*`/`ASTROLABE_TOKEN` values belong in
@@ -58,12 +60,35 @@ the unit file itself.
 
 ## 🔒 Security
 
-**Set `ASTROLABE_TOKEN`.** Without it, the bridge's only access control is
-"you're on my tailnet" — anyone who can route to this machine's tailscale IP
-can read every pane and type into any of them, no login required. With it
-set, both the WebSocket and every `/api/*` route reject requests that don't
-carry the right token; the bridge logs a loud warning on startup for as
-long as it's unset.
+Auth is on by default, zero-config, and pairing-QR-driven: `zodiac` itself
+mints a random **pairing token** every time its server process launches
+(fresh on `zodiac`, unchanged across detach/reattach, gone when the server
+exits) and reports it to the bridge over their local socket. Press **Alt+P**
+on zodiac's home page to reveal a QR encoding that token plus this
+machine's reachable URL — both the WebSocket and every `/api/*` route
+reject requests that don't carry a token matching it.
+
+- **iOS app**: computer list → **+** → **Scan QR**, point the camera at the
+  Alt+P overlay. Adds this machine to your list (or, if you've paired it
+  before, refreshes its token in place — matched by a stable id the bridge
+  persists, not by the token itself, which is exactly what's rotating).
+  **Enter Manually** is a fallback for when the camera can't see the
+  screen.
+- **Web (PWA/browser)**: same QR encodes a magic link
+  (`http://<bridge-ip>:7979/?t=<token>`) — scanning it with your phone's
+  regular camera app opens Safari straight to an authenticated session,
+  which saves the token to `localStorage` and cleans the URL up. Re-add to
+  your home screen from that tab if you'd already installed it.
+
+Rescan whenever the *zodiac server itself* restarted (not just detached) —
+the old token stops working the moment a fresh one exists.
+
+**`ASTROLABE_TOKEN`** is an optional second, *static* secret layered on top
+— useful if you want a credential that doesn't rotate (e.g. for a script
+hitting `/api/*` directly), or as the fallback when a client's on an old
+zodiac build that predates pairing tokens (degrades to poll mode, per the
+observer-mode note above). Either token, the static one or the current live
+one, is accepted:
 
 ```
 echo "ASTROLABE_TOKEN=$(openssl rand -hex 16)" >> ~/.config/astrolabe/env
@@ -71,12 +96,9 @@ chmod 600 ~/.config/astrolabe/env
 systemctl --user restart astrolabe
 ```
 
-- **Web (PWA/browser)**: open `http://<bridge-tailscale-ip>:7979/#/?t=<token>`
-  once — the token saves to `localStorage` and the URL cleans itself up.
-  Every reload after that just works. Re-add to your home screen from that
-  same tab if you'd already installed it, so the shortcut points at the
-  authenticated session.
-- **iOS shell**: paste the same token into Settings.app → Astrolabe → Token.
+With *neither* a live zodiac link nor `ASTROLABE_TOKEN` set (e.g. zodiac
+isn't running yet), the bridge falls back to tailnet-IP-only access control
+and logs a loud startup warning for as long as that's true.
 
 Static assets (the app shell itself) stay unauthenticated on purpose — you
 need somewhere to load the page from before you have anywhere to read a

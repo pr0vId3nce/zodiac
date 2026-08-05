@@ -1,19 +1,23 @@
 # Astrolabe iOS shell
 
-A thin native wrapper around the Astrolabe web UI: a full-bleed `WKWebView`
-pointed at the bridge, plus the two things a PWA can't do well on iOS —
+A native wrapper around the Astrolabe web UI, and the one thing genuinely
+multi-computer: a list of every zodiac + bridge pair you've paired with,
+each opening a full-bleed `WKWebView` on that computer's Herd/Pane UI. Plus
+the things a PWA can't do well on iOS —
 
 - **APNs push** when an agent needs you or finishes (time-sensitive, badge =
-  number of panes waiting), and
+  number of panes waiting across every paired computer), and
 - **inline reply from the lock screen**: long-press the notification, dictate
-  or type, Send — it POSTs straight to the bridge's `/api/prompt`, no app
-  launch needed.
+  or type, Send — it POSTs straight to that computer's bridge `/api/prompt`,
+  no app launch needed.
 
-Tapping a notification opens the app on that pane. The bridge URL and its
-token (if you've set `ASTROLABE_TOKEN` — see the main README) are both
-editable in Settings.app → Astrolabe; the app ships with a loopback default
-that's deliberately unreachable until you set your actual
-`<bridge-tailscale-ip>:7979` there.
+Tapping a notification opens the app on that pane, on the right computer.
+
+**Pairing**: on the computer list's "+" menu, **Scan QR** and point the
+camera at zodiac's own pairing overlay (Alt+P on its home page — see the
+main README) — that's the whole flow, no typing required. **Enter
+Manually** is a fallback for when the camera can't see the screen (bad
+lighting, the simulator, a remote/screenshared session).
 
 Everything here is text; the Xcode project and the icon are generated. You
 need a Mac with Xcode 15+ to build (nothing on this laptop can).
@@ -70,8 +74,10 @@ the `dev.d3s.Astrolabe` app id and its push capability for you; change
 `bundleIdPrefix` in `project.yml` if you want a different id — keep
 `ASTROLABE_APNS_TOPIC` in sync). Plug in the phone, Run.
 
-First launch asks for notification permission; on grant the app registers its
-device token with the bridge (`/healthz` shows `"devices": 1`).
+First launch asks for notification permission; on grant, the app registers
+its device token with every already-paired computer's bridge (each shows
+`"devices": 1` on `/healthz`) — and with any computer paired *after* that,
+immediately on scan/manual-add, not just on the next cold launch.
 
 ## Test
 
@@ -94,5 +100,9 @@ and answer from the lock screen.
 - Notification pushes only fire on status *transitions* observed by the
   bridge, with a 30 s per-pane cooldown; restarting the bridge never
   re-notifies existing states.
-- The app deliberately holds no state beyond the bridge URL — the web UI
-  stays the single source of truth for features.
+- The app's own state is just the paired-computer list (name, URL, token,
+  cid) — the web UI stays the single source of truth for everything past
+  that: which panes exist, their status, transcripts, all of it.
+- Removing a computer from the list best-effort unregisters this device's
+  push token from that computer's bridge too, so it stops trying to notify
+  you about a computer you've dropped.

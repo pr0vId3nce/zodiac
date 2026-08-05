@@ -1,21 +1,23 @@
 import SwiftUI
 import WebKit
 
+/// Wraps the existing single-bridge web SPA, unchanged — it just gets
+/// pointed at whichever `Computer` was selected from ComputerListView.
 struct WebView: UIViewRepresentable {
+    let computer: Computer
     @ObservedObject private var router = Router.shared
 
     func makeCoordinator() -> Coordinator { Coordinator() }
 
-    /// Bridge.baseURL with the configured token (if any) appended — the web
-    /// app's own auth.ts reads `?t=` on boot the same way a browser-opened
-    /// magic link does, so this is the one place the native shell needs to
-    /// know about the token at all.
+    /// `computer.url` with the pairing token appended — the web app's own
+    /// auth.ts reads `?t=` on boot the same way a browser-opened magic
+    /// link (or zodiac's own QR) does, so this is the one place the native
+    /// shell needs to know about the token at all.
     private var loadURL: URL {
-        guard let token = Bridge.token,
-              var comps = URLComponents(url: Bridge.baseURL, resolvingAgainstBaseURL: false)
-        else { return Bridge.baseURL }
-        comps.queryItems = (comps.queryItems ?? []) + [URLQueryItem(name: "t", value: token)]
-        return comps.url ?? Bridge.baseURL
+        guard var comps = URLComponents(url: computer.url, resolvingAgainstBaseURL: false)
+        else { return computer.url }
+        comps.queryItems = (comps.queryItems ?? []) + [URLQueryItem(name: "t", value: computer.token)]
+        return comps.url ?? computer.url
     }
 
     func makeUIView(context: Context) -> WKWebView {
@@ -44,9 +46,14 @@ struct WebView: UIViewRepresentable {
     }
 
     func updateUIView(_ web: WKWebView, context: Context) {
-        if let pane = router.pendingPane {
-            context.coordinator.open(pane: pane)
-            DispatchQueue.main.async { router.pendingPane = nil }
+        // Only consume a pending deep link if it's actually meant for this
+        // computer's WebView — a different computer's instance may still
+        // be alive mid-NavigationStack-transition.
+        guard router.pendingCid == computer.cid, let pane = router.pendingPane else { return }
+        context.coordinator.open(pane: pane)
+        DispatchQueue.main.async {
+            router.pendingCid = nil
+            router.pendingPane = nil
         }
     }
 
@@ -67,7 +74,9 @@ struct WebView: UIViewRepresentable {
         }
 
         @objc func reload() {
-            web?.load(URLRequest(url: owner?.loadURL ?? Bridge.baseURL))
+            if let url = owner?.loadURL {
+                web?.load(URLRequest(url: url))
+            }
             web?.scrollView.refreshControl?.endRefreshing()
         }
 
@@ -87,7 +96,9 @@ struct WebView: UIViewRepresentable {
 
         func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
             loaded = false
-            webView.load(URLRequest(url: owner?.loadURL ?? Bridge.baseURL))
+            if let url = owner?.loadURL {
+                webView.load(URLRequest(url: url))
+            }
         }
 
         /// Keep the persistent webview on the configured bridge host — pane
@@ -100,7 +111,7 @@ struct WebView: UIViewRepresentable {
         ) {
             guard let url = navigationAction.request.url,
                   let host = url.host,
-                  host == Bridge.baseURL.host
+                  host == owner?.computer.url.host
             else {
                 decisionHandler(.cancel)
                 return

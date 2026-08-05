@@ -34,7 +34,7 @@ export interface PushOpts {
 
 const JWT_MAX_AGE_MS = 45 * 60 * 1000; // Apple allows 20–60 min; refresh at 45
 
-function stateDir(): string {
+export function stateDir(): string {
   const base =
     process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state");
   return path.join(base, "astrolabe");

@@ -1,4 +1,5 @@
 use std::os::unix::net::UnixStream;
+use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
@@ -9,7 +10,7 @@ use crossterm::event::{
 use ratatui::layout::{Alignment, Constraint, Layout, Position, Rect};
 use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph};
+use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
 use crate::protocol::{Frame as SrvFrame, *};
@@ -494,6 +495,24 @@ struct App {
     wiz_sent: std::collections::HashSet<(u32, u32, u32)>,
     /// Portrait placement currently alive terminal-side.
     wiz_placed: Option<(Rect, u32)>,
+    /// Set when the QR pairing overlay (Alt+P) is open — hides card art via
+    /// kitty_overlay() the same way Mode::Settings does, and draws one
+    /// scannable QR of this machine's pairing URL over the home page.
+    pair_open: bool,
+    /// (bridge base url, computer id, hostname) read from the astrolabe
+    /// bridge's endpoint.json on toggle-open — None if no bridge is
+    /// installed/running here. Not re-read every frame: it only changes
+    /// when the bridge itself restarts, which is rare enough to just
+    /// re-read on the next open.
+    pair_endpoint: Option<(String, String, String)>,
+    /// The exact URL the current QR image encodes, so kitty_overlay only
+    /// re-rasterizes when the token (or endpoint) actually changes.
+    pair_qr_src: String,
+    /// (px_w, px_h, rgba, image id) for the current pair_qr_src.
+    pair_qr: Option<(u32, u32, Vec<u8>, u32)>,
+    /// Where the QR image goes, from the last draw — kitty_overlay() places
+    /// it there, same handoff shape as home_cards/home_mascots/wiz_art_rect.
+    pair_rect: Rect,
     sock: UnixStream,
     rx: Receiver<AppEvent>,
 }
@@ -603,6 +622,11 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         wiz_art_rect: Rect::default(),
         wiz_sent: std::collections::HashSet::new(),
         wiz_placed: None,
+        pair_open: false,
+        pair_endpoint: None,
+        pair_qr_src: String::new(),
+        pair_qr: None,
+        pair_rect: Rect::default(),
         sock,
         rx,
     };
@@ -729,6 +753,41 @@ fn connect_or_spawn(session: &str) -> Result<UnixStream> {
         "zodiac server did not start (see {})",
         logdir.join("server.log").display()
     )
+}
+
+/// Reads `(url, cid, name)` from the astrolabe bridge's
+/// `~/.local/state/astrolabe/endpoint.json`, written by the bridge itself
+/// on startup once it knows its bind host. `None` if no bridge has ever run
+/// on this machine, or the file can't be parsed — the pairing overlay shows
+/// a "no bridge detected" message in that case rather than a QR.
+fn read_bridge_endpoint() -> Option<(String, String, String)> {
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".local/state")
+        });
+    let raw = std::fs::read_to_string(base.join("astrolabe").join("endpoint.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let url = v.get("url")?.as_str()?.to_string();
+    let cid = v.get("cid")?.as_str()?.to_string();
+    let name = v.get("name")?.as_str()?.to_string();
+    Some((url, cid, name))
+}
+
+/// Percent-encodes a query-param value. The token is hex and the cid a
+/// UUID (both always safe as-is), but the hostname isn't guaranteed to be —
+/// encode all three uniformly rather than special-case.
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
 }
 
 impl App {
@@ -1273,6 +1332,16 @@ impl App {
             }
             return;
         }
+        // The pairing QR overlay is modal: swallow every key but the ones
+        // that close it, same shape as the Mode::Settings block above.
+        if self.pair_open {
+            match key.code {
+                KeyCode::Esc => self.pair_open = false,
+                KeyCode::Char('p') | KeyCode::Char('P') if alt => self.pair_open = false,
+                _ => {}
+            }
+            return;
+        }
         if ctrl && !alt && matches!(key.code, KeyCode::Char('s') | KeyCode::Char('S')) {
             self.mode = Mode::Settings;
             self.settings_row = 0;
@@ -1281,6 +1350,15 @@ impl App {
         // Alt+~ (or Alt+`) toggles the home page.
         if alt && !ctrl && matches!(key.code, KeyCode::Char('~') | KeyCode::Char('`')) {
             self.toggle_home();
+            return;
+        }
+        // Alt+P: pairing QR for the astrolabe phone app — opens the home
+        // page if needed (the overlay only makes sense there).
+        if alt && !ctrl && matches!(key.code, KeyCode::Char('p') | KeyCode::Char('P')) {
+            if !self.home {
+                self.toggle_home();
+            }
+            self.open_pair_overlay();
             return;
         }
         // Alt+G: speak with the wizard (jumps to the home page if needed).
@@ -1529,6 +1607,15 @@ impl App {
         self.home = false;
         self.selection = None;
         self.wiz_focus = false;
+    }
+
+    /// Opens the pairing QR overlay, re-reading the astrolabe bridge's
+    /// endpoint file. Cheap and rare enough to do synchronously on open
+    /// rather than watch continuously — that file only changes when the
+    /// bridge itself restarts.
+    fn open_pair_overlay(&mut self) {
+        self.pair_endpoint = read_bridge_endpoint();
+        self.pair_open = true;
     }
 
     /// Home-page navigation. Returns true when the key was consumed.
@@ -2930,6 +3017,9 @@ impl App {
     fn draw_home(&mut self, f: &mut Frame, area: Rect) {
         self.home_cards.clear();
         self.home_mascots.clear();
+        if self.pair_open {
+            return self.draw_pair_overlay(f, area);
+        }
         let Some(state) = self.home_state.clone() else {
             let mid = Rect {
                 x: area.x,
@@ -2995,6 +3085,135 @@ impl App {
                 card_status(p).3,
                 p.agent.as_deref() == Some("claude"),
             ));
+        }
+    }
+
+    /// The Alt+P overlay: one large QR encoding this machine's current
+    /// astrolabe pairing URL (`http://<bridge>/?t=<token>&cid=<id>&name=<host>`
+    /// — the same magic-link shape `web/src/auth.ts` already parses, plus
+    /// two extra params the iOS scanner reads and the web app ignores), or
+    /// an explanatory message in place of the code when there's nothing to
+    /// show yet. `pair_rect` is left non-empty only when a QR was actually
+    /// drawn — kitty_overlay() reads it to know whether/where to place the
+    /// image.
+    fn draw_pair_overlay(&mut self, f: &mut Frame, area: Rect) {
+        self.pair_rect = Rect::default();
+        let outer_w = area.width.min(area.height.saturating_mul(2)).min(70).max(30);
+        let outer_h = area.height.min(30).max(14);
+        let outer = Rect {
+            x: area.x + area.width.saturating_sub(outer_w) / 2,
+            y: area.y + area.height.saturating_sub(outer_h) / 2,
+            width: outer_w,
+            height: outer_h,
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(Color::Rgb(230, 190, 80)))
+            .title(" pair a phone — astrolabe ")
+            .title_alignment(Alignment::Center);
+        f.render_widget(Clear, outer);
+        let inner = block.inner(outer);
+        f.render_widget(block, outer);
+        let center_msg = |f: &mut Frame, msg: &str| {
+            let mid = Rect {
+                x: inner.x,
+                y: inner.y + inner.height / 2,
+                width: inner.width,
+                height: (inner.height / 2).max(1),
+            };
+            f.render_widget(
+                Paragraph::new(msg)
+                    .alignment(Alignment::Center)
+                    .wrap(Wrap { trim: true })
+                    .style(Style::default().fg(Color::DarkGray)),
+                mid,
+            );
+        };
+
+        let Some(token) = self
+            .home_state
+            .as_ref()
+            .map(|s| s.pairing_token.clone())
+            .filter(|t| !t.is_empty())
+        else {
+            center_msg(f, "☾ waiting for session state…");
+            return;
+        };
+        let Some((url, cid, name)) = self.pair_endpoint.clone() else {
+            center_msg(
+                f,
+                "no astrolabe bridge detected on this machine\n\nis astrolabe.service running?",
+            );
+            return;
+        };
+        let pair_url = format!(
+            "{url}/?t={}&cid={}&name={}",
+            url_encode(&token),
+            url_encode(&cid),
+            url_encode(&name)
+        );
+
+        // Bottom row: hint text. Everything above it is reserved for the QR
+        // (or, on a terminal without kitty graphics, the raw URL to copy).
+        let hint_h = 2u16;
+        let hint = Rect {
+            x: inner.x,
+            y: inner.bottom().saturating_sub(hint_h),
+            width: inner.width,
+            height: hint_h.min(inner.height),
+        };
+        f.render_widget(
+            Paragraph::new("scan with Astrolabe on your phone · Esc to close")
+                .alignment(Alignment::Center)
+                .style(Style::default().fg(Color::DarkGray)),
+            hint,
+        );
+        let qr_area = Rect {
+            x: inner.x,
+            y: inner.y,
+            width: inner.width,
+            height: inner.height.saturating_sub(hint_h),
+        };
+
+        if !self.kitty_on {
+            // No graphics protocol: fall back to the raw URL as text — not
+            // scannable, but still pasteable into the app's manual-add form.
+            f.render_widget(
+                Paragraph::new(pair_url)
+                    .alignment(Alignment::Center)
+                    .wrap(Wrap { trim: true })
+                    .style(Style::default().fg(Color::White)),
+                qr_area,
+            );
+            return;
+        }
+        // Square-in-pixels box: pick a cell rect whose width/height convert
+        // to (near) equal pixel dimensions, same reasoning card_dims() uses
+        // elsewhere for non-square cells.
+        let Some((cw, ch)) = crate::kitty::cell_size() else {
+            center_msg(f, "terminal didn't report a cell pixel size");
+            return;
+        };
+        let side_rows = qr_area.height.min(((qr_area.width as u32 * cw as u32) / ch as u32) as u16);
+        let side_cols = ((side_rows as u32 * ch as u32) / cw as u32) as u16;
+        let rect = Rect {
+            x: qr_area.x + qr_area.width.saturating_sub(side_cols) / 2,
+            y: qr_area.y + qr_area.height.saturating_sub(side_rows) / 2,
+            width: side_cols,
+            height: side_rows,
+        };
+        if rect.width == 0 || rect.height == 0 {
+            return;
+        }
+        if pair_url != self.pair_qr_src {
+            let target_px = rect.height as u32 * ch as u32;
+            self.pair_qr = crate::kitty::qr_rgba(&pair_url, target_px)
+                .map(|(rgba, w, h)| (w, h, rgba, crate::kitty::qr_id(&pair_url)));
+            self.pair_qr_src = pair_url;
+        }
+        if self.pair_qr.is_some() {
+            self.pair_rect = rect;
         }
     }
 
@@ -3672,8 +3891,11 @@ impl App {
         let mut out = std::io::stdout();
         // Card art hides while the settings popup covers the page (z=-1
         // images would bleed through its background), in list view, and
-        // off home entirely.
-        if !self.home || matches!(self.mode, Mode::Settings) || self.home_view() == "list" {
+        // off home entirely. The pairing overlay overrides all of that —
+        // it takes over the page regardless of the home view mode.
+        if !self.pair_open
+            && (!self.home || matches!(self.mode, Mode::Settings) || self.home_view() == "list")
+        {
             if !self.kitty_placed.is_empty() {
                 let _ = crate::kitty::delete_placements(&mut out);
                 let _ = out.flush();
@@ -3705,9 +3927,22 @@ impl App {
             self.kitty_last_icon = style_key;
         }
 
-        // Desired placements: mascot sprites beside active claude blocks
-        // in the blocks view, otherwise one painted card per pane.
-        let desired: Vec<(Rect, u32)> = if self.home_view() == "blocks" {
+        // Desired placements: the pairing QR alone while that overlay is
+        // open, mascot sprites beside active claude blocks in the blocks
+        // view, otherwise one painted card per pane.
+        let desired: Vec<(Rect, u32)> = if self.pair_open {
+            match &self.pair_qr {
+                Some((pw, ph, rgba, id)) if self.pair_rect.width > 0 && self.pair_rect.height > 0 => {
+                    if !self.kitty_sent.contains(&(*pw, *ph, *id)) {
+                        self.kitty_sent.retain(|&(_, _, i2)| i2 != *id);
+                        let _ = crate::kitty::transmit(&mut out, *id, *pw, *ph, rgba);
+                        self.kitty_sent.insert((*pw, *ph, *id));
+                    }
+                    vec![(self.pair_rect, *id)]
+                }
+                _ => Vec::new(),
+            }
+        } else if self.home_view() == "blocks" {
             let frame = ((self.anim_start.elapsed().as_millis() / 250) % 4) as u8;
             let soft = self.claude_style() == "soft";
             let mut v = Vec::with_capacity(self.home_mascots.len());

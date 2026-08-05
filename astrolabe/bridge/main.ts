@@ -28,6 +28,7 @@ import { parseQuestion, type PaneQuestion } from "./question.ts";
 import { scanCommands } from "./commands.ts";
 import { Apns } from "./apns.ts";
 import { publishEndpoint } from "./identity.ts";
+import { hostStats } from "./host.ts";
 
 const PORT = Number(process.env.ASTROLABE_PORT || 7979);
 const SESSION = process.env.ASTROLABE_SESSION || "main";
@@ -391,6 +392,11 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
   const supplied = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
   if (!tokenOk(supplied)) {
     json(res, 401, { error: "unauthorized" });
+    return true;
+  }
+  // Vitals for the phone's title bar — a read, so a plain GET.
+  if (url === "/api/host" && req.method === "GET") {
+    json(res, 200, await hostStats());
     return true;
   }
   if (req.method !== "POST") {

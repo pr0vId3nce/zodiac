@@ -194,10 +194,36 @@ export const Term = forwardRef<
   modeRef.current = mode;
 
   const [lines, setLines] = useState<Run[][]>([]);
+  /// Width the mirror is allowed to scroll to, in px: the columns actually
+  /// carrying content, not the full server grid. See `updateTrim`.
+  const [trimPx, setTrimPx] = useState<number | null>(null);
   const [query, setQuery] = useState("");
   const [hit, setHit] = useState(0);
   const pinned = useRef(true);
   const debounce = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  /// The mirror renders the whole server grid, and the font can only shrink
+  /// to 9px, so on a phone a typical 120-column session is always wider than
+  /// the screen — with the right-hand columns usually blank, which reads as
+  /// scrolling into nothing. Clip the scrollable area to the widest visible
+  /// row that has anything on it: wide content still pans, empty space
+  /// doesn't.
+  const updateTrim = useCallback(() => {
+    const term = termRef.current;
+    const node = holder.current;
+    if (!term || !node) return;
+    const buf = term.buffer.active;
+    let used = 0;
+    for (let y = buf.viewportY; y < buf.viewportY + term.rows; y++) {
+      const len = buf.getLine(y)?.translateToString(true).length ?? 0;
+      if (len > used) used = len;
+    }
+    const screen = node.querySelector<HTMLElement>(".xterm-screen");
+    if (!screen || !term.cols) return;
+    const cell = screen.clientWidth / term.cols;
+    if (!cell) return;
+    setTrimPx(Math.ceil(used * cell) + 8); // + the holder's px-1 either side
+  }, []);
 
   const refresh = useCallback(() => {
     if (debounce.current) return;
@@ -206,8 +232,9 @@ export const Term = forwardRef<
       if (modeRef.current === "read" && termRef.current) {
         setLines(extractLines(termRef.current, 2500));
       }
+      if (modeRef.current === "mirror") updateTrim();
     }, 350);
-  }, []);
+  }, [updateTrim]);
 
   useImperativeHandle(ref, () => ({
     findNext: (q) => {
@@ -277,6 +304,10 @@ export const Term = forwardRef<
     termRef.current = term;
     searchRef.current = search;
 
+    // Scrolling through scrollback changes which rows are visible, and so
+    // how wide the content is.
+    const scrolled = term.onScroll(() => updateTrim());
+
     const off = client.onStream((msg) => {
       if (!("pane" in msg) || msg.pane !== pane) return;
       if (msg.t === "replay") {
@@ -300,6 +331,7 @@ export const Term = forwardRef<
     });
     return () => {
       off();
+      scrolled.dispose();
       themeWatch.disconnect();
       client.view(null);
       term.dispose();
@@ -313,7 +345,11 @@ export const Term = forwardRef<
     if (!term) return;
     term.options.fontSize = mirrorFont;
     term.resize(cols, rows);
-  }, [rows, cols, mirrorFont]);
+    // xterm re-measures its cell size asynchronously after a font change;
+    // trim against the new geometry, not the old.
+    const t = setTimeout(updateTrim, 50);
+    return () => clearTimeout(t);
+  }, [rows, cols, mirrorFont, updateTrim]);
 
   // entering read mode: build lines now, land at the bottom
   useEffect(() => {
@@ -321,7 +357,8 @@ export const Term = forwardRef<
       setLines(extractLines(termRef.current, 2500));
       pinned.current = true;
     }
-  }, [mode]);
+    if (mode === "mirror") updateTrim();
+  }, [mode, updateTrim]);
 
   // stay pinned to the live end while output streams (chat-style)
   useEffect(() => {
@@ -382,8 +419,21 @@ export const Term = forwardRef<
   return (
     <div ref={root} className="relative h-full">
       {/* mirror (always mounted — it's the parser) */}
-      <div className={mode === "mirror" ? "h-full overflow-auto" : "invisible h-full overflow-hidden"}>
-        <div ref={holder} className="h-full w-max min-w-full px-1" />
+      <div
+        className={
+          mode === "mirror"
+            ? "h-full overflow-auto overscroll-x-contain"
+            : "invisible h-full overflow-hidden"
+        }
+      >
+        {/* Clipped to the columns in use (see updateTrim); the terminal
+            itself still renders the full grid inside. */}
+        <div
+          className="h-full min-w-full overflow-hidden"
+          style={mode === "mirror" && trimPx ? { width: `${trimPx}px` } : undefined}
+        >
+          <div ref={holder} className="h-full w-max min-w-full px-1" />
+        </div>
       </div>
 
       {mode === "read" && (

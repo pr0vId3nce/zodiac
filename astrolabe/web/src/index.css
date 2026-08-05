@@ -8,6 +8,7 @@
   --color-card-edge: #242e55;
   --color-gold: #d4af37;
   --color-gold-soft: #f5e6b8;
+  --color-fg: #e6e8f0;
   --font-mono: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
 
   /* Type scale — named so the same handful of sizes gets reused everywhere
@@ -27,13 +28,35 @@
   --ease-ios-sheet: cubic-bezier(0.32, 0.72, 0, 1);
 }
 
+/* OLED themes: true-black canvas, one accent family swapped in through the
+   same variables every utility class already reads. `--color-gold` doubles
+   as "the accent" app-wide, so orange/green take it over wholesale. */
+html[data-theme="oled-orange"] {
+  --color-sky-deep: #000000;
+  --color-sky-mid: #0a0a0a;
+  --color-card: #0d0c0a;
+  --color-card-edge: #3d2a0e;
+  --color-gold: #ff9f0a;
+  --color-gold-soft: #ffd9a0;
+  --color-fg: #f2e9de;
+}
+html[data-theme="oled-green"] {
+  --color-sky-deep: #000000;
+  --color-sky-mid: #0a0a0a;
+  --color-card: #0a0d0b;
+  --color-card-edge: #10391f;
+  --color-gold: #23d18b;
+  --color-gold-soft: #a9f0d1;
+  --color-fg: #e0f2e9;
+}
+
 html,
 body,
 #root {
   height: 100%;
   margin: 0;
   background: var(--color-sky-deep);
-  color: #e6e8f0;
+  color: var(--color-fg);
   font-family: -apple-system, BlinkMacSystemFont, ui-sans-serif, system-ui, sans-serif;
   overscroll-behavior: none;
   /* Long-press copy/lookup menus popping up on buttons/cards while
@@ -134,8 +157,8 @@ body,
   border-radius: 2px;
 }
 .astrolabe-mark-active {
-  background: #d4af37;
-  color: #0b1020;
+  background: var(--color-gold);
+  color: var(--color-sky-deep);
 }
 
 /* keep the composer above the iOS home indicator */

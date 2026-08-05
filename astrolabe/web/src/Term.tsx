@@ -153,7 +153,13 @@ function extractLines(term: Terminal, maxRows: number): Run[][] {
     }
   }
   while (lines.length && lines[lines.length - 1].length === 0) lines.pop();
-  return lines;
+  // drop input-box chrome that only makes sense at terminal width: full-width
+  // ─── separator rules and a bare ❯ prompt line (read mode only — the
+  // mirror keeps them)
+  return lines.filter((l) => {
+    const text = l.map((r) => r.text).join("").trim();
+    return !/^[─━═╌╍]{3,}$/.test(text) && text !== "❯";
+  });
 }
 
 // ----------------------------------------------------------------- component
@@ -231,6 +237,18 @@ export const Term = forwardRef<
 
   useEffect(() => {
     if (!holder.current) return;
+    // xterm can't read CSS variables itself — resolve the active theme's
+    // canvas/accent at mount, and again if the native shell flips
+    // data-theme while a pane is open.
+    const themeColors = () => {
+      const css = getComputedStyle(document.documentElement);
+      return {
+        background: css.getPropertyValue("--color-sky-deep").trim() || "#0b1020",
+        foreground: css.getPropertyValue("--color-fg").trim() || "#e6e8f0",
+        cursor: css.getPropertyValue("--color-gold").trim() || "#d4af37",
+        selectionBackground: "#3a4470",
+      };
+    };
     const term = new Terminal({
       rows,
       cols,
@@ -240,12 +258,7 @@ export const Term = forwardRef<
       scrollback: 10000,
       disableStdin: true,
       convertEol: false,
-      theme: {
-        background: "#0b1020",
-        foreground: "#e6e8f0",
-        cursor: "#d4af37",
-        selectionBackground: "#3a4470",
-      },
+      theme: themeColors(),
       allowProposedApi: true,
     });
     const search = new SearchAddon();
@@ -268,8 +281,16 @@ export const Term = forwardRef<
       }
     });
     client.view(pane);
+    const themeWatch = new MutationObserver(() => {
+      term.options.theme = themeColors();
+    });
+    themeWatch.observe(document.documentElement, {
+      attributes: true,
+      attributeFilter: ["data-theme"],
+    });
     return () => {
       off();
+      themeWatch.disconnect();
       client.view(null);
       term.dispose();
       termRef.current = null;

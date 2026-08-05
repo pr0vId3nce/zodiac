@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import {
   AArrowDown,
   AArrowUp,
@@ -38,24 +38,45 @@ function initialMode(): ViewMode {
   return window.innerWidth < 700 ? "read" : "mirror";
 }
 
+const MIRROR_FONT_KEY = "astrolabe-mirror-font";
+const READ_FONT_KEY = "astrolabe-read-font";
+
+function initialMirrorFont(cols: number): number {
+  const saved = Number(localStorage.getItem(MIRROR_FONT_KEY));
+  return saved > 0 ? saved : fitFont(cols);
+}
+
+function initialReadFont(): number {
+  const saved = Number(localStorage.getItem(READ_FONT_KEY));
+  return saved > 0 ? saved : 13;
+}
+
 export function Pane({
   pane,
   state,
   watch,
   commands,
   onBack,
+  onSwipeComplete,
+  backdrop,
 }: {
   pane: PaneState;
   state: SessionState;
   watch: boolean | null;
   commands: SlashCommand[];
   onBack: () => void;
+  /** Fires once a swipe-back's own release animation finishes, instead of
+      `onBack` — the swipe already revealed `backdrop` live, so the caller
+      should sync state without replaying a transition on top of it. */
+  onSwipeComplete?: () => void;
+  /** Rendered behind the pane, revealed by an edge-swipe drag. */
+  backdrop?: ReactNode;
 }) {
   const rows = state.rows || 45;
   const cols = state.cols || 160;
   const [mode, setMode] = useState<ViewMode>(initialMode);
-  const [mirrorFont, setMirrorFont] = useState(() => fitFont(cols));
-  const [readFont, setReadFont] = useState(13);
+  const [mirrorFont, setMirrorFont] = useState(() => initialMirrorFont(cols));
+  const [readFont, setReadFont] = useState(initialReadFont);
   const [text, setText] = useState("");
   const [pad, setPad] = useState(false);
   const [palette, setPalette] = useState(false);
@@ -68,7 +89,19 @@ export function Pane({
   const header = useRef<HTMLElement>(null);
   const prevStatus = useRef(pane.status);
 
-  useEffect(() => setMirrorFont(fitFont(cols)), [cols]);
+  useEffect(() => {
+    // Only auto-refit on a grid resize (rotation, split view) when there's
+    // no saved preference yet — once pinch/the +/- buttons have set one,
+    // a resize shouldn't silently discard it.
+    if (!localStorage.getItem(MIRROR_FONT_KEY)) setMirrorFont(fitFont(cols));
+  }, [cols]);
+
+  useEffect(() => {
+    localStorage.setItem(MIRROR_FONT_KEY, String(mirrorFont));
+  }, [mirrorFont]);
+  useEffect(() => {
+    localStorage.setItem(READ_FONT_KEY, String(readFont));
+  }, [readFont]);
 
   // A pane you're actively looking at flipping to needs_input is a
   // high-signal moment — worth the same haptic-feel pulse a send gets.
@@ -123,15 +156,34 @@ export function Pane({
     [pane.status, pane.thinking]
   );
 
-  const swipe = useSwipeBack(onBack);
+  const swipe = useSwipeBack(onSwipeComplete ?? onBack);
 
   return (
-    <div
-      ref={swipe.ref}
-      className="flex h-full flex-col"
-      style={{ touchAction: "pan-y" }}
-      {...swipe.handlers}
-    >
+    <div className="relative h-full overflow-hidden">
+      {/* revealed live by an edge-swipe drag (useSwipeBack drives both
+          refs directly — no React state, so it can track the finger at
+          60fps); sits at rest pulled back and dimmed, like the view
+          underneath a native push. */}
+      {backdrop && (
+        <div
+          ref={swipe.backdropRef}
+          className="absolute inset-0"
+          style={{ transform: swipe.restTransform }}
+        >
+          {backdrop}
+          <div
+            ref={swipe.scrimRef}
+            className="pointer-events-none absolute inset-0 bg-black"
+            style={{ opacity: swipe.restScrimOpacity }}
+          />
+        </div>
+      )}
+      <div
+        ref={swipe.ref}
+        className="relative z-10 flex h-full flex-col bg-sky-deep"
+        style={{ touchAction: "pan-y" }}
+        {...swipe.handlers}
+      >
       {/* header — back, name, status, search, and one overflow icon for
           everything else (mode/font are "set once" prefs, search is used
           mid-read often enough to deserve staying one tap away) */}
@@ -296,6 +348,7 @@ export function Pane({
           </div>
         </div>
       </Sheet>
+      </div>
     </div>
   );
 }

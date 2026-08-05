@@ -36,6 +36,28 @@ body,
   color: #e6e8f0;
   font-family: -apple-system, BlinkMacSystemFont, ui-sans-serif, system-ui, sans-serif;
   overscroll-behavior: none;
+  /* Long-press copy/lookup menus popping up on buttons/cards while
+     dragging or tapping reads as broken on iOS — suppressed globally,
+     explicitly re-enabled below wherever real text selection is the
+     point (the read-mode terminal view). */
+  -webkit-touch-callout: none;
+}
+
+/* Collapses keyframe animations and transition durations near-instant —
+   including ones set via inline style from JS (useSwipeBack.ts,
+   usePinchZoom.ts, Nav.tsx's manual slide), since !important in a
+   stylesheet is one of the few things that overrides an inline style.
+   Respects the OS-level motion-sensitivity setting everywhere at once
+   instead of threading a check through every animated component. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* shimmer for working panes, Claude Code style */
@@ -97,6 +119,12 @@ body,
 
 .xterm .xterm-viewport {
   background-color: transparent !important;
+}
+
+/* xterm.js manages its own touch-select-to-copy — don't let the global
+   touch-callout suppression above fight it. */
+.xterm {
+  -webkit-touch-callout: default;
 }
 
 /* read-mode search hits */

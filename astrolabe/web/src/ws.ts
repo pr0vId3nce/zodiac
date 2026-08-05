@@ -4,6 +4,7 @@
 
 import { useEffect, useSyncExternalStore } from "react";
 import type { ServerMsg, SessionState, SlashCommand } from "./types";
+import { getToken } from "./auth";
 
 export interface AstrolabeState {
   connected: boolean; // ws to bridge
@@ -12,6 +13,11 @@ export interface AstrolabeState {
   session: string;
   state: SessionState | null;
   commands: SlashCommand[];
+  /** The bridge closed the connection specifically for a missing/wrong
+      token (close code 4001) — worth telling apart from "still trying to
+      reconnect," since retrying with the same bad token forever looks
+      identical to a network problem otherwise. */
+  unauthorized: boolean;
 }
 
 type StreamListener = (msg: ServerMsg) => void;
@@ -25,6 +31,7 @@ class AstrolabeClient {
     session: "main",
     state: null,
     commands: [],
+    unauthorized: false,
   };
   private listeners = new Set<() => void>();
   private streams = new Set<StreamListener>();
@@ -37,12 +44,14 @@ class AstrolabeClient {
 
   private connect() {
     const proto = location.protocol === "https:" ? "wss" : "ws";
-    const ws = new WebSocket(`${proto}://${location.host}/ws`);
+    const token = getToken();
+    const qs = token ? `?t=${encodeURIComponent(token)}` : "";
+    const ws = new WebSocket(`${proto}://${location.host}/ws${qs}`);
     this.ws = ws;
-    ws.onopen = () => this.set({ connected: true });
-    ws.onclose = () => {
+    ws.onopen = () => this.set({ connected: true, unauthorized: false });
+    ws.onclose = (ev) => {
       this.ws = null;
-      this.set({ connected: false });
+      this.set({ connected: false, unauthorized: ev.code === 4001 });
       this.retry = setTimeout(() => this.connect(), 1500);
     };
     ws.onerror = () => ws.close();

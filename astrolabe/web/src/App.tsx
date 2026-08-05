@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Herd } from "./Herd";
 import { Pane } from "./Pane";
 import { useAstrolabe } from "./ws";
@@ -42,6 +42,52 @@ export default function App() {
 
   const offline = !astrolabe.connected || !astrolabe.link;
 
+  // renderScreen("pane") wants to hand the swipe gesture a way to sync
+  // Nav's state without replaying its own transition — but that function
+  // (`jump`) only exists once useScreenNav(renderScreen) has already run.
+  // A ref breaks the circularity: renderScreen closes over the ref (stable
+  // identity), the ref's `.current` is refreshed after useScreenNav below,
+  // and by the time a real swipe actually calls it, it's always current.
+  const jumpRef = useRef<(s: Screen) => void>(() => {});
+
+  const renderHerd = (): ReactNode => (
+    <>
+      <header className="safe-top sticky top-0 z-10 flex items-center gap-2 border-b border-card-edge bg-sky-mid/70 px-4 py-3 backdrop-blur">
+        <span className="font-serif text-lg font-bold text-gold">Astrolabe</span>
+        <span className="text-sm text-zinc-500">✶ {astrolabe.session}</span>
+        <span
+          className={cn(
+            "ml-auto inline-block h-2 w-2 rounded-full",
+            !astrolabe.connected
+              ? "bg-red-400"
+              : !astrolabe.link
+                ? "bg-amber-400"
+                : "bg-emerald-400"
+          )}
+          title={
+            !astrolabe.connected
+              ? "bridge unreachable"
+              : !astrolabe.link
+                ? "zodiac server down"
+                : "connected"
+          }
+        />
+      </header>
+      {offline && (
+        <div className="bg-red-500/10 px-4 py-1.5 text-center text-caption text-red-300">
+          {astrolabe.unauthorized
+            ? "missing or wrong token — reopen the link your bridge gave you"
+            : !astrolabe.connected
+              ? "reconnecting to the bridge…"
+              : "bridge is up, but no zodiac server is running"}
+        </div>
+      )}
+      <main className="min-h-0 flex-1 overflow-y-auto">
+        <Herd state={astrolabe.state} onOpen={(id) => nav(id)} />
+      </main>
+    </>
+  );
+
   const renderScreen = (screen: Screen): ReactNode => {
     if (screen === "pane") {
       if (!pane || !astrolabe.state) return null;
@@ -52,51 +98,26 @@ export default function App() {
           watch={astrolabe.watch}
           commands={astrolabe.commands}
           onBack={() => nav(null)}
+          // A completed swipe already revealed Herd live behind the Pane —
+          // jump Nav straight to "herd" instead of letting it replay its
+          // own slide-in on top of a screen that's already sitting there.
+          onSwipeComplete={() => {
+            nav(null);
+            jumpRef.current("herd");
+          }}
+          backdrop={renderHerd()}
         />
       );
     }
-    return (
-      <>
-        <header className="safe-top sticky top-0 z-10 flex items-center gap-2 border-b border-card-edge bg-sky-mid/70 px-4 py-3 backdrop-blur">
-          <span className="font-serif text-lg font-bold text-gold">Astrolabe</span>
-          <span className="text-sm text-zinc-500">✶ {astrolabe.session}</span>
-          <span
-            className={cn(
-              "ml-auto inline-block h-2 w-2 rounded-full",
-              !astrolabe.connected
-                ? "bg-red-400"
-                : !astrolabe.link
-                  ? "bg-amber-400"
-                  : "bg-emerald-400"
-            )}
-            title={
-              !astrolabe.connected
-                ? "bridge unreachable"
-                : !astrolabe.link
-                  ? "zodiac server down"
-                  : "connected"
-            }
-          />
-        </header>
-        {offline && (
-          <div className="bg-red-500/10 px-4 py-1.5 text-center text-caption text-red-300">
-            {!astrolabe.connected
-              ? "reconnecting to the bridge…"
-              : "bridge is up, but no zodiac server is running"}
-          </div>
-        )}
-        <main className="min-h-0 flex-1 overflow-y-auto">
-          <Herd state={astrolabe.state} onOpen={(id) => nav(id)} />
-        </main>
-      </>
-    );
+    return renderHerd();
   };
 
-  const { slots } = useScreenNav(pane ? "pane" : "herd", renderScreen);
+  const screenNav = useScreenNav(pane ? "pane" : "herd", renderScreen);
+  jumpRef.current = screenNav.jump;
 
   return (
     <div className="relative h-full overflow-hidden">
-      {slots.map((slot) => (
+      {screenNav.slots.map((slot) => (
         <div
           key={slot.key}
           data-nav-screen

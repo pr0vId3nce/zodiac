@@ -49,9 +49,38 @@ Env knobs (set in `~/.config/systemd/user/astrolabe.service`):
 | `ASTROLABE_APNS_KEY_ID` / `ASTROLABE_APNS_TEAM_ID` | — | from the developer portal |
 | `ASTROLABE_APNS_TOPIC` | — | app bundle id (`dev.d3s.Astrolabe`) |
 | `ASTROLABE_APNS_ENV` | `sandbox` | `production` for TestFlight builds |
+| `ASTROLABE_TOKEN` | — | shared secret required on `/ws` and `/api/*` — see **Security** below |
+| `ASTROLABE_PUSH_REDACT` | — | set to hide pane content in push bodies (generic text instead) |
 
-The `ASTROLABE_APNS_*` values belong in `~/.config/astrolabe/env` (the unit
-loads it via `EnvironmentFile=`), not in the unit file itself.
+The `ASTROLABE_APNS_*`/`ASTROLABE_TOKEN` values belong in
+`~/.config/astrolabe/env` (the unit loads it via `EnvironmentFile=`), not in
+the unit file itself.
+
+## 🔒 Security
+
+**Set `ASTROLABE_TOKEN`.** Without it, the bridge's only access control is
+"you're on my tailnet" — anyone who can route to this machine's tailscale IP
+can read every pane and type into any of them, no login required. With it
+set, both the WebSocket and every `/api/*` route reject requests that don't
+carry the right token; the bridge logs a loud warning on startup for as
+long as it's unset.
+
+```
+echo "ASTROLABE_TOKEN=$(openssl rand -hex 16)" >> ~/.config/astrolabe/env
+chmod 600 ~/.config/astrolabe/env
+systemctl --user restart astrolabe
+```
+
+- **Web (PWA/browser)**: open `http://<bridge-tailscale-ip>:7979/#/?t=<token>`
+  once — the token saves to `localStorage` and the URL cleans itself up.
+  Every reload after that just works. Re-add to your home screen from that
+  same tab if you'd already installed it, so the shortcut points at the
+  authenticated session.
+- **iOS shell**: paste the same token into Settings.app → Astrolabe → Token.
+
+Static assets (the app shell itself) stay unauthenticated on purpose — you
+need somewhere to load the page from before you have anywhere to read a
+token out of a URL.
 
 HTTP API (used by the iOS shell; the PWA uses the WebSocket):
 

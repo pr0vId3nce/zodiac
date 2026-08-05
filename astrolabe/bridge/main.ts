@@ -9,7 +9,15 @@
 //                      construction; falls back to 127.0.0.1 when
 //                      tailscale isn't up)
 //   ASTROLABE_SESSION  zodiac session name         (default "main")
+//   ASTROLABE_TOKEN    shared secret required on /ws and /api/* once set —
+//                      unset means NO auth beyond the tailnet IP bind
+//                      itself; a startup warning fires either way so this
+//                      isn't a silent gap.
+//   ASTROLABE_PUSH_REDACT  when set, push notification bodies become a
+//                      generic string instead of the pane's actual
+//                      subtitle/recap/title text.
 
+import * as crypto from "node:crypto";
 import * as http from "node:http";
 import * as fs from "node:fs";
 import * as path from "node:path";
@@ -22,6 +30,29 @@ import { Apns } from "./apns.ts";
 const PORT = Number(process.env.ASTROLABE_PORT || 7979);
 const SESSION = process.env.ASTROLABE_SESSION || "main";
 const DIST = path.join(import.meta.dirname, "..", "web", "dist");
+const TOKEN = process.env.ASTROLABE_TOKEN || null;
+const PUSH_REDACT = !!process.env.ASTROLABE_PUSH_REDACT;
+const MAX_CLIENTS = 20;
+
+if (!TOKEN) {
+  console.error(
+    "astrolabe: ASTROLABE_TOKEN is not set — the bridge is running with NO authentication. " +
+      "Anyone who can reach this tailnet IP can read and control every pane. Set " +
+      "ASTROLABE_TOKEN in ~/.config/astrolabe/env to close this."
+  );
+}
+
+/** Constant-time-ish check against a possibly-absent token. `null` (no
+    ASTROLABE_TOKEN configured) always passes — see the startup warning
+    above for why that's a deliberate backward-compat default, not an
+    oversight. */
+function tokenOk(supplied: string | null): boolean {
+  if (!TOKEN) return true;
+  if (!supplied) return false;
+  const a = Buffer.from(supplied);
+  const b = Buffer.from(TOKEN);
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
+}
 
 function tailscaleIp(): string | null {
   try {
@@ -41,6 +72,14 @@ function socketPath(session: string): string {
   return path.join(run, "zodiac", `${session}.sock`);
 }
 
+// scanCommands() is a synchronous readdirSync + per-file readFileSync —
+// fine once, not on every WS connection (a rapid-reconnect client turns it
+// into repeated blocking disk I/O on the event loop). Cache it and refresh
+// on a timer instead.
+const COMMANDS_REFRESH_MS = 30_000;
+let commandsCache = scanCommands();
+setInterval(() => (commandsCache = scanCommands()), COMMANDS_REFRESH_MS);
+
 // ---------------------------------------------------------------- zodiac link
 
 const link = new ZodiacLink(socketPath(SESSION));
@@ -55,6 +94,7 @@ const apns = new Apns();
 const PUSH_COOLDOWN_MS = 30_000;
 let prevStatus = new Map<number, string>();
 const lastPush = new Map<string, number>();
+let lastPushTest = 0;
 
 function maybePush(kind: string, pane: { id: number; name: string }, alert: { title: string; body?: string }, badge: number) {
   const key = `${pane.id}:${kind}`;
@@ -80,12 +120,12 @@ link.on("state", (state: SessionState) => {
     if (p.status === "needs_input") {
       maybePush("needs_input", p, {
         title: `${p.name} needs you`,
-        body: p.subtitle || p.recap || p.title || undefined,
+        body: PUSH_REDACT ? "needs your attention" : p.subtitle || p.recap || p.title || undefined,
       }, badge);
     } else if (p.status === "done" && prev === "working") {
       maybePush("done", p, {
         title: `${p.name} finished`,
-        body: p.recap || p.subtitle || undefined,
+        body: PUSH_REDACT ? "finished" : p.recap || p.subtitle || undefined,
       }, badge);
     }
   }
@@ -133,6 +173,14 @@ link.on("screen", (pane: number, text: string) =>
   broadcast({ t: "screen", pane, text }, pane)
 );
 
+/** A pane id that's actually an integer and actually exists right now —
+    the same existence check `/api/prompt` already does, applied here too
+    so a WS client can't drive `link.input`/`link.prompt`/`readScreen`
+    with a made-up id. */
+function paneExists(id: unknown): id is number {
+  return typeof id === "number" && Number.isInteger(id) && !!link.state?.panes.some((p) => p.id === id);
+}
+
 function onClientMessage(c: Client, raw: string) {
   let msg: any;
   try {
@@ -140,38 +188,45 @@ function onClientMessage(c: Client, raw: string) {
   } catch {
     return;
   }
-  switch (msg.t) {
-    case "view": {
-      c.viewing = typeof msg.pane === "number" ? msg.pane : null;
-      refreshViewed();
-      if (c.viewing !== null) {
-        if (link.watchSupported) {
-          const ring = link.rings.get(c.viewing);
-          sendJson(c, {
-            t: "replay",
-            pane: c.viewing,
-            data: (ring ?? Buffer.alloc(0)).toString("base64"),
-          });
-        } else if (link.up) {
-          link.readScreen(c.viewing); // poll-mode: fetch a screen right away
+  // Belt-and-suspenders: `ZodiacLink.send` now guards its own BigInt
+  // conversion too, but nothing here should ever let an unanticipated
+  // bad message take the whole process down.
+  try {
+    switch (msg.t) {
+      case "view": {
+        c.viewing = paneExists(msg.pane) ? msg.pane : null;
+        refreshViewed();
+        if (c.viewing !== null) {
+          if (link.watchSupported) {
+            const ring = link.rings.get(c.viewing);
+            sendJson(c, {
+              t: "replay",
+              pane: c.viewing,
+              data: (ring ?? Buffer.alloc(0)).toString("base64"),
+            });
+          } else if (link.up) {
+            link.readScreen(c.viewing); // poll-mode: fetch a screen right away
+          }
         }
+        break;
       }
-      break;
-    }
-    case "input": {
-      if (typeof msg.pane === "number" && typeof msg.data === "string") {
-        link.input(msg.pane, Buffer.from(msg.data, "utf8"));
+      case "input": {
+        if (paneExists(msg.pane) && typeof msg.data === "string") {
+          link.input(msg.pane, Buffer.from(msg.data, "utf8"));
+        }
+        break;
       }
-      break;
-    }
-    case "prompt": {
-      if (typeof msg.pane === "number" && typeof msg.text === "string") {
-        link.prompt(msg.pane, msg.text);
+      case "prompt": {
+        if (paneExists(msg.pane) && typeof msg.text === "string") {
+          link.prompt(msg.pane, msg.text);
+        }
+        break;
       }
-      break;
+      default:
+        break;
     }
-    default:
-      break;
+  } catch (e) {
+    console.error("astrolabe: error handling a WS message, ignoring it:", e);
   }
 }
 
@@ -221,6 +276,12 @@ function json(res: http.ServerResponse, code: number, body: unknown) {
 // The native iOS shell talks to these; the PWA keeps using the WebSocket.
 async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, url: string): Promise<boolean> {
   if (!url.startsWith("/api/")) return false;
+  const auth = req.headers.authorization;
+  const supplied = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (!tokenOk(supplied)) {
+    json(res, 401, { error: "unauthorized" });
+    return true;
+  }
   if (req.method !== "POST") {
     json(res, 405, { error: "POST only" });
     return true;
@@ -268,6 +329,15 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       return true;
     }
     case "/api/push-test": {
+      // Same cooldown shape as maybePush — a valid token shouldn't still
+      // be able to spam every device's lock screen or hammer Apple's push
+      // service in a loop.
+      const now = Date.now();
+      if (now - lastPushTest < PUSH_COOLDOWN_MS) {
+        json(res, 429, { error: "too soon, try again later" });
+        return true;
+      }
+      lastPushTest = now;
       const r = await apns.push(
         { title: "Astrolabe", body: "push test — the bridge can reach you" },
         { extra: { pane: null } }
@@ -305,7 +375,10 @@ const server = http.createServer(async (req, res) => {
     return;
   }
   let file = path.normalize(path.join(DIST, url === "/" ? "index.html" : url));
-  if (!file.startsWith(DIST)) {
+  // A plain `startsWith(DIST)` prefix match would also let a sibling
+  // directory like `DIST + "-evil"` through — require the separator (or an
+  // exact match) so containment is real, not just a string prefix.
+  if (file !== DIST && !file.startsWith(DIST + path.sep)) {
     res.writeHead(403).end();
     return;
   }
@@ -326,9 +399,32 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-const wss = new WebSocketServer({ server, path: "/ws" });
+// 256 KiB — comfortably above real terminal input/prompt sizes, same order
+// of magnitude as readJson's 64 KiB HTTP body cap; `ws`'s own default is an
+// unbounded-in-practice 100 MiB per message.
+const WS_MAX_PAYLOAD = 256 * 1024;
+const wss = new WebSocketServer({ server, path: "/ws", maxPayload: WS_MAX_PAYLOAD });
 
-wss.on("connection", (ws) => {
+wss.on("connection", (ws, req) => {
+  // Browsers don't enforce CORS/SOP on WebSocket connections — any page
+  // loaded by any device that can route to this IP could otherwise open
+  // one regardless of which site served it. The Origin header is
+  // supplementary, not the real defense (a non-browser client can send
+  // any Origin it likes) — tokenOk() below is what actually gates this.
+  const origin = req.headers.origin;
+  if (origin && origin !== `http://${req.headers.host}`) {
+    ws.close(4003, "origin not allowed");
+    return;
+  }
+  const supplied = new URL(req.url || "", "http://x").searchParams.get("t");
+  if (!tokenOk(supplied)) {
+    ws.close(4001, "unauthorized");
+    return;
+  }
+  if (clients.size >= MAX_CLIENTS) {
+    ws.close(4008, "too many connections");
+    return;
+  }
   const c: Client = { ws, viewing: null };
   clients.add(c);
   sendJson(c, {
@@ -337,7 +433,7 @@ wss.on("connection", (ws) => {
     state: link.state,
     link: link.up,
     watch: link.watchSupported,
-    commands: scanCommands(),
+    commands: commandsCache,
   });
   ws.on("message", (raw) => onClientMessage(c, raw.toString()));
   ws.on("close", () => {

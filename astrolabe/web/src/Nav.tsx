@@ -43,7 +43,7 @@ export interface NavSlot {
 export function useScreenNav(
   target: Screen,
   render: (screen: Screen) => ReactNode
-): { slots: NavSlot[] } {
+): { slots: NavSlot[]; jump: (screen: Screen) => void } {
   const [screen, setScreen] = useState<Screen>(target);
   const [transition, setTransition] = useState<TransitionState | null>(null);
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -93,8 +93,23 @@ export function useScreenNav(
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [target]);
 
+  // Sync `screen` straight to a value with no animation — for callers that
+  // already did their own transition visually (swipe-back's live drag) and
+  // just need Nav's state to catch up without replaying it. Must be called
+  // in the same tick as whatever else drives `target` to that value, so
+  // the effect above sees target === screen on the next render and skips
+  // starting a transition of its own.
+  const jump = (next: Screen) => {
+    if (timer.current) clearTimeout(timer.current);
+    setTransition(null);
+    setScreen(next);
+  };
+
   if (!transition) {
-    return { slots: [{ key: screen, node: snapshot.current[screen], className: "translate-x-0" }] };
+    return {
+      slots: [{ key: screen, node: snapshot.current[screen], className: "translate-x-0" }],
+      jump,
+    };
   }
   const { from, to, direction, settled } = transition;
   const exitTo = direction === "forward" ? "-translate-x-full" : "translate-x-full";
@@ -104,5 +119,6 @@ export function useScreenNav(
       { key: `${from.screen}-out`, node: from.node, className: settled ? exitTo : "translate-x-0" },
       { key: `${to.screen}-in`, node: to.node, className: settled ? "translate-x-0" : enterFrom },
     ],
+    jump,
   };
 }

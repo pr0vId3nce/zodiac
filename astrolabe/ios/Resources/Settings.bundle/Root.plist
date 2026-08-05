@@ -18,13 +18,31 @@
 			<key>Title</key>
 			<string>URL</string>
 			<key>DefaultValue</key>
-			<string>http://100.118.22.13:7979</string>
+			<string>http://127.0.0.1:7979</string>
 			<key>KeyboardType</key>
 			<string>URL</string>
 			<key>AutocapitalizationType</key>
 			<string>None</string>
 			<key>AutocorrectionType</key>
 			<string>No</string>
+		</dict>
+		<dict>
+			<key>Type</key>
+			<string>PSTextFieldSpecifier</string>
+			<key>Key</key>
+			<string>bridge_token</string>
+			<key>Title</key>
+			<string>Token</string>
+			<key>DefaultValue</key>
+			<string></string>
+			<key>KeyboardType</key>
+			<string>Default</string>
+			<key>AutocapitalizationType</key>
+			<string>None</string>
+			<key>AutocorrectionType</key>
+			<string>No</string>
+			<key>IsSecure</key>
+			<true/>
 		</dict>
 	</array>
 	<key>StringsTable</key>

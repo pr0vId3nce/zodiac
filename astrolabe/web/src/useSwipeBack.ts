@@ -1,13 +1,13 @@
 // Edge-swipe-to-dismiss for the Pane view, iOS-style. Raw touch events —
 // no gesture library, consistent with this app's hand-rolled UI primitives.
 //
-// Scope note: this drives the Pane's own transform directly (bypassing
-// React state for 60fps tracking) and, on a completed swipe, hands off to
-// the normal `nav(null)` back-transition (Nav.tsx) to bring the Herd
-// screen in. It does not yet reveal Herd live underneath the finger during
-// the drag itself — that "parallax peek" is a follow-up, not implemented
-// here; what you get today is direct 1:1 tracking while dragging, then a
-// clean handoff to the existing back animation on release.
+// Reveals a backdrop (Herd, passed in by Pane.tsx) live underneath the
+// finger as you drag — same parallax shape as a UINavigationController
+// pop: the view underneath sits pulled back and dimmed at rest, and
+// settles to its resting position as the front view slides away. On a
+// completed swipe, `onCommit` fires once the release animation finishes;
+// the caller (App.tsx) uses that to sync Nav's state without replaying
+// its own transition on top of a screen that's already fully revealed.
 import { useRef } from "react";
 import { hapticTap } from "./native";
 
@@ -16,6 +16,10 @@ const DIRECTION_LOCK_PX = 10;
 const COMMIT_FRACTION = 0.35; // of viewport width
 const COMMIT_VELOCITY = 0.5; // px/ms
 const RELEASE_MS = 200;
+// How far back (as a % translateX) the backdrop sits before a swipe
+// starts revealing it, and how dark its resting scrim is.
+const BACKDROP_REST_PCT = 25;
+const SCRIM_REST_OPACITY = 0.35;
 
 interface SwipeState {
   active: boolean;
@@ -30,8 +34,10 @@ interface SwipeState {
   pastThreshold: boolean;
 }
 
-export function useSwipeBack(onBack: () => void) {
+export function useSwipeBack(onCommit: () => void) {
   const el = useRef<HTMLDivElement | null>(null);
+  const backdropEl = useRef<HTMLDivElement | null>(null);
+  const scrimEl = useRef<HTMLDivElement | null>(null);
   const state = useRef<SwipeState>({
     active: false,
     locked: null,
@@ -42,11 +48,27 @@ export function useSwipeBack(onBack: () => void) {
     pastThreshold: false,
   });
 
-  const setTransform = (dx: number, animate: boolean) => {
+  const setProgress = (dx: number, animate: boolean) => {
     const node = el.current;
-    if (!node) return;
-    node.style.transition = animate ? `transform ${RELEASE_MS}ms var(--ease-ios-sheet)` : "none";
-    node.style.transform = dx > 0 ? `translateX(${dx}px)` : "";
+    const backdrop = backdropEl.current;
+    const scrim = scrimEl.current;
+    const width = window.innerWidth || 1;
+    const transition = animate
+      ? `transform ${RELEASE_MS}ms var(--ease-ios-sheet)`
+      : "none";
+    if (node) {
+      node.style.transition = transition;
+      node.style.transform = dx > 0 ? `translateX(${dx}px)` : "";
+    }
+    const reveal = Math.max(0, Math.min(1, dx / width));
+    if (backdrop) {
+      backdrop.style.transition = transition;
+      backdrop.style.transform = `translateX(${-BACKDROP_REST_PCT * (1 - reveal)}%)`;
+    }
+    if (scrim) {
+      scrim.style.transition = animate ? `opacity ${RELEASE_MS}ms var(--ease-ios-sheet)` : "none";
+      scrim.style.opacity = String(SCRIM_REST_OPACITY * (1 - reveal));
+    }
   };
 
   const onTouchStart = (e: React.TouchEvent) => {
@@ -83,7 +105,7 @@ export function useSwipeBack(onBack: () => void) {
     s.lastX = t.clientX;
     s.lastT = Date.now();
     const clamped = Math.max(0, dx);
-    setTransform(clamped, false);
+    setProgress(clamped, false);
     const past = clamped > window.innerWidth * COMMIT_FRACTION;
     if (past && !s.pastThreshold) hapticTap("impact", el.current);
     s.pastThreshold = past;
@@ -103,25 +125,19 @@ export function useSwipeBack(onBack: () => void) {
     const commit = dx > width * COMMIT_FRACTION || velocity > COMMIT_VELOCITY;
 
     if (commit) {
-      const node = el.current;
-      if (node) {
-        node.style.transition = `transform ${RELEASE_MS}ms var(--ease-ios-sheet)`;
-        node.style.transform = `translateX(${width}px)`;
-      }
-      setTimeout(() => {
-        onBack();
-        if (node) {
-          node.style.transition = "none";
-          node.style.transform = "";
-        }
-      }, RELEASE_MS);
+      setProgress(width, true);
+      setTimeout(onCommit, RELEASE_MS);
     } else {
-      setTransform(0, true);
+      setProgress(0, true);
     }
   };
 
   return {
     ref: el,
+    backdropRef: backdropEl,
+    scrimRef: scrimEl,
+    restTransform: `translateX(-${BACKDROP_REST_PCT}%)`,
+    restScrimOpacity: SCRIM_REST_OPACITY,
     handlers: {
       onTouchStart,
       onTouchMove,

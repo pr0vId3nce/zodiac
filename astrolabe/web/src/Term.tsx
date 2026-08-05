@@ -363,7 +363,12 @@ export const Term = forwardRef<
             pinned.current = el.scrollHeight - el.scrollTop - el.clientHeight < 100;
           }}
           className="absolute inset-0 select-text overflow-y-auto overscroll-contain bg-sky-deep px-2 py-1"
-          style={{ fontFamily: MONO, fontSize: readFont, lineHeight: 1.5 }}
+          style={{
+            fontFamily: MONO,
+            fontSize: readFont,
+            lineHeight: 1.5,
+            WebkitTouchCallout: "default",
+          }}
         >
           {lines.map((l, i) => (
             <div key={i} className="min-h-[1.2em] whitespace-pre-wrap break-words">

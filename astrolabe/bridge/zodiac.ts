@@ -172,6 +172,13 @@ export class ZodiacLink extends EventEmitter {
 
   private send(typ: number, pane: number, data: Buffer) {
     if (!this.sock || this.sock.destroyed) return;
+    // Defense in depth: callers should already validate `pane`, but
+    // BigInt(pane)/writeBigUInt64LE throw a synchronous RangeError on a
+    // non-integer or negative value (confirmed: this used to be reachable
+    // straight from an untrusted WS message with no try/catch anywhere
+    // above it — a one-frame remote crash of the whole bridge process).
+    // Silently drop rather than let that propagate.
+    if (!Number.isInteger(pane) || pane < 0 || pane > Number.MAX_SAFE_INTEGER) return;
     const hdr = Buffer.alloc(13);
     hdr.writeUInt8(typ, 0);
     hdr.writeBigUInt64LE(BigInt(pane), 1);

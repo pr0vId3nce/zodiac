@@ -9,11 +9,19 @@ pointed at the bridge, plus the two things a PWA can't do well on iOS —
   or type, Send — it POSTs straight to the bridge's `/api/prompt`, no app
   launch needed.
 
-Tapping a notification opens the app on that pane. The bridge URL is editable
-in Settings.app → Astrolabe (default `http://100.118.22.13:7979`).
+Tapping a notification opens the app on that pane. The bridge URL and its
+token (if you've set `ASTROLABE_TOKEN` — see the main README) are both
+editable in Settings.app → Astrolabe; the app ships with a loopback default
+that's deliberately unreachable until you set your actual
+`<bridge-tailscale-ip>:7979` there.
 
 Everything here is text; the Xcode project and the icon are generated. You
 need a Mac with Xcode 15+ to build (nothing on this laptop can).
+
+**First time building this on a Mac after a while?** See
+[`HANDOFF.md`](./HANDOFF.md) — it has the current unverified-work status and
+a real-device verification checklist to run through before trusting any of
+it.
 
 ## One-time: Apple developer setup
 
@@ -44,7 +52,7 @@ builds; switch to `production` if you ever distribute via TestFlight.
 
 ```
 systemctl --user daemon-reload && systemctl --user restart astrolabe
-curl -s http://100.118.22.13:7979/healthz   # expect "push": true
+curl -s http://<bridge-tailscale-ip>:7979/healthz   # expect "push": true
 ```
 
 ## Mac side
@@ -68,8 +76,12 @@ device token with the bridge (`/healthz` shows `"devices": 1`).
 ## Test
 
 ```
-curl -s -X POST http://100.118.22.13:7979/api/push-test -d '{}'
+curl -s -X POST http://<bridge-tailscale-ip>:7979/api/push-test \
+  -H "Authorization: Bearer $ASTROLABE_TOKEN" -d '{}'
 ```
+
+(Omit the `-H` if you haven't set `ASTROLABE_TOKEN` on the bridge — see the
+main README's security section.)
 
 Phone should buzz within a second or two. Then ask an agent something and
 lock the phone — when it flips to *needs you*, long-press the notification

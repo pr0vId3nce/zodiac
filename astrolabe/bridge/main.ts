@@ -454,6 +454,23 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     json(res, 200, await hostStats());
     return true;
   }
+  // Pane summary for the home-screen widget: a snapshot poll, not the
+  // WebSocket — a widget timeline provider wakes, fetches once, sleeps.
+  if (url === "/api/panes" && req.method === "GET") {
+    const st = publicState(link.state);
+    json(res, 200, {
+      link: link.up,
+      session: st?.session ?? SESSION,
+      panes: (st?.panes ?? []).map((p) => ({
+        index: p.index,
+        name: p.name,
+        status: p.status,
+        agent: p.agent ?? null,
+        question: (p as any).question ?? null,
+      })),
+    });
+    return true;
+  }
   if (req.method !== "POST") {
     json(res, 405, { error: "POST only" });
     return true;

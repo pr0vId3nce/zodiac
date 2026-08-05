@@ -121,6 +121,8 @@ HTTP API (used by the iOS shell; the PWA uses the WebSocket):
   panes handled server-side); this is what lock-screen inline reply hits
 - `POST /api/answer` `{pane, option, note?}` — answer a numbered question by
   option number; a note follows the digit into the pane as a normal prompt
+- `GET /api/panes` — pane summary (index, name, status, agent, question)
+  for the home-screen widget: a snapshot poll, no WebSocket
 - `GET /api/host` — the bridge machine's uptime, CPU, memory and battery,
   for the phone's title bar. Every field but uptime is nullable (desktops
   have no battery). Memory comes from `vm_stat` on macOS and `MemAvailable`

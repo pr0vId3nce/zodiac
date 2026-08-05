@@ -154,11 +154,21 @@ function extractLines(term: Terminal, maxRows: number): Run[][] {
   }
   while (lines.length && lines[lines.length - 1].length === 0) lines.pop();
   // drop input-box chrome that only makes sense at terminal width: full-width
-  // ─── separator rules and a bare ❯ prompt line (read mode only — the
-  // mirror keeps them)
+  // ─── separator rules — bare, or carrying an embedded title the way some
+  // TUIs draw them (`── ✳ session ──`, `╭─ title ───╮`) — and a bare ❯
+  // prompt line (read mode only — the mirror keeps them)
   return lines.filter((l) => {
     const text = l.map((r) => r.text).join("").trim();
-    return !/^[─━═╌╍]{3,}$/.test(text) && text !== "❯";
+    if (text === "❯") return false;
+    // A rule: opens and closes with dashes (optionally cornered), and is
+    // *mostly* dashes — the majority test keeps ordinary prose that merely
+    // starts and ends with a dash, while a full-width rule with a short
+    // title in the middle is overwhelmingly dash characters.
+    if (/^[╭╰┌└]?[─━═╌╍]/.test(text) && /[─━═╌╍][╮╯┐┘]?$/.test(text)) {
+      const dashes = (text.match(/[─━═╌╍]/g) ?? []).length;
+      if (dashes >= text.length / 2 && dashes >= 3) return false;
+    }
+    return true;
   });
 }
 

@@ -2,6 +2,8 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Herd } from "./Herd";
 import { Pane } from "./Pane";
 import { useAstrolabe } from "./ws";
+import { HostVitals } from "./HostVitals";
+import { isNativeShell } from "./native";
 import { cn } from "./ui";
 import { useScreenNav, type Screen } from "./Nav";
 
@@ -53,25 +55,34 @@ export default function App() {
   const renderHerd = (): ReactNode => (
     <>
       <header className="safe-top sticky top-0 z-10 flex items-center gap-2 border-b border-card-edge bg-sky-mid/70 px-4 py-3 backdrop-blur">
-        <span className="font-serif text-lg font-bold text-gold">zodiac</span>
-        <span className="text-sm text-zinc-500">✶ {astrolabe.session}</span>
-        <span
-          className={cn(
-            "ml-auto inline-block h-2 w-2 rounded-full",
-            !astrolabe.connected
-              ? "bg-red-400"
-              : !astrolabe.link
-                ? "bg-amber-400"
-                : "bg-emerald-400"
-          )}
-          title={
-            !astrolabe.connected
-              ? "bridge unreachable"
-              : !astrolabe.link
-                ? "zodiac server down"
-                : "connected"
-          }
-        />
+        {isNativeShell() ? (
+          // The native title bar already names the computer (with the
+          // connection dot beside it) — repeating "zodiac ✶ session" here
+          // would say nothing new. The machine's vitals live here instead.
+          <HostVitals />
+        ) : (
+          <>
+            <span className="font-serif text-lg font-bold text-gold">zodiac</span>
+            <span className="text-sm text-zinc-500">✶ {astrolabe.session}</span>
+            <span
+              className={cn(
+                "ml-auto inline-block h-2 w-2 rounded-full",
+                !astrolabe.connected
+                  ? "bg-red-400"
+                  : !astrolabe.link
+                    ? "bg-amber-400"
+                    : "bg-emerald-400"
+              )}
+              title={
+                !astrolabe.connected
+                  ? "bridge unreachable"
+                  : !astrolabe.link
+                    ? "zodiac server down"
+                    : "connected"
+              }
+            />
+          </>
+        )}
       </header>
       {offline && (
         <div className="bg-red-500/10 px-4 py-1.5 text-center text-caption text-red-300">

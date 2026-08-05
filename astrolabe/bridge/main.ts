@@ -31,6 +31,31 @@ import { Apns } from "./apns.ts";
 import { publishEndpoint } from "./identity.ts";
 import { hostStats } from "./host.ts";
 
+// ~/.config/astrolabe/env holds the secrets (ASTROLABE_APNS_*,
+// ASTROLABE_TOKEN). The Linux systemd unit loads it via EnvironmentFile=,
+// but launchd has no equivalent — so the bridge reads it itself, before
+// any config constant below is evaluated. KEY=value lines, # comments,
+// optional surrounding quotes; the process environment wins on conflict
+// so a unit-level override still works.
+function loadEnvFile() {
+  const dir =
+    process.env.XDG_CONFIG_HOME || path.join(os.homedir(), ".config");
+  let text: string;
+  try {
+    text = fs.readFileSync(path.join(dir, "astrolabe", "env"), "utf8");
+  } catch {
+    return;
+  }
+  for (const line of text.split("\n")) {
+    const m = line.match(/^\s*(?:export\s+)?([A-Z0-9_]+)\s*=\s*(.*?)\s*$/);
+    if (!m || line.trimStart().startsWith("#")) continue;
+    const [, key, raw] = m;
+    const value = raw.replace(/^(["'])(.*)\1$/, "$2");
+    if (!(key in process.env)) process.env[key] = value;
+  }
+}
+loadEnvFile();
+
 const PORT = Number(process.env.ASTROLABE_PORT || 7979);
 const SESSION = process.env.ASTROLABE_SESSION || "main";
 const DIST = path.join(import.meta.dirname, "..", "web", "dist");

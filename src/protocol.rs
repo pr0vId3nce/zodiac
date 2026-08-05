@@ -30,6 +30,7 @@ pub const T_STATE: u8 = 26; // payload: SessionState JSON
 pub const T_SCREEN: u8 = 27; // payload: utf8 screen text
 pub const T_GFX_STATE: u8 = 28; // payload: GfxSnapshot JSON for pane f.id
 pub const T_GFX_IMG: u8 = 29; // payload: image data chunk, see gfx_img_*
+pub const T_PANE_RENAMED: u8 = 30; // payload: utf8 name (auto-naming, see pane.rs)
 
 /// T_GFX_IMG payload: 26-byte header + data chunk. Images larger than
 /// GFX_CHUNK arrive as several frames distinguished by `off`; the client

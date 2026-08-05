@@ -1149,6 +1149,18 @@ impl App {
                 self.panes.push(CPane::new(f.id, name, rows, cols));
                 self.active = self.panes.len() - 1;
             }
+            T_PANE_RENAMED => {
+                // Server-side auto-naming — adopt unless the user is mid-
+                // rename on this very pane (don't fight the editor).
+                let editing = matches!(self.mode, Mode::Rename { .. })
+                    && self.panes.get(self.active).is_some_and(|p| p.id == f.id);
+                if !editing {
+                    let name = String::from_utf8_lossy(&f.data).into_owned();
+                    if let Some(p) = self.panes.iter_mut().find(|p| p.id == f.id) {
+                        p.name = name;
+                    }
+                }
+            }
             T_GFX_STATE => {
                 if let Ok(snap) = serde_json::from_slice::<crate::gfx::GfxSnapshot>(&f.data) {
                     let mut dead = Vec::new();
@@ -1243,10 +1255,14 @@ impl App {
                 KeyCode::Enter => {
                     let name = buf.trim().to_string();
                     self.mode = Mode::Normal;
-                    if !name.is_empty() {
-                        if let Some(p) = self.panes.get_mut(self.active) {
+                    if let Some(p) = self.panes.get_mut(self.active) {
+                        let id = p.id;
+                        if name.is_empty() {
+                            // Empty rename un-pins: the server reverts to
+                            // auto-naming and answers with T_PANE_RENAMED.
+                            self.send(T_RENAME, id, &[]);
+                        } else {
                             p.name = name.clone();
-                            let id = p.id;
                             self.send(T_RENAME, id, name.as_bytes());
                         }
                     }

@@ -17,6 +17,9 @@ pub const RING_CAP: usize = 512 * 1024;
 pub struct SrvPane {
     pub id: u64,
     pub name: String,
+    /// The user pinned this name (Alt+R / `zodiac rename`) — auto-naming
+    /// leaves it alone. An empty Alt+R rename clears the pin.
+    pub renamed: bool,
     pub ring: Vec<u8>,
     parser: vt100::Parser, // bell/status tracking + graphics event source
     splitter: GfxSplitter,
@@ -127,6 +130,7 @@ impl SrvPane {
         Ok(Self {
             id,
             name,
+            renamed: false,
             ring: preload,
             parser,
             splitter: GfxSplitter::new(),
@@ -398,9 +402,69 @@ impl SrvPane {
 
     pub fn cwd(&self) -> Option<String> {
         let pid = self.pid?;
-        std::fs::read_link(format!("/proc/{pid}/cwd"))
-            .ok()
-            .map(|p| p.to_string_lossy().into_owned())
+        #[cfg(target_os = "linux")]
+        {
+            std::fs::read_link(format!("/proc/{pid}/cwd"))
+                .ok()
+                .map(|p| p.to_string_lossy().into_owned())
+        }
+        #[cfg(target_os = "macos")]
+        {
+            macos_cwd(pid)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        {
+            let _ = pid;
+            None
+        }
+    }
+
+    /// The name of the app in this pane's foreground process group — `nvim`,
+    /// `htop`, … — or None when the shell itself is at the prompt (or the
+    /// answer is unknowable). Asks the PTY who owns the terminal
+    /// (`tcgetpgrp`), which is exactly the "an app is open here" signal.
+    fn fg_app(&self) -> Option<String> {
+        let fd = self.master.as_raw_fd()?;
+        let pgid = unsafe { libc::tcgetpgrp(fd) };
+        if pgid <= 0 {
+            return None;
+        }
+        if Some(pgid as u32) == self.pid {
+            return None; // the login shell itself is foreground
+        }
+        let name = process_name(pgid as u32)?;
+        if SHELL_NAMES.contains(&name.as_str()) {
+            return None;
+        }
+        Some(name)
+    }
+
+    /// What this pane should be called when the user hasn't named it:
+    /// the agent running here, else the ssh destination, else the
+    /// foreground app, else the shell's working directory (basename,
+    /// `~` for home, `/` for root).
+    pub fn auto_name(&self) -> Option<String> {
+        if let Some(agent) = self.agent() {
+            return Some(agent);
+        }
+        if let Some(host) = self.ssh_target() {
+            return Some(host);
+        }
+        if let Some(app) = self.fg_app() {
+            return Some(app);
+        }
+        let cwd = self.cwd()?;
+        if let Ok(home) = std::env::var("HOME") {
+            if cwd == home {
+                return Some("~".to_string());
+            }
+        }
+        Some(
+            std::path::Path::new(&cwd)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "/".to_string()),
+        )
     }
 
     pub fn last_ms(&self) -> Option<u64> {
@@ -556,6 +620,68 @@ const STALL_COOLDOWN: Duration = Duration::from_secs(30);
 const STALL_RETRY: Duration = Duration::from_secs(90);
 
 const AGENT_BINARIES: &[&str] = &["claude", "opencode", "codex", "aider", "gemini", "goose"];
+
+/// Foreground names that mean "nothing is really running here" — the pane
+/// falls through to cwd-based auto-naming.
+const SHELL_NAMES: &[&str] = &[
+    "zsh", "bash", "fish", "sh", "dash", "ksh", "tcsh", "csh", "nu", "nushell", "login",
+];
+
+/// The executable name of an arbitrary process, for auto-naming.
+#[cfg(target_os = "linux")]
+fn process_name(pid: u32) -> Option<String> {
+    let name = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
+    let name = name.trim();
+    (!name.is_empty()).then(|| name.to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn process_name(pid: u32) -> Option<String> {
+    let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let n = unsafe {
+        libc::proc_pidpath(pid as libc::c_int, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32)
+    };
+    if n <= 0 {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&buf[..n as usize]).into_owned();
+    path.rsplit('/').next().filter(|s| !s.is_empty()).map(str::to_string)
+}
+
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+fn process_name(_pid: u32) -> Option<String> {
+    None
+}
+
+/// A process's working directory on macOS, via `proc_pidinfo`'s
+/// PROC_PIDVNODEPATHINFO flavor. The struct is passed as an opaque
+/// correctly-sized byte buffer: two `vnode_info_path`s (a 152-byte
+/// `vnode_info` followed by a 1024-byte path) — cwd first, root second —
+/// 2352 bytes total, matching XNU's `struct proc_vnodepathinfo`.
+#[cfg(target_os = "macos")]
+fn macos_cwd(pid: u32) -> Option<String> {
+    const PROC_PIDVNODEPATHINFO: libc::c_int = 9;
+    const VNODE_INFO_SIZE: usize = 152;
+    const PATH_SIZE: usize = 1024;
+    const TOTAL: usize = 2 * (VNODE_INFO_SIZE + PATH_SIZE);
+    let mut buf = [0u8; TOTAL];
+    let n = unsafe {
+        libc::proc_pidinfo(
+            pid as libc::c_int,
+            PROC_PIDVNODEPATHINFO,
+            0,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            TOTAL as libc::c_int,
+        )
+    };
+    if n < (VNODE_INFO_SIZE + PATH_SIZE) as libc::c_int {
+        return None;
+    }
+    let path = &buf[VNODE_INFO_SIZE..VNODE_INFO_SIZE + PATH_SIZE];
+    let end = path.iter().position(|b| *b == 0).unwrap_or(PATH_SIZE);
+    let cwd = String::from_utf8_lossy(&path[..end]).into_owned();
+    (!cwd.is_empty()).then_some(cwd)
+}
 
 /// Find a known agent binary among the descendants of `root` by walking
 /// /proc. Matches the basename of argv[0] or argv[1] (argv[1] catches

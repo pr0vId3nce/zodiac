@@ -46,6 +46,9 @@ struct SavedPane {
     /// restore banner is worth showing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     agent: Option<String>,
+    /// The user pinned this name with Alt+R — auto-naming skips it.
+    #[serde(default)]
+    renamed: bool,
 }
 
 fn default_true() -> bool {
@@ -205,6 +208,7 @@ pub fn run(session: &str) -> Result<()> {
             srv.finish_tick();
             srv.wizard_tick();
             srv.subtitle_tick();
+            srv.auto_name_tick();
         }
         if srv.dirty {
             srv.save_meta();
@@ -429,9 +433,26 @@ impl Server {
             }
             T_RENAME => {
                 if let Ok(name) = String::from_utf8(f.data.clone()) {
+                    let mut announce: Option<String> = None;
                     if let Some(p) = self.pane_mut(f.id) {
-                        p.name = name;
+                        let trimmed = name.trim();
+                        if trimmed.is_empty() {
+                            // Empty rename clears the pin — back to auto,
+                            // effective immediately.
+                            p.renamed = false;
+                            if let Some(auto) = p.auto_name() {
+                                p.name = auto.clone();
+                                announce = Some(auto);
+                            }
+                        } else {
+                            p.name = trimmed.to_string();
+                            p.renamed = true;
+                        }
                         self.dirty = true;
+                    }
+                    if let Some(n) = announce {
+                        self.send_ui(T_PANE_RENAMED, f.id, n.as_bytes());
+                        self.send_watchers(T_PANE_RENAMED, f.id, n.as_bytes());
                     }
                 }
             }
@@ -583,6 +604,32 @@ impl Server {
     /// pane costs nothing beyond a local hash compute once every
     /// `SUBTITLE_INTERVAL` — no request goes out unless the screen actually
     /// changed since the last summarize.
+    /// Auto-naming: un-pinned panes track what's happening inside them —
+    /// the agent, the ssh destination, the foreground app, or the shell's
+    /// cwd basename (see `SrvPane::auto_name`). Runs on the 1s tick; a
+    /// changed name is announced to the UI client and every watcher via
+    /// T_PANE_RENAMED.
+    fn auto_name_tick(&mut self) {
+        let mut announce: Vec<(u64, String)> = Vec::new();
+        for p in &mut self.panes {
+            if p.renamed {
+                continue;
+            }
+            let Some(name) = p.auto_name() else { continue };
+            if name != p.name {
+                p.name = name.clone();
+                announce.push((p.id, name));
+            }
+        }
+        if !announce.is_empty() {
+            self.dirty = true;
+        }
+        for (id, name) in announce {
+            self.send_ui(T_PANE_RENAMED, id, name.as_bytes());
+            self.send_watchers(T_PANE_RENAMED, id, name.as_bytes());
+        }
+    }
+
     fn subtitle_tick(&mut self) {
         if !crate::settings::Settings::load().wizard_watch {
             return;
@@ -846,6 +893,7 @@ impl Server {
             ) {
                 if let Some(p) = self.pane_mut(id) {
                     p.auto_resume = sp.auto_resume;
+                    p.renamed = sp.renamed;
                 }
             }
         }
@@ -871,6 +919,7 @@ impl Server {
                     cwd: p.cwd(),
                     auto_resume: p.auto_resume,
                     agent: p.agent(),
+                    renamed: p.renamed,
                 })
                 .collect(),
         };

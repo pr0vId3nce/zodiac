@@ -23,7 +23,11 @@ Astrolabe ships none of its own.
   plain `node` (≥ 23 — types are stripped natively; bun runs it unchanged).
   Binds to this machine's **tailscale IPv4** by default, so the UI is
   tailnet-only by construction.
-- **web** (`web/`): Vite + React + Tailwind PWA with an xterm.js mirror.
+- **web** (`web/`): Vite + React + Tailwind SPA with an xterm.js mirror.
+  **Browser/PWA access is paused** — development is native-first, and a
+  plain browser gets a "use the iOS app" notice. The bundle's supported
+  home is the iOS app's WKWebView; `?web=1` (sticky) re-enables browser
+  access for development.
 - **ios** (not in this repo — it ships through the App Store separately):
   a native shell holding a *list of paired computers*, called **zodiac** on
   the phone, since that's the thing it shows you. Pair by scanning

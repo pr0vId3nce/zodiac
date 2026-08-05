@@ -24,6 +24,7 @@ import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import { WebSocketServer, WebSocket } from "ws";
 import { ZodiacLink, type SessionState } from "./zodiac.ts";
+import { parseQuestion, type PaneQuestion } from "./question.ts";
 import { scanCommands } from "./commands.ts";
 import { Apns } from "./apns.ts";
 import { publishEndpoint } from "./identity.ts";
@@ -111,22 +112,84 @@ let prevStatus = new Map<number, string>();
 const lastPush = new Map<string, number>();
 let lastPushTest = 0;
 
-function maybePush(kind: string, pane: { id: number; name: string }, alert: { title: string; body?: string }, badge: number) {
+function maybePush(
+  kind: string,
+  pane: { id: number; name: string },
+  alert: { title: string; body?: string },
+  badge: number,
+  question?: PaneQuestion,
+) {
   const key = `${pane.id}:${kind}`;
   const now = Date.now();
   if (now - (lastPush.get(key) ?? 0) < PUSH_COOLDOWN_MS) return;
   lastPush.set(key, now);
+  // Per-option-count categories are pre-registered by the iOS shell
+  // (AGENT_PROMPT_2..5 with numbered answer actions); anything else falls
+  // back to the plain reply-only category.
+  const optCount = question?.options.length ?? 0;
+  const category =
+    optCount >= 2 && optCount <= 5 ? `AGENT_PROMPT_${optCount}` : "AGENT_PROMPT";
   apns
     .push(alert, {
       badge,
-      category: "AGENT_PROMPT",
+      category,
       threadId: `pane-${pane.id}`,
       timeSensitive: kind === "needs_input",
       // cid: which paired computer this is, for the iOS shell's
       // multi-computer routing (which Computer to reply/open against).
-      extra: { pane: pane.id, session: SESSION, cid: identity.cid },
+      extra: {
+        pane: pane.id,
+        session: SESSION,
+        cid: identity.cid,
+        ...(question ? { question: question.question, options: question.options } : {}),
+      },
     })
     .catch(() => {});
+}
+
+/** The parsed question dialog per needs_input pane, merged into the state
+    web clients see (publicState) and into push payloads. Entries live from
+    the needs_input transition until the pane leaves that status, is
+    answered through /api/answer or the WS `answer` action, or closes. */
+const questions = new Map<number, PaneQuestion>();
+
+/** needs_input just fired: grab the pane's rendered screen, parse the
+    dialog out of it, then push with the real question + options and let
+    web clients re-render with answer buttons. Falls back to the old
+    subtitle/recap body when there's nothing parseable on screen. */
+async function captureQuestion(p: { id: number; name: string; subtitle?: string; recap?: string; title?: string }, badge: number) {
+  let q: PaneQuestion | null = null;
+  if (link.up) {
+    const screen = await link.readScreenOnce(p.id);
+    q = screen ? parseQuestion(screen) : null;
+  }
+  if (q) questions.set(p.id, q);
+  else questions.delete(p.id);
+  broadcast({ t: "state", state: publicState(link.state) });
+  const body = PUSH_REDACT
+    ? "needs your attention"
+    : q
+      ? [q.question, ...q.options.map((o, i) => `${i + 1}. ${o}`)].join("\n")
+      : p.subtitle || p.recap || p.title || undefined;
+  maybePush(
+    "needs_input", p, { title: `${p.name} needs you`, body }, badge,
+    PUSH_REDACT ? undefined : q ?? undefined,
+  );
+}
+
+/** Answer a question dialog: the digit picks the option in Claude Code's
+    pickers (the trailing Enter commits it where the digit only moved the
+    selection, and lands on an empty input box — a no-op — where it
+    didn't). A note, when given, follows as a normal prompt once the
+    dialog has had time to close. */
+function answerPane(paneId: number, option: number, note: string) {
+  link.input(paneId, Buffer.from(String(option), "utf8"));
+  setTimeout(() => link.input(paneId, Buffer.from("\r")), 250);
+  if (note) {
+    setTimeout(() => link.prompt(paneId, note.replaceAll("\n", "\\\r")), 1000);
+  }
+  questions.delete(paneId);
+  broadcast({ t: "state", state: publicState(link.state) });
 }
 
 link.on("state", (state: SessionState) => {
@@ -134,12 +197,10 @@ link.on("state", (state: SessionState) => {
   const badge = state.panes.filter((p) => p.status === "needs_input").length;
   for (const p of state.panes) {
     const prev = prevStatus.get(p.id);
+    if (prev === "needs_input" && p.status !== "needs_input") questions.delete(p.id);
     if (!prev || prev === p.status) continue;
     if (p.status === "needs_input") {
-      maybePush("needs_input", p, {
-        title: `${p.name} needs you`,
-        body: PUSH_REDACT ? "needs your attention" : p.subtitle || p.recap || p.title || undefined,
-      }, badge);
+      captureQuestion(p, badge).catch(() => {});
     } else if (p.status === "done" && prev === "working") {
       maybePush("done", p, {
         title: `${p.name} finished`,
@@ -149,6 +210,8 @@ link.on("state", (state: SessionState) => {
   }
   prevStatus = new Map(state.panes.map((p) => [p.id, p.status]));
 });
+
+link.on("pane_closed", (pane: number) => questions.delete(pane));
 
 // ------------------------------------------------------------------- web side
 
@@ -187,7 +250,15 @@ function broadcast(msg: unknown, pane?: number) {
 function publicState(state: SessionState | null): SessionState | null {
   if (!state) return state;
   const { pairing_token, ...rest } = state;
-  return rest;
+  return {
+    ...rest,
+    // Merge in any parsed question dialog so the web UI can render real
+    // answer buttons instead of a text composer the dialog would ignore.
+    panes: rest.panes.map((p) => {
+      const q = questions.get(p.id);
+      return q ? { ...p, question: q.question, options: q.options } : p;
+    }),
+  };
 }
 
 link.on("link", (up: boolean) => broadcast({ t: "link", up }));
@@ -250,6 +321,15 @@ function onClientMessage(c: Client, raw: string) {
       case "prompt": {
         if (paneExists(msg.pane) && typeof msg.text === "string") {
           link.prompt(msg.pane, msg.text);
+        }
+        break;
+      }
+      case "answer": {
+        if (
+          paneExists(msg.pane) &&
+          Number.isInteger(msg.option) && msg.option >= 1 && msg.option <= 9
+        ) {
+          answerPane(msg.pane, msg.option, typeof msg.note === "string" ? msg.note.trim() : "");
         }
         break;
       }
@@ -356,6 +436,30 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       }
       const text = body.text.replace(/\s+$/, "");
       link.prompt(pane.id, pane.agent ? text.replaceAll("\n", "\\\r") : text);
+      json(res, 200, { ok: true });
+      return true;
+    }
+    // Answer a parsed question dialog by option number — what the iOS
+    // notification's numbered actions hit. `note` (optional) follows as a
+    // regular prompt after the dialog closes.
+    case "/api/answer": {
+      if (
+        typeof body.pane !== "number" ||
+        !Number.isInteger(body.option) || body.option < 1 || body.option > 9
+      ) {
+        json(res, 400, { error: "need { pane, option (1-9), note? }" });
+        return true;
+      }
+      if (!link.up) {
+        json(res, 503, { error: "zodiac link down" });
+        return true;
+      }
+      const pane = link.state?.panes.find((p) => p.id === body.pane);
+      if (!pane) {
+        json(res, 404, { error: "no such pane" });
+        return true;
+      }
+      answerPane(pane.id, body.option, typeof body.note === "string" ? body.note.trim() : "");
       json(res, 200, { ok: true });
       return true;
     }

@@ -13,6 +13,10 @@ export interface PaneState {
   thinking: boolean;
   recap: string | null;
   subtitle: string | null;
+  /** Parsed question dialog, merged in by the bridge while the pane is
+      needs_input with a numbered picker on screen (bridge/question.ts). */
+  question?: string;
+  options?: string[];
 }
 
 export interface SessionState {

@@ -118,6 +118,12 @@ class AstrolabeClient {
   promptPane(pane: number, text: string) {
     this.send({ t: "prompt", pane, text });
   }
+
+  /** Answer a question dialog by option number, optionally following up
+      with a note once the dialog closes (wired server-side). */
+  answer(pane: number, option: number, note?: string) {
+    this.send({ t: "answer", pane, option, note });
+  }
 }
 
 export const client = new AstrolabeClient();

@@ -267,6 +267,36 @@ export function Pane({
 
       {/* composer */}
       <div className="border-t border-card-edge bg-sky-mid/70 backdrop-blur safe-bottom">
+        {/* Question dialog on screen: real answer buttons. Typing into the
+            composer would feed keystrokes to a picker that ignores text —
+            these send the option's digit instead (plus the composer text
+            as a follow-up note, if any). */}
+        {pane.status === "needs_input" && pane.options?.length ? (
+          <div className="px-2 pt-2">
+            {pane.question && (
+              <div className="mb-1.5 text-subhead text-zinc-300">{pane.question}</div>
+            )}
+            <div className="flex flex-col gap-1.5">
+              {pane.options.map((opt, i) => (
+                <button
+                  key={i}
+                  onClick={() => {
+                    client.answer(pane.id, i + 1, text.trim() || undefined);
+                    setText("");
+                    hapticTap("success", header.current);
+                  }}
+                  className="flex items-baseline gap-2 rounded-xl border border-gold/40 bg-sky-deep px-3 py-2 text-left text-subhead active:scale-[0.98]"
+                >
+                  <span className="font-mono text-gold">{i + 1}.</span>
+                  <span className="min-w-0 flex-1">{opt}</span>
+                </button>
+              ))}
+            </div>
+            <div className="mt-1 text-caption text-zinc-500">
+              text below is sent as a note with your answer
+            </div>
+          </div>
+        ) : null}
         <div className="flex items-end gap-2 px-2 pt-2 pb-1.5">
           <Button
             size="icon"

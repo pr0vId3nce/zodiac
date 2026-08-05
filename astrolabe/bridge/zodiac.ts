@@ -121,6 +121,28 @@ export class ZodiacLink extends EventEmitter {
     this.send(T_READ_SCREEN, pane, Buffer.alloc(0));
   }
 
+  private pendingReads = new Map<number, ((text: string | null) => void)[]>();
+
+  /** One-shot rendered-screen fetch. Unlike the `screen` event (deduped
+      against lastScreens for poll-mode mirroring), this always resolves
+      with the current screen — or null after `timeoutMs` if the link is
+      down or the server never answers. */
+  readScreenOnce(pane: number, timeoutMs = 2000): Promise<string | null> {
+    return new Promise((resolve) => {
+      const list = this.pendingReads.get(pane) ?? [];
+      list.push(resolve);
+      this.pendingReads.set(pane, list);
+      this.readScreen(pane);
+      setTimeout(() => {
+        const cur = this.pendingReads.get(pane) ?? [];
+        if (cur.includes(resolve)) {
+          this.pendingReads.set(pane, cur.filter((f) => f !== resolve));
+          resolve(null);
+        }
+      }, timeoutMs);
+    });
+  }
+
   private connect() {
     if (this.stopped) return;
     const sock = net.connect(this.socketPath);
@@ -240,6 +262,11 @@ export class ZodiacLink extends EventEmitter {
       }
       case T_SCREEN: {
         const text = data.toString("utf8");
+        const waiters = this.pendingReads.get(pane);
+        if (waiters?.length) {
+          this.pendingReads.set(pane, []);
+          for (const w of waiters) w(text);
+        }
         if (this.lastScreens.get(pane) !== text) {
           this.lastScreens.set(pane, text);
           this.emit("screen", pane, text);

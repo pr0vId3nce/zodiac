@@ -19,6 +19,9 @@ Also here: a phone UI over Tailscale ([astrolabe](astrolabe/README.md)), a
 scripting CLI, kitty-graphics support inside panes, and a watchdog that
 un-sticks Claude Code when the API stalls.
 
+The built-in chat panel defaults to the author's own model server. To point
+it at a model of your own instead, see [LOCAL_MODEL.md](LOCAL_MODEL.md).
+
 ---
 
 ## Install
@@ -259,7 +262,10 @@ doesn't have — three tool rounds per question, then it has to answer.
 Searching shells out to `curl`, which must be on the PATH of whatever machine
 runs the client.
 
-These have no settings-page rows; they live in
+`chat_endpoint`, `chat_model`, `chat_ssh`, and `chat_service` are editable
+right from the settings page (see below) — that's how you point zodiac at
+your own model instead of the author's `bigbox`. See
+[LOCAL_MODEL.md](LOCAL_MODEL.md) for a walkthrough. The rest live only in
 `~/.config/zodiac/config.json`:
 
 | key | default | what |
@@ -277,7 +283,9 @@ These have no settings-page rows; they live in
 
 These were once named `wizard_*`; a config using the old names still loads
 (each key kept an alias), and gets rewritten to the new ones the next time
-settings are saved.
+settings are saved. Changes to the four connection settings apply on the
+*next* zodiac launch (`Alt+Q` to detach, then `zodiac` to reattach) — the
+chat worker connects once at startup, not live.
 
 With `chat_act` on, the panel can offer to submit a prompt to a pane or
 send raw keystrokes, but neither ever fires on its own: each call shows a
@@ -323,6 +331,7 @@ carries a keybinding reference in its right column.
 | Cursor type / blink / color | Follow the inner app or force block/underline/bar; blink on/off; focused-pane tint |
 | Bottom controls | Hide the keybinding hints in the status bar |
 | Chat character | Who answers in the chat panel: a plain `assistant`, an ascii `oracle`, or `hal` |
+| Chat endpoint / model / ssh / service | Free-text fields (`Enter` to edit, `Enter` again to save, `Esc` to cancel) pointing the chat panel at your own OpenAI-compatible server instead of `bigbox` — see [LOCAL_MODEL.md](LOCAL_MODEL.md) |
 
 ## Mouse
 

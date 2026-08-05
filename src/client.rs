@@ -45,7 +45,11 @@ const RESIZE_SQUELCH: Duration = Duration::from_millis(1200);
 /// blinks (closes briefly) once per period.
 const EYE_PERIOD_MS: u64 = 4000;
 const EYE_BLINK_MS: u64 = 160;
-const SETTINGS_ROWS: usize = 26;
+const SETTINGS_ROWS: usize = 30;
+
+/// Settings rows at and beyond this index are free-text fields (edited via
+/// `Mode::SettingsEdit`) rather than cyclable presets.
+const TEXT_SETTINGS_START: usize = 26;
 
 /// The key reference pinned to the settings page's Controls column — the
 /// same bindings the bottom bar hints at (hideable there).
@@ -285,6 +289,10 @@ enum Mode {
     Normal,
     Rename { buf: String },
     Settings,
+    /// Editing one free-text field on the Settings page (chat endpoint,
+    /// model, ssh destination, or service name); `row` is the
+    /// `settings_row` it was opened from, so Enter/Esc return there.
+    SettingsEdit { row: usize, buf: String },
     /// Fuzzy-find a pane by name (Alt+/); `jump_sel` on `App` tracks which
     /// of the live-filtered matches is highlighted.
     Jump { buf: String },
@@ -687,7 +695,7 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
             } else {
                 250
             }
-        } else if app.any_working() || matches!(app.mode, Mode::Settings) {
+        } else if app.any_working() || matches!(app.mode, Mode::Settings | Mode::SettingsEdit { .. }) {
             50
         } else if app.orb_active() && app.orb_blinking() {
             80 // keep the palantir breathing
@@ -928,7 +936,7 @@ impl App {
     /// to select in those panes anyway (the usual terminal convention).
     fn handle_mouse(&mut self, m: MouseEvent) {
         use MouseEventKind as K;
-        if let Mode::Settings = self.mode {
+        if matches!(self.mode, Mode::Settings | Mode::SettingsEdit { .. }) {
             return;
         }
         if self.home {
@@ -1413,6 +1421,28 @@ impl App {
             return;
         }
 
+        if let Mode::SettingsEdit { row, buf } = &mut self.mode {
+            let row = *row;
+            match key.code {
+                KeyCode::Enter => {
+                    let val = buf.trim().to_string();
+                    self.apply_settings_edit(row, val);
+                    self.mode = Mode::Settings;
+                }
+                KeyCode::Esc => self.mode = Mode::Settings,
+                KeyCode::Backspace => {
+                    buf.pop();
+                }
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    if buf.chars().count() < 200 {
+                        buf.push(c);
+                    }
+                }
+                _ => {}
+            }
+            return;
+        }
+
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let shift = key.modifiers.contains(KeyModifiers::SHIFT);
@@ -1427,8 +1457,18 @@ impl App {
                 KeyCode::Down | KeyCode::Tab => {
                     self.settings_row = (self.settings_row + 1) % SETTINGS_ROWS
                 }
-                KeyCode::Left => self.cycle_setting(-1),
-                KeyCode::Right | KeyCode::Enter => self.cycle_setting(1),
+                KeyCode::Left => {
+                    if self.settings_row < TEXT_SETTINGS_START {
+                        self.cycle_setting(-1)
+                    }
+                }
+                KeyCode::Right | KeyCode::Enter => {
+                    if self.settings_row < TEXT_SETTINGS_START {
+                        self.cycle_setting(1)
+                    } else {
+                        self.start_settings_edit()
+                    }
+                }
                 _ => {}
             }
             return;
@@ -2455,9 +2495,41 @@ impl App {
                     cycle_pick(&choices, self.cursor_color_name(), dir);
             }
             24 => self.settings.hide_controls = !self.settings.hide_controls,
-            _ => {
+            25 => {
                 self.settings.chat_face = cycle_pick(CHAT_FACES, self.chat_face(), dir);
             }
+            _ => {}
+        }
+        self.settings.save();
+    }
+
+    /// Enter free-text edit mode for the settings row under the cursor
+    /// (rows 26-29: chat endpoint/model/ssh/service), seeded with the
+    /// field's current value. No-op on cyclable rows.
+    fn start_settings_edit(&mut self) {
+        let buf = match self.settings_row {
+            26 => self.settings.chat_endpoint.clone(),
+            27 => self.settings.chat_model.clone(),
+            28 => self.settings.chat_ssh.clone(),
+            29 => self.settings.chat_service.clone(),
+            _ => return,
+        };
+        self.mode = Mode::SettingsEdit {
+            row: self.settings_row,
+            buf,
+        };
+    }
+
+    /// Commit a `Mode::SettingsEdit` buffer back into `Settings` and persist.
+    /// Takes effect on the next zodiac launch — the chat worker's config is
+    /// built once at startup, not re-read live.
+    fn apply_settings_edit(&mut self, row: usize, val: String) {
+        match row {
+            26 => self.settings.chat_endpoint = val,
+            27 => self.settings.chat_model = val,
+            28 => self.settings.chat_ssh = val,
+            29 => self.settings.chat_service = val,
+            _ => {}
         }
         self.settings.save();
     }
@@ -2589,7 +2661,7 @@ impl App {
                 self.draw_home(f, body);
             }
             self.draw_status(f, status);
-            if let Mode::Settings = self.mode {
+            if matches!(self.mode, Mode::Settings | Mode::SettingsEdit { .. }) {
                 self.draw_settings(f, area);
             }
             if matches!(self.mode, Mode::Jump { .. }) {
@@ -2678,7 +2750,7 @@ impl App {
 
         self.draw_status(f, status);
 
-        if let Mode::Settings = self.mode {
+        if matches!(self.mode, Mode::Settings | Mode::SettingsEdit { .. }) {
             self.draw_settings(f, area);
         }
         if matches!(self.mode, Mode::Jump { .. }) {
@@ -2804,9 +2876,9 @@ impl App {
     fn draw_settings(&self, f: &mut Frame, area: Rect) {
         // Wide terminals get a second column: the Controls key reference,
         // always visible here even when the bottom-bar hints are hidden.
-        let two_col = area.width >= 80;
-        let w = if two_col { 78 } else { 48.min(area.width) };
-        let h = 31.min(area.height);
+        let two_col = area.width >= 92;
+        let w = if two_col { 90 } else { 60.min(area.width) };
+        let h = 36.min(area.height);
         let rect = Rect {
             x: (area.width - w) / 2,
             y: (area.height - h) / 2,
@@ -2821,7 +2893,7 @@ impl App {
         let outer = block.inner(rect);
         f.render_widget(block, rect);
         let (inner, controls) = if two_col {
-            let [l, r] = Layout::horizontal([Constraint::Length(46), Constraint::Min(1)])
+            let [l, r] = Layout::horizontal([Constraint::Length(58), Constraint::Min(1)])
                 .areas(outer);
             (l, Some(r))
         } else {
@@ -2868,6 +2940,35 @@ impl App {
             ];
             spans.extend(preview);
             Line::from(spans)
+        };
+        let editing_row = match &self.mode {
+            Mode::SettingsEdit { row, buf } => Some((*row, buf.as_str())),
+            _ => None,
+        };
+        let text_row = |i: usize, label: &str, value: &str, placeholder: &str| {
+            let sel = self.settings_row == i;
+            let editing = editing_row.filter(|(r, _)| *r == i).map(|(_, b)| b);
+            let marker = if sel { "›" } else { " " };
+            let label_style = if sel {
+                Style::default().fg(Color::Cyan).bold()
+            } else {
+                Style::default().bold()
+            };
+            let (shown, val_style) = match editing {
+                Some(buf) => (
+                    format!("{buf}▏"),
+                    Style::default().fg(Color::White).bold(),
+                ),
+                None if value.is_empty() => (
+                    placeholder.to_string(),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                None => (value.to_string(), Style::default().fg(Color::Yellow)),
+            };
+            Line::from(vec![
+                Span::styled(format!("{marker} {label:<18}"), label_style),
+                Span::styled(shown, val_style),
+            ])
         };
         let shimmer_preview = self.shimmer_spans("shimmer", Style::default().fg(Color::Gray));
         let lines = vec![
@@ -3186,9 +3287,32 @@ impl App {
                     ),
                 }],
             ),
+            text_row(
+                26,
+                "Chat endpoint",
+                &self.settings.chat_endpoint,
+                "http://bigbox:8091",
+            ),
+            text_row(
+                27,
+                "Chat model",
+                &self.settings.chat_model,
+                "qwen3.6-35b-a3b",
+            ),
+            text_row(28, "Chat ssh", &self.settings.chat_ssh, "des@bigbox"),
+            text_row(
+                29,
+                "Chat service",
+                &self.settings.chat_service,
+                "llama-server",
+            ),
+            Line::from(Span::styled(
+                "  restart zodiac to apply chat connection changes",
+                Style::default().fg(Color::DarkGray),
+            )),
             Line::default(),
             Line::from(Span::styled(
-                " ↑/↓ select · ←/→ change · Esc close",
+                " ↑/↓ select · ←/→ change · Enter edits text · Esc close",
                 Style::default().fg(Color::DarkGray),
             )),
         ];
@@ -4091,7 +4215,9 @@ impl App {
         // off home entirely. The pairing overlay overrides all of that —
         // it takes over the page regardless of the home view mode.
         if !self.pair_open
-            && (!self.home || matches!(self.mode, Mode::Settings) || self.home_view() == "list")
+            && (!self.home
+                || matches!(self.mode, Mode::Settings | Mode::SettingsEdit { .. })
+                || self.home_view() == "list")
         {
             if !self.kitty_placed.is_empty() {
                 let _ = crate::kitty::delete_placements(&mut out);
@@ -4249,7 +4375,9 @@ impl App {
             return;
         }
         use std::io::Write as _;
-        let target: Option<u64> = if self.home || matches!(self.mode, Mode::Settings) {
+        let target: Option<u64> = if self.home
+            || matches!(self.mode, Mode::Settings | Mode::SettingsEdit { .. })
+        {
             None
         } else {
             self.active_id()
@@ -4558,7 +4686,7 @@ impl App {
         let mut out = std::io::stdout();
         let rect = self.chat_art_rect;
         let want = self.home
-            && !matches!(self.mode, Mode::Settings)
+            && !matches!(self.mode, Mode::Settings | Mode::SettingsEdit { .. })
             && self.chat_rect.width > 0
             && rect.width >= 8
             && rect.height >= 4

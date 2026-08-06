@@ -2431,6 +2431,53 @@ impl App {
         }
     }
 
+    /// Whether the Card numeral setting is one of the zodiac-sigil styles.
+    fn zodiac_numerals(&self) -> bool {
+        matches!(self.card_numeral_style(), "zodiac" | "zodiac-white")
+    }
+
+    /// The pane's identity label per the Card numeral setting: `♈ I`
+    /// (sigil + roman) in zodiac styles, plain roman or arabic otherwise.
+    fn pane_label(&self, n: usize) -> String {
+        match self.card_numeral_style() {
+            "zodiac" | "zodiac-white" => format!(
+                "{}\u{FE0E} {}",
+                ZODIAC[(n - 1) % ZODIAC.len()],
+                roman(n)
+            ),
+            "arabic" => n.to_string(),
+            _ => roman(n),
+        }
+    }
+
+    /// `pane_label`'s width in cells (U+FE0E occupies no cell).
+    fn pane_label_width(&self, n: usize) -> usize {
+        let l = self.pane_label(n);
+        l.chars().count() - l.matches('\u{FE0E}').count()
+    }
+
+    /// The compact one-column badge for tight rows (sidebar, card
+    /// roundel): the sigil in zodiac styles, the numeral otherwise.
+    /// Returns (text, width in cells).
+    fn pane_badge(&self, n: usize) -> (String, usize) {
+        match self.card_numeral_style() {
+            "zodiac" | "zodiac-white" => {
+                (format!("{}\u{FE0E}", ZODIAC[(n - 1) % ZODIAC.len()]), 1)
+            }
+            "arabic" => {
+                let w = if self.panes.len() >= 10 { 2 } else { 1 };
+                (format!("{n:>w$}"), w)
+            }
+            _ => {
+                let w = (1..=self.panes.len().max(n))
+                    .map(|k| roman(k).len())
+                    .max()
+                    .unwrap_or(1);
+                (format!("{:>w$}", roman(n)), w)
+            }
+        }
+    }
+
     fn cursor_type(&self) -> &'static str {
         pick(CURSOR_TYPES, &self.settings.cursor_style, "auto")
     }
@@ -3970,12 +4017,11 @@ impl App {
             s
         };
         let iw = rect.width as usize;
-        let sigil = format!("{}\u{FE0E}", ZODIAC[(num - 1) % ZODIAC.len()]);
-        let numeral = roman(num);
+        let label = self.pane_label(num);
+        let label_w = self.pane_label_width(num);
         let status = format!("{} {}", STATUS_GLYPH[accent], STATUS_WORD[accent]);
         let title_style = base(pal.fg).add_modifier(Modifier::BOLD);
-        let name_max =
-            iw.saturating_sub(9 + numeral.chars().count() + status.chars().count());
+        let name_max = iw.saturating_sub(6 + label_w + status.chars().count());
         let name = truncate(&p.name, name_max);
         let mut row1: Vec<Span> = vec![
             Span::styled(
@@ -3983,17 +4029,14 @@ impl App {
                 Style::default().fg(self.reticle_color()).bold(),
             ),
             Span::styled("▎", base(crate::theme::STATUS_RAIL[accent])),
-            Span::styled(
-                format!("{sigil} {numeral:<3} "),
-                base(pal.accent),
-            ),
+            Span::styled(format!("{label} "), base(pal.accent)),
         ];
         if accent == 1 || accent == 2 {
             row1.extend(self.shimmer_spans(&name, title_style));
         } else {
             row1.push(Span::styled(name.clone(), title_style));
         }
-        let used = 7 + numeral.chars().count().max(3) + name.chars().count();
+        let used = 3 + label_w + name.chars().count();
         row1.push(Span::raw(" ".repeat(iw.saturating_sub(used + status.chars().count() + 1))));
         row1.push(Span::styled(
             status,
@@ -4170,8 +4213,8 @@ impl App {
                 .add_modifier(Modifier::BOLD)
         };
         let tw = rect.width.saturating_sub(mascot_w) as usize;
-        let name = truncate(&p.name, tw.saturating_sub(18));
-        let sigil = format!("{}\u{FE0E}", ZODIAC[(num - 1) % ZODIAC.len()]);
+        let (badge, badge_w) = self.pane_badge(num);
+        let name = truncate(&p.name, tw.saturating_sub(17 + badge_w));
         let mut title_spans = vec![
             Span::styled(
                 if selected { "⌜" } else { " " },
@@ -4182,7 +4225,7 @@ impl App {
                 Style::default().fg(crate::theme::color(crate::theme::STATUS_RAIL[accent])),
             ),
             Span::styled(
-                format!("{sigil} "),
+                format!("{badge} "),
                 Style::default().fg(crate::theme::color(pal.accent)),
             ),
         ];
@@ -4319,20 +4362,14 @@ impl App {
             return;
         }
 
-        // Row 1: roundel sigil (ring is painted, glyph is text) · numeral +
-        // name · right-aligned status word.
-        let sigil = format!("{}\u{FE0E}", ZODIAC[(num - 1) % ZODIAC.len()]);
-        let numeral = match self.card_numeral_style() {
-            // Zodiac numerals would repeat the roundel glyph.
-            "zodiac" | "zodiac-white" => String::new(),
-            _ => format!("{} · ", self.card_numeral(num)),
-        };
+        // Row 1: roundel badge (ring painted for sigil styles, the glyph
+        // or numeral is text) · name · right-aligned status word.
+        let (badge, badge_w) = self.pane_badge(num);
         let status = format!("{} {}", STATUS_GLYPH[accent], STATUS_WORD[accent]);
         let status_cells = status.chars().count();
-        let name_max = iw
-            .saturating_sub(4 + numeral.chars().count() + status_cells + 2);
+        let name_max = iw.saturating_sub(3 + badge_w + status_cells + 2);
         let name = truncate(&p.name, name_max);
-        let left_cells = 4 + numeral.chars().count() + name.chars().count();
+        let left_cells = 3 + badge_w + name.chars().count();
         let pad = iw.saturating_sub(left_cells + status_cells);
         let title_style = Style::default().fg(fg).add_modifier(Modifier::BOLD);
         let mut row1: Vec<Span> = vec![
@@ -4342,12 +4379,9 @@ impl App {
                 // Text fallback for the painted status rail.
                 Span::styled("▎", Style::default().fg(tone(crate::theme::STATUS_RAIL[accent])))
             },
-            Span::styled(sigil, Style::default().fg(acc)),
+            Span::styled(badge, Style::default().fg(acc)),
             Span::raw("  "),
         ];
-        if !numeral.is_empty() {
-            row1.push(Span::styled(numeral, Style::default().fg(acc)));
-        }
         if accent == 1 || accent == 2 {
             // Working/thinking names shimmer, same as the sidebar.
             row1.extend(self.shimmer_spans(&name, title_style));
@@ -4734,7 +4768,7 @@ impl App {
         // Setting changes repaint image data in place; selection changes
         // are handled by the per-placement diff below.
         let style_key = format!(
-            "{}|{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}|{}",
             self.settings.card_icon,
             self.card_outline(),
             color_by_name(&self.settings.select_color, "gold").0,
@@ -4742,6 +4776,7 @@ impl App {
             self.select_style(),
             self.claude_style(),
             self.theme_name(),
+            self.card_numeral_style(),
         );
         if self.kitty_last_icon != style_key {
             self.kitty_sent.clear();
@@ -4865,14 +4900,16 @@ impl App {
                     } else {
                         pal.edge
                     };
-                    // Ring centered on the sigil glyph draw_card places at
+                    // Ring centered on the badge glyph draw_card places at
                     // inner cell (2, 1) — one margin cell + one pad row in.
-                    let roundel = (
+                    // Only sigil styles get the ring: a roman or arabic
+                    // badge can run wider than one cell and would poke out.
+                    let roundel = self.zodiac_numerals().then_some((
                         2.5 * cw as f32,
                         1.5 * ch as f32,
                         (ch as f32 * 0.95).min(cw as f32 * 1.6),
                         pal.accent,
-                    );
+                    ));
                     let style = crate::kitty::FlatCard {
                         fill,
                         edge,
@@ -4880,7 +4917,7 @@ impl App {
                         // The Select color setting owns the reticle;
                         // "gold" (the default) resolves to theme brass.
                         brackets: selected.then_some(self.reticle_rgb()),
-                        roundel: Some((roundel.0, roundel.1, roundel.2, roundel.3)),
+                        roundel,
                     };
                     let rgba = crate::kitty::flat_card_rgba(pw, ph, &style);
                     let _ = crate::kitty::transmit(&mut out, id, pw, ph, &rgba);
@@ -5560,8 +5597,8 @@ impl App {
         let acc = crate::theme::color(pal.accent);
         let dim = Style::default().fg(crate::theme::color(pal.dim));
         let iw = area.width as usize;
-        let sigil = format!("{}\u{FE0E}", ZODIAC[self.active % ZODIAC.len()]);
-        let numeral = roman(self.active + 1);
+        let label = self.pane_label(self.active + 1);
+        let label_w = self.pane_label_width(self.active + 1);
         let meta = self
             .home_state
             .as_ref()
@@ -5603,8 +5640,8 @@ impl App {
         } else {
             ("", Style::default())
         };
-        let left = format!(" {sigil} {numeral} · ");
-        let left_cells = 6 + numeral.chars().count();
+        let left = format!(" {label} · ");
+        let left_cells = 4 + label_w;
         let name = truncate(
             &p.name,
             iw.saturating_sub(left_cells + info.chars().count() + word.chars().count() + 6),
@@ -5643,22 +5680,27 @@ impl App {
         );
     }
 
-    /// The 3-cell sidebar row prefix for a background pane: `▎` status
-    /// rail + the pane's sigil. Same width as the old `NN ` number column,
-    /// so every padding calculation downstream holds.
-    fn sidebar_prefix(&self, i: usize) -> Vec<Span<'static>> {
+    /// The sidebar row prefix for a background pane: `▎` status rail +
+    /// the pane's badge (sigil or numeral, per the Card numeral setting).
+    /// Returns the spans and their width in cells so the row's padding
+    /// math can follow the badge style.
+    fn sidebar_prefix(&self, i: usize) -> (Vec<Span<'static>>, u16) {
         let pal = self.palette();
-        vec![
-            Span::styled(
-                "▎",
-                Style::default()
-                    .fg(crate::theme::color(crate::theme::STATUS_RAIL[self.pane_accent(i)])),
-            ),
-            Span::styled(
-                format!("{}\u{FE0E} ", ZODIAC[i % ZODIAC.len()]),
-                Style::default().fg(crate::theme::color(pal.accent)),
-            ),
-        ]
+        let (badge, bw) = self.pane_badge(i + 1);
+        (
+            vec![
+                Span::styled(
+                    "▎",
+                    Style::default()
+                        .fg(crate::theme::color(crate::theme::STATUS_RAIL[self.pane_accent(i)])),
+                ),
+                Span::styled(
+                    format!("{badge} "),
+                    Style::default().fg(crate::theme::color(pal.accent)),
+                ),
+            ],
+            bw as u16 + 2,
+        )
     }
 
     fn draw_sidebar(&mut self, f: &mut Frame, area: Rect) {
@@ -5777,9 +5819,10 @@ impl App {
                 // name itself shimmers while the spinner runs.
                 let anim = self.working_anim(false);
                 let aw = anim.chars().count() as u16;
-                let w = inner.width.saturating_sub(3 + aw + ssh_len as u16) as usize;
+                let (prefix, pw) = self.sidebar_prefix(i);
+                let w = inner.width.saturating_sub(pw + aw + ssh_len as u16) as usize;
                 let name = truncate(&p.name, w.saturating_sub(1));
-                let mut spans = self.sidebar_prefix(i);
+                let mut spans = prefix;
                 spans.extend(self.shimmer_spans(&name, style));
                 if ssh.is_some() {
                     spans.push(Span::styled("-SSH", ssh_tag_style));
@@ -5788,8 +5831,10 @@ impl App {
                 spans.push(Span::styled(anim, anim_style));
                 Line::from(spans)
             } else {
-                let name = truncate(&p.name, inner.width.saturating_sub(4 + ssh_len as u16) as usize);
-                let mut spans = self.sidebar_prefix(i);
+                let (prefix, pw) = self.sidebar_prefix(i);
+                let name =
+                    truncate(&p.name, inner.width.saturating_sub(pw + 1 + ssh_len as u16) as usize);
+                let mut spans = prefix;
                 spans.push(Span::styled(name, style));
                 if ssh.is_some() {
                     spans.push(Span::styled("-SSH", ssh_tag_style));
@@ -5852,12 +5897,7 @@ impl App {
             let pal = self.palette();
             if let Some(p) = self.panes.get(self.active) {
                 spans.push(Span::styled(
-                    format!(
-                        " {}\u{FE0E} {} · {}",
-                        ZODIAC[self.active % ZODIAC.len()],
-                        roman(self.active + 1),
-                        p.name
-                    ),
+                    format!(" {} · {}", self.pane_label(self.active + 1), p.name),
                     Style::default().fg(crate::theme::color(pal.accent)).bold(),
                 ));
                 let title = p.parser.screen().title().to_string();

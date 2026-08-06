@@ -4406,17 +4406,24 @@ impl App {
     fn draw_chat(&mut self, f: &mut Frame, area: Rect) {
         use crate::chat::ChatStatus as S;
         self.chat_rect = area;
-        let violet = Color::Indexed(135);
-        let gold = Color::Indexed(179);
+        let pal = self.palette();
+        // The face's own accent: the oracle stays violet, HAL burns red,
+        // the plain assistant borrows the theme brass.
+        let violet = match self.chat_face() {
+            "hal" => Color::Indexed(203),
+            "assistant" => crate::theme::color(pal.accent),
+            _ => Color::Indexed(135),
+        };
+        let gold = crate::theme::color(pal.accent);
         let border_style = if self.chat_focus {
             Style::default().fg(violet)
         } else {
-            Style::default().fg(Color::Indexed(60))
+            Style::default().fg(crate::theme::color(pal.edge))
         };
         let title_style = if self.chat_status == Some(S::Awake) {
-            Style::default().fg(Color::Indexed(220)).bold()
+            Style::default().fg(crate::theme::color(pal.gold_soft)).bold()
         } else {
-            Style::default().fg(Color::Indexed(246)).bold()
+            Style::default().fg(crate::theme::color(pal.dim)).bold()
         };
         f.render_widget(Clear, area);
         let block = Block::bordered()
@@ -4444,6 +4451,13 @@ impl App {
             // rather than the named Black: that's ANSI color 0, which most
             // terminal themes tint dark grey rather than true black.
             f.render_widget(Block::default().style(Style::default().bg(OLED_BLACK)), inner);
+        } else {
+            // The sanctum's own ground for the other faces — a shade
+            // deeper than the page so the panel reads as an inset room.
+            f.render_widget(
+                Block::default().style(Style::default().bg(Color::Rgb(6, 8, 16))),
+                inner,
+            );
         }
         let mut y = inner.y;
         // Portrait zone — HAL's image is painted by chat_overlay; the
@@ -4496,16 +4510,35 @@ impl App {
             Some(S::Away) => (format!("{who} is away"), Color::Indexed(203)),
             None => (format!("seeking {who}…"), Color::DarkGray),
         };
+        // Status + which mind on which machine, from the chat settings.
+        let model = if self.settings.chat_model.is_empty() {
+            "qwen3.6-35b-a3b"
+        } else {
+            &self.settings.chat_model
+        };
+        let host = {
+            let e = &self.settings.chat_endpoint;
+            let e = if e.is_empty() { "http://bigbox:8091" } else { e };
+            e.trim_start_matches("http://")
+                .trim_start_matches("https://")
+                .split([':', '/'])
+                .next()
+                .unwrap_or("bigbox")
+                .to_string()
+        };
+        let mline = format!(" · {} · {}", truncate(model, 18), host);
         f.render_widget(
-            Paragraph::new(stxt)
-                .alignment(Alignment::Center)
-                .style(Style::default().fg(scol).italic()),
+            Paragraph::new(Line::from(vec![
+                Span::styled(stxt, Style::default().fg(scol).italic()),
+                Span::styled(mline, Style::default().fg(crate::theme::color(pal.faint))),
+            ]))
+            .alignment(Alignment::Center),
             Rect { x: inner.x, y, width: inner.width, height: 1 },
         );
         y += 1;
         f.render_widget(
             Paragraph::new("─".repeat(inner.width as usize))
-                .style(Style::default().fg(Color::Indexed(238))),
+                .style(Style::default().fg(crate::theme::color(pal.edge))),
             Rect { x: inner.x, y, width: inner.width, height: 1 },
         );
         y += 1;
@@ -4545,12 +4578,19 @@ impl App {
                     }
                 }
                 CHAT_ACTION => {
-                    // Left-aligned and bold, unlike the centered italic
-                    // notes — this is the one line in the transcript that
-                    // wants a keypress, not just a read.
-                    let st = Style::default().fg(Color::Indexed(220)).bold();
-                    for l in wrap_text(text, wrapw) {
-                        lines.push(Line::from(Span::styled(l, st)));
+                    // Left-aligned and bold in gold-soft, unlike the
+                    // centered italic notes — this is the one line in the
+                    // transcript that wants a keypress, not just a read.
+                    let st = Style::default()
+                        .fg(crate::theme::color(pal.gold_soft))
+                        .bold();
+                    for (i, l) in wrap_text(text, wrapw.saturating_sub(2)).into_iter().enumerate() {
+                        let head = if i == 0 {
+                            Span::styled("▸ ", Style::default().fg(gold).bold())
+                        } else {
+                            Span::raw("  ")
+                        };
+                        lines.push(Line::from(vec![head, Span::styled(l, st)]));
                     }
                 }
                 r => {
@@ -4621,20 +4661,30 @@ impl App {
             );
         }
 
+        let phosphor = crate::theme::color(pal.phosphor);
         let input_line = if self.chat_focus {
             let budget = inner.width.saturating_sub(4) as usize;
             let cs: Vec<char> = self.chat_input.chars().collect();
             let tail: String = cs[cs.len().saturating_sub(budget)..].iter().collect();
             Line::from(vec![
-                Span::styled("❯ ", Style::default().fg(gold).bold()),
-                Span::styled(tail, Style::default().fg(Color::Indexed(252))),
-                Span::styled("\u{2588}", Style::default().fg(Color::Yellow)),
+                Span::styled("❯ ", Style::default().fg(phosphor).bold()),
+                Span::styled(tail, Style::default().fg(crate::theme::color(pal.fg))),
+                Span::styled("\u{2588}", Style::default().fg(phosphor)),
             ])
         } else {
-            Line::from(Span::styled(
-                "❯ Alt+G · /wake · /sleep",
-                Style::default().fg(Color::Indexed(240)),
-            ))
+            let ask = format!("❯ ask {who}… ");
+            let hint = "alt+g · /why · /wake · /sleep ";
+            let pad = (inner.width as usize)
+                .saturating_sub(ask.chars().count() + hint.chars().count());
+            Line::from(vec![
+                Span::styled("❯ ", Style::default().fg(phosphor)),
+                Span::styled(
+                    format!("ask {who}… "),
+                    Style::default().fg(crate::theme::color(pal.faint)),
+                ),
+                Span::raw(" ".repeat(pad)),
+                Span::styled(hint, Style::default().fg(crate::theme::color(pal.faint))),
+            ])
         };
         f.render_widget(
             Paragraph::new(input_line),

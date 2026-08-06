@@ -3605,25 +3605,8 @@ impl App {
             let strip = Rect { height: 1, ..area };
             let label = Style::default().fg(crate::theme::color(pal.faint));
             let value = Style::default().fg(crate::theme::color(pal.dim));
-            // `❯ zodiac` with the blinking block cursor, same masthead as
-            // the iOS app. The session name stays visible (dim) only when
-            // it isn't the default "main".
-            let blink = (self.anim_start.elapsed().as_millis() / 530) % 2 == 0;
-            let mut spans = vec![
-                Span::styled(
-                    " ❯ ",
-                    Style::default().fg(crate::theme::color(pal.phosphor)).bold(),
-                ),
-                Span::styled(
-                    "zodiac",
-                    Style::default().fg(crate::theme::color(pal.accent)).bold(),
-                ),
-                Span::styled(
-                    if blink { "▊" } else { " " },
-                    Style::default().fg(crate::theme::color(pal.phosphor)),
-                ),
-                Span::styled(format!(" {}", hostname()), value),
-            ];
+            let mut spans = self.masthead_spans();
+            spans.push(Span::styled(format!(" {}", hostname()), value));
             if self.session != "main" {
                 spans.push(Span::styled(format!(" · {}", self.session), value));
             }
@@ -5695,6 +5678,27 @@ impl App {
         );
     }
 
+    /// `❯ zodiac` with a slow-blinking thin cursor — the masthead the iOS
+    /// app wears, shared by the home strip and the sidebar header.
+    fn masthead_spans(&self) -> Vec<Span<'static>> {
+        let pal = self.palette();
+        let blink = (self.anim_start.elapsed().as_millis() / 900) % 2 == 0;
+        vec![
+            Span::styled(
+                " ❯ ",
+                Style::default().fg(crate::theme::color(pal.phosphor)).bold(),
+            ),
+            Span::styled(
+                "zodiac",
+                Style::default().fg(crate::theme::color(pal.accent)).bold(),
+            ),
+            Span::styled(
+                if blink { "▏" } else { " " },
+                Style::default().fg(crate::theme::color(pal.phosphor)),
+            ),
+        ]
+    }
+
     /// The sidebar row prefix for a background pane: `▎` status rail +
     /// the pane's badge (sigil or numeral, per the Card numeral setting).
     /// Returns the spans and their width in cells so the row's padding
@@ -5734,12 +5738,17 @@ impl App {
             !self.collapsed && inner.height as usize >= self.panes.len() + 3 && inner.width >= 8;
         self.sidebar_row_off = if header { 2 } else { 0 };
         if header {
-            lines.push(Line::from(vec![
-                Span::styled(
-                    format!(" ☾ {}", truncate(&self.session, inner.width.saturating_sub(4) as usize)),
-                    Style::default().fg(crate::theme::color(pal.accent)).bold(),
-                ),
-            ]));
+            let mut head = self.masthead_spans();
+            if self.session != "main" {
+                head.push(Span::styled(
+                    format!(
+                        " {}",
+                        truncate(&self.session, inner.width.saturating_sub(11) as usize)
+                    ),
+                    Style::default().fg(crate::theme::color(pal.dim)),
+                ));
+            }
+            lines.push(Line::from(head));
             lines.push(Line::from(Span::styled(
                 "─".repeat(inner.width as usize),
                 Style::default().fg(crate::theme::color(pal.edge)),

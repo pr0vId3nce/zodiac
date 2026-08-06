@@ -28,6 +28,13 @@ export interface PushOpts {
   category?: string;
   threadId?: string;
   timeSensitive?: boolean;
+  /** Seconds the push stays worth delivering. Without this, APNs
+      store-and-forwards to an unreachable device indefinitely — the
+      notification lands hours later, long after it stopped being true. */
+  ttl?: number;
+  /** apns-collapse-id: a newer push with the same id replaces the older
+      one, both in Apple's queue and on the lock screen. */
+  collapseId?: string;
   /** Custom top-level payload keys (e.g. { pane: 3 }). */
   extra?: Record<string, unknown>;
 }
@@ -108,12 +115,17 @@ export class Apns {
     if (opts.threadId) aps["thread-id"] = opts.threadId;
     if (opts.timeSensitive) aps["interruption-level"] = "time-sensitive";
     const body = JSON.stringify({ aps, ...opts.extra });
+    const headers: Record<string, string> = {};
+    if (opts.ttl) {
+      headers["apns-expiration"] = String(Math.floor(Date.now() / 1000) + opts.ttl);
+    }
+    if (opts.collapseId) headers["apns-collapse-id"] = opts.collapseId;
 
     let sent = 0;
     const dead: string[] = [];
     for (const d of [...this.devices]) {
       try {
-        const status = await this.send(d.token, body);
+        const status = await this.send(d.token, body, headers);
         if (status === 200) sent++;
         else if (status === 410 || status === 400) dead.push(d.token);
       } catch (e) {
@@ -127,7 +139,11 @@ export class Apns {
 
   // ------------------------------------------------------------- internals
 
-  private send(token: string, body: string): Promise<number> {
+  private send(
+    token: string,
+    body: string,
+    headers: Record<string, string> = {},
+  ): Promise<number> {
     return new Promise((resolve, reject) => {
       const session = this.connect();
       const req = session.request({
@@ -137,6 +153,7 @@ export class Apns {
         "apns-topic": this.topic,
         "apns-push-type": "alert",
         "apns-priority": "10",
+        ...headers,
       });
       const timer = setTimeout(() => {
         req.close(http2.constants.NGHTTP2_CANCEL);

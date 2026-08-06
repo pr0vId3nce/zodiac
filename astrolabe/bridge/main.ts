@@ -192,6 +192,12 @@ function maybePush(
       category,
       threadId: `pane-${pane.id}`,
       timeSensitive: kind === "needs_input",
+      // Stale delivery guard: a status push undelivered after 15 min is
+      // describing a pane that's probably moved on — drop it rather than
+      // let APNs hand it over hours later. Collapse per pane so a newer
+      // push ("finished") replaces an older one ("needs you").
+      ttl: 15 * 60,
+      collapseId: `pane-${pane.id}`,
       // cid: which paired computer this is, for the iOS shell's
       // multi-computer routing (which Computer to reply/open against).
       extra: {

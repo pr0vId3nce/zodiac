@@ -36,6 +36,10 @@ pub struct SrvPane {
     queries: QueryScanner,
     bell_count: usize,
     pub last_output: Option<Instant>,
+    /// When the title last showed a braille (working) spinner frame — lets
+    /// ✳ rest frames mid-work read as working without fresh output alone
+    /// doing so (see `status()`).
+    last_title_working: Option<Instant>,
     pub activity: bool,
     pub attention: bool,
     pub auto_resume: bool,
@@ -156,6 +160,7 @@ impl SrvPane {
             queries: QueryScanner::new(),
             bell_count: 0,
             last_output: None,
+            last_title_working: None,
             activity: false,
             attention: false,
             auto_resume: true,
@@ -229,6 +234,9 @@ impl SrvPane {
             self.write_input(&replies);
         }
         self.last_output = Some(Instant::now());
+        if crate::protocol::title_state(&self.title()) == crate::protocol::TitleState::Working {
+            self.last_title_working = Some(Instant::now());
+        }
         let count = self.parser.screen().audible_bell_count();
         let new = count > self.bell_count;
         self.bell_count = count;
@@ -306,13 +314,15 @@ impl SrvPane {
     }
 
     /// Semantic agent status, herdr-style. A braille title frame means
-    /// working, but "✳" proves nothing: Claude Code's title spinner cycles
-    /// ✳/⠂/⠐/… while working and merely rests on ✳ when idle — so every
-    /// non-braille title falls through to output recency (safe for TUI
-    /// agents: their spinners keep emitting output while working). Recency
-    /// only counts for panes running a known agent, though — an ordinary
-    /// TUI (htop, a music player…) emits output forever and would otherwise
-    /// read as permanently working.
+    /// working; "✳" is ambiguous: Claude Code's title spinner cycles
+    /// ✳/⠂/⠐/… while working and merely rests on ✳ when idle. Mid-work rest
+    /// frames are bridged by a braille frame seen moments ago — fresh output
+    /// alone doesn't count, or the pane reads "working" for seconds after
+    /// the answer's final render (or any idle repaint). Titles carrying no
+    /// state still fall back to output recency (safe for TUI agents: their
+    /// spinners keep emitting output while working), but never for unknown
+    /// programs — an ordinary TUI (htop, a music player…) emits output
+    /// forever and would otherwise read as permanently working.
     pub fn status(&self) -> &'static str {
         use crate::protocol::{title_state, TitleState};
         if self.attention {
@@ -321,9 +331,17 @@ impl SrvPane {
         let recent = self
             .last_output
             .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(5));
-        if title_state(&self.title()) == TitleState::Working
-            || (recent && self.agent().is_some())
-        {
+        let working = match title_state(&self.title()) {
+            TitleState::Working => true,
+            TitleState::Idle => {
+                recent
+                    && self
+                        .last_title_working
+                        .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2))
+            }
+            TitleState::Unknown => recent && self.agent().is_some(),
+        };
+        if working {
             "working"
         } else if self.activity {
             "done"

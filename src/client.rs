@@ -31,6 +31,12 @@ const EXCERPT_OTHER: usize = 15;
 /// "in progress" (orange) rather than "finished" (green).
 const IN_PROGRESS_WINDOW: Duration = Duration::from_secs(5);
 
+/// How long after the last braille title frame a resting ✳ title still
+/// counts as mid-work. Claude Code's spinner animates continuously while
+/// working, so real rest-frame gaps are well under this; after finishing,
+/// braille frames stop and "working" clears within this window.
+const TITLE_BRIDGE: Duration = Duration::from_secs(2);
+
 const WORKING_COLOR: Color = Color::Indexed(208);
 
 /// True black. `Color::Black` is ANSI index 0, which most terminal themes
@@ -361,6 +367,10 @@ struct CPane {
     parser: vt100::Parser,
     scroll: usize,
     last_output: Option<Instant>,
+    /// When the title last showed a braille (working) spinner frame — lets
+    /// the ✳ rest frames mid-work read as working without fresh output
+    /// alone doing so (see `working()`).
+    last_title_working: Option<Instant>,
     activity: bool,
     attention: bool,
     bell_count: usize,
@@ -382,6 +392,7 @@ impl CPane {
             parser: vt100::Parser::new(rows, cols, CLIENT_SCROLLBACK),
             scroll: 0,
             last_output: None,
+            last_title_working: None,
             activity: false,
             attention: false,
             bell_count: 0,
@@ -1175,6 +1186,11 @@ impl App {
                     if !squelch {
                         p.last_output = Some(Instant::now());
                     }
+                    // Braille frames only appear mid-work, so this stamp is
+                    // trustworthy even during a repaint storm.
+                    if title_state(p.parser.screen().title()) == TitleState::Working {
+                        p.last_title_working = Some(Instant::now());
+                    }
                     let bell = p.poll_bell();
                     if Some(f.id) != active_id {
                         p.activity = !squelch || p.activity;
@@ -1705,18 +1721,27 @@ impl App {
 
     /// Whether the pane's agent is working right now, regardless of focus —
     /// the sidebar spinner shows on the active pane too. A braille title
-    /// frame means working, but "✳" proves nothing: Claude Code's title
-    /// spinner cycles ✳/⠂/⠐/… while working and merely rests on ✳ when idle
-    /// — so ✳ frames must fall through to the output-recency check or
-    /// working panes flicker. Recency only counts for panes running a known
-    /// agent — an ordinary TUI emits output forever and would spin
-    /// permanently.
+    /// frame means working; "✳" is ambiguous: Claude Code's title spinner
+    /// cycles ✳/⠂/⠐/… while working and merely rests on ✳ when idle. Those
+    /// mid-work rest frames are bridged by a braille frame seen moments ago
+    /// — fresh output alone doesn't count, or every claude pane reads
+    /// "working" for seconds after its answer's final render (or any idle
+    /// repaint). Titles carrying no state (opencode & friends) still fall
+    /// back to plain output recency; recency never counts for unknown
+    /// programs — an ordinary TUI emits output forever.
     fn working(&self, i: usize) -> bool {
         let p = &self.panes[i];
         let title = p.parser.screen().title();
-        let recent = p.last_output.is_some_and(|t| t.elapsed() < IN_PROGRESS_WINDOW)
-            && agent_from_title(title).is_some();
-        title_state(title) == TitleState::Working || recent
+        let recent = p.last_output.is_some_and(|t| t.elapsed() < IN_PROGRESS_WINDOW);
+        match title_state(title) {
+            TitleState::Working => true,
+            TitleState::Idle => {
+                recent
+                    && p.last_title_working
+                        .is_some_and(|t| t.elapsed() < TITLE_BRIDGE)
+            }
+            TitleState::Unknown => recent && agent_from_title(title).is_some(),
+        }
     }
 
     /// Status color for a background pane: red = rang the bell (wants
@@ -5138,11 +5163,7 @@ impl App {
                     Style::default().fg(Color::Cyan),
                 ));
                 let title = p.parser.screen().title().to_string();
-                let recent = p
-                    .last_output
-                    .is_some_and(|t| t.elapsed() < IN_PROGRESS_WINDOW)
-                    && agent_from_title(&title).is_some();
-                if title_state(&title) == TitleState::Working || recent {
+                if self.working(self.active) {
                     spans.push(Span::styled(
                         " · working",
                         Style::default().fg(self.spinner_color()),

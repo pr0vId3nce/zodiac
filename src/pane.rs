@@ -241,7 +241,17 @@ impl SrvPane {
         // the last RING_CAP bytes" anyway.
         const RING_SLACK: usize = 256 * 1024;
         if self.ring.len() > RING_CAP + RING_SLACK {
-            let cut = self.ring.len() - RING_CAP;
+            let mut cut = self.ring.len() - RING_CAP;
+            // Nudge the cut to just past the next newline so a replayed or
+            // restored ring doesn't begin mid-escape-sequence — the client
+            // parser eats stray parameter bytes and misrenders the first
+            // line otherwise.
+            if let Some(nl) = self.ring[cut..cut + 4096.min(self.ring.len() - cut)]
+                .iter()
+                .position(|&b| b == b'\n')
+            {
+                cut += nl + 1;
+            }
             self.ring.drain(..cut);
         }
         if !replies.is_empty() {
@@ -260,6 +270,10 @@ impl SrvPane {
     /// Outer-terminal cell size (px) learned from the attached client:
     /// reported to the inner PTY (SIGWINCH) and used for image geometry.
     pub fn set_cell(&mut self, cell: (u16, u16)) {
+        // Cells arrive off the wire; a malformed frame must not overflow
+        // the u16 pixel products below (a debug-build panic). 100 px per
+        // cell dwarfs any real font.
+        let cell = (cell.0.min(100), cell.1.min(100));
         if self.cell == cell || cell.0 == 0 || cell.1 == 0 {
             return;
         }
@@ -269,8 +283,8 @@ impl SrvPane {
         let _ = self.master.resize(PtySize {
             rows,
             cols,
-            pixel_width: cols * cell.0,
-            pixel_height: rows * cell.1,
+            pixel_width: cols.saturating_mul(cell.0),
+            pixel_height: rows.saturating_mul(cell.1),
         });
     }
 
@@ -685,6 +699,9 @@ impl SrvPane {
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
+        // Wire values again — cap to something a real terminal could be
+        // and keep the pixel products from overflowing u16.
+        let (rows, cols) = (rows.min(1000), cols.min(1000));
         if rows < 2 || cols < 10 || self.size == (rows, cols) {
             return;
         }
@@ -692,8 +709,8 @@ impl SrvPane {
         let _ = self.master.resize(PtySize {
             rows,
             cols,
-            pixel_width: cols * self.cell.0,
-            pixel_height: rows * self.cell.1,
+            pixel_width: cols.saturating_mul(self.cell.0),
+            pixel_height: rows.saturating_mul(self.cell.1),
         });
         self.parser.set_size(rows, cols);
         for ev in self.parser.drain_events() {

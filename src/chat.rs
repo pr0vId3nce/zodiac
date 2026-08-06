@@ -1059,7 +1059,10 @@ fn stream_once(
                     // id once, arguments a character at a time.
                     if let Some(tcs) = delta["tool_calls"].as_array() {
                         for tc in tcs {
-                            let i = tc["index"].as_u64().unwrap_or(0) as usize;
+                            // Clamped: the index drives an allocation, and a
+                            // buggy server emitting a huge one would abort.
+                            // Real turns use single-digit call counts.
+                            let i = tc["index"].as_u64().unwrap_or(0).min(31) as usize;
                             if turn.calls.len() <= i {
                                 turn.calls.resize_with(i + 1, ToolCall::default);
                             }

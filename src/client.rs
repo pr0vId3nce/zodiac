@@ -279,6 +279,9 @@ enum AppEvent {
     Srv(SrvFrame),
     SrvGone,
     Chat(crate::chat::ChatEvent),
+    /// Pane input a helper thread wants sent after a delay — routed back
+    /// through the event loop so only one thread ever writes the socket.
+    DelayedInput(u64, Vec<u8>),
 }
 
 enum Mode {
@@ -586,7 +589,11 @@ struct App {
     pair_endpoint: Option<(String, String, String)>,
     /// The endpoint file points somewhere nothing answers — see
     /// `endpoint_alive`. Probed when the overlay opens.
-    pair_dead: bool,
+    /// Whether the bridge endpoint answered the liveness probe. The probe
+    /// (DNS + TCP connect) runs on a background thread — it used to run
+    /// inline in the Alt+P key handler and could freeze the whole client
+    /// for seconds on a stale endpoint. false until proven dead.
+    pair_dead: std::sync::Arc<std::sync::atomic::AtomicBool>,
     /// The exact URL the current QR image encodes, so kitty_overlay only
     /// re-rasterizes when the token (or endpoint) actually changes.
     pair_qr_src: String,
@@ -597,6 +604,9 @@ struct App {
     pair_rect: Rect,
     sock: UnixStream,
     rx: Receiver<AppEvent>,
+    /// For helper threads that need to inject an event later (the paced
+    /// Enter after a chat-cast paste).
+    tx: Sender<AppEvent>,
 }
 
 pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str> {
@@ -634,6 +644,7 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
     } else {
         (None, None)
     };
+    let tx_app = tx.clone();
     std::thread::spawn(move || loop {
         match crossterm::event::read() {
             Ok(ev) => {
@@ -715,12 +726,13 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         server_mouse_gate: false,
         pair_open: false,
         pair_endpoint: None,
-        pair_dead: false,
+        pair_dead: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         pair_qr_src: String::new(),
         pair_qr: None,
         pair_rect: Rect::default(),
         sock,
         rx,
+        tx: tx_app,
     };
     // Announce graphics capability + cell size so panes' PTYs report pixel
     // dimensions and the server engines start answering the protocol.
@@ -920,7 +932,7 @@ impl App {
         data[2..4].copy_from_slice(&cols.to_le_bytes());
         data[4..6].copy_from_slice(&cell.0.to_le_bytes());
         data[6..8].copy_from_slice(&cell.1.to_le_bytes());
-        self.send(T_RESIZE, 0, &data.clone());
+        self.send(T_RESIZE, 0, &data);
     }
 
     fn active_id(&self) -> Option<u64> {
@@ -967,6 +979,7 @@ impl App {
             }
             AppEvent::Srv(f) => self.handle_frame(f),
             AppEvent::Chat(ev) => self.handle_chat(ev),
+            AppEvent::DelayedInput(id, data) => self.send(T_INPUT, id, &data),
             AppEvent::Term(event) => match event {
                 Event::Key(key) => self.handle_key(key),
                 Event::Mouse(m) => self.handle_mouse(m),
@@ -1906,10 +1919,23 @@ impl App {
     /// bridge itself restarts.
     fn open_pair_overlay(&mut self) {
         self.pair_endpoint = read_bridge_endpoint();
-        self.pair_dead = self
-            .pair_endpoint
-            .as_ref()
-            .is_some_and(|(url, _, _)| !endpoint_alive(url));
+        // Probe off-thread: endpoint_alive does synchronous DNS + connect
+        // (up to 400ms per address) and this runs from a key handler. The
+        // overlay opens optimistic and the draw flips to the dead-bridge
+        // message when the probe lands.
+        self.pair_dead
+            .store(false, std::sync::atomic::Ordering::Relaxed);
+        if let Some((url, _, _)) = self.pair_endpoint.clone() {
+            let flag = self.pair_dead.clone();
+            std::thread::spawn(move || {
+                if !endpoint_alive(&url) {
+                    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+        }
+        // The floating chatbox would paint over the QR.
+        self.chat_open = false;
+        self.chat_focus = false;
         self.pair_open = true;
     }
 
@@ -2211,9 +2237,16 @@ impl App {
                         self.send(T_INPUT, id, text.as_bytes());
                         // Same pacing `zodiac prompt` uses: give the pane's
                         // program a beat to register the pasted text as one
-                        // block before the Enter that submits it.
-                        std::thread::sleep(std::time::Duration::from_millis(200));
-                        self.send(T_INPUT, id, b"\r");
+                        // block before the Enter that submits it. The delay
+                        // lives on a helper thread (sleeping here froze
+                        // input and rendering for the whole beat) and the
+                        // Enter routes back through the event loop so only
+                        // one thread ever writes the socket.
+                        let tx = self.tx.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(std::time::Duration::from_millis(200));
+                            let _ = tx.send(AppEvent::DelayedInput(id, b"\r".to_vec()));
+                        });
                         self.chat_note(CHAT_NOTE, format!("sent to pane {pane}"));
                         ActionOutcome::Sent
                     }
@@ -2929,7 +2962,7 @@ impl App {
                 // Roomy now that nothing sits beside it: ~70% of the page,
                 // never narrower than the old docked width nor absurdly
                 // wide on a huge monitor.
-                let w = (body.width * 7 / 10)
+                let w = ((body.width as u32 * 7 / 10) as u16)
                     .max(pref + 10)
                     .min(body.width.saturating_sub(6))
                     .min(110);
@@ -3730,7 +3763,10 @@ impl App {
                 let col = orr.x + ((x / cw as f32) as u16).min(orr.width.saturating_sub(1));
                 let row = orr.y + ((y / ch as f32) as u16).min(5);
                 let label = self.card_numeral(i + 1);
-                let lw = (label.chars().count() as u16).min(4).max(1);
+                // Display cells, not chars — a U+FE0E variation selector
+                // occupies no cell and was shoving labels a cell left.
+                let lw = ((label.chars().count() - label.matches('\u{FE0E}').count()) as u16)
+                    .clamp(1, 4);
                 let lrect = Rect {
                     x: col.saturating_sub(lw / 2).max(orr.x),
                     y: (row + 1).min(orr.y + 5),
@@ -3923,7 +3959,7 @@ impl App {
             );
             return;
         };
-        if self.pair_dead {
+        if self.pair_dead.load(std::sync::atomic::Ordering::Relaxed) {
             center_msg(
                 f,
                 &format!(

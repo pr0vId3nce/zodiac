@@ -325,7 +325,9 @@ pub fn scrollbar_rgba(w: u32, h: u32, col: (u8, u8, u8), frac: f32) -> Vec<u8> {
 pub const SPARK_BASE: u32 = 0x53504B00; // "SPK\0"
 
 pub fn spark_id(pane_id: u64, ver: u32) -> u32 {
-    SPARK_BASE + ((pane_id as u32 & 0xFF) << 8) + (ver & 0xFF)
+    // 12 bits of pane id: two panes colliding needs 4096 pane ids in one
+    // server lifetime (the old 8 bits made that a plausible 256).
+    SPARK_BASE + ((pane_id as u32 & 0xFFF) << 8) + (ver & 0xFF)
 }
 
 /// A pane's output-rate sparkline: up to 12 bars (50s buckets, newest at
@@ -779,7 +781,10 @@ pub fn qr_id(data: &str) -> u32 {
         seed ^= b as u64;
         seed = seed.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    QR_BASE ^ (hash(seed) as u32)
+    // Only the low 16 bits vary: XORing the full hash escaped the QR
+    // namespace entirely and could land on (and clobber) a card, chrome,
+    // or pane image id.
+    (QR_BASE & 0xFFFF_0000) | (hash(seed) as u32 & 0xFFFF)
 }
 
 /// Rasterizes `data` as a QR code: hard-edged black modules on white (no

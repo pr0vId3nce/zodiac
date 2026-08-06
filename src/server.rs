@@ -261,6 +261,12 @@ pub fn run(session: &str) -> Result<()> {
         }
         if srv.dirty {
             srv.save_meta();
+            // Rings are keyed by pane *position*, so any structural change
+            // (close/move/rename marks dirty) must rewrite them in the same
+            // breath — meta saved now + rings from a minute ago restores
+            // the wrong scrollback into the wrong pane after a hard death.
+            srv.save_rings();
+            last_ring_save = Instant::now();
         }
         if last_ring_save.elapsed() > Duration::from_secs(60) {
             srv.save_rings();
@@ -1135,16 +1141,23 @@ fn host_vitals() -> Option<crate::protocol::HostVitals> {
     use std::sync::Mutex;
     use std::time::Instant;
     static CACHE: Mutex<Option<(Instant, crate::protocol::HostVitals)>> = Mutex::new(None);
-    let mut cache = CACHE.lock().ok()?;
+    let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
     if let Some((at, v)) = cache.as_ref() {
         if at.elapsed() < Duration::from_secs(5) {
             return Some(v.clone());
         }
     }
+    // A transient probe hiccup (vm_stat spawn failure, /proc blip) keeps
+    // the last good number instead of broadcasting a plausible-looking 0%.
+    let last = cache.as_ref().map(|(_, v)| v.clone());
     let v = crate::protocol::HostVitals {
         uptime_ms: host_uptime_ms()?,
-        cpu_pct: host_cpu_pct().unwrap_or(0),
-        mem_pct: host_mem_pct().unwrap_or(0),
+        cpu_pct: host_cpu_pct()
+            .or(last.as_ref().map(|v| v.cpu_pct))
+            .unwrap_or(0),
+        mem_pct: host_mem_pct()
+            .or(last.as_ref().map(|v| v.mem_pct))
+            .unwrap_or(0),
     };
     *cache = Some((Instant::now(), v.clone()));
     Some(v)

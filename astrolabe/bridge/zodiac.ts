@@ -53,7 +53,9 @@ export interface SessionState {
   pairing_token?: string;
 }
 
-const RING_CAP = 512 * 1024;
+// Must match (or exceed) the zodiac server's RING_CAP (src/pane.rs) — a
+// smaller cap here silently truncates the scrollback every client sees.
+const RING_CAP = 2 * 1024 * 1024;
 const RECONNECT_MS = 2000;
 const POLL_MS = 1000;
 const WATCH_PROBE_MS = 1500;

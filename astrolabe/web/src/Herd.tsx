@@ -63,12 +63,12 @@ function Orrery({
       {/* one star per pane, tap to jump */}
       {panes.map((p, i) => {
         const a = starAngle(i, panes.length);
-        const cx = 150 + ARC_R * Math.cos(Math.PI - a);
+        const cx = 150 + ARC_R * Math.cos(a); // pane I lands on the left
         const cy = ARC_R * Math.sin(a); // height above the horizon line
         const needs = p.status === "needs_input";
         const size = needs ? 13 : p.status === "idle" ? 9 : 11;
         // numeral label pushed radially outward from the star
-        const lx = 150 + (ARC_R + 16) * Math.cos(Math.PI - a);
+        const lx = 150 + (ARC_R + 16) * Math.cos(a);
         const ly = (ARC_R + 16) * Math.sin(a);
         return (
           <button

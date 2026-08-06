@@ -99,7 +99,10 @@ export class Apns {
   /** Send to every registered device; prunes tokens Apple reports dead. */
   async push(alert: PushAlert, opts: PushOpts = {}): Promise<{ sent: number; failed: number }> {
     if (!this.enabled || this.devices.length === 0) return { sent: 0, failed: 0 };
-    const aps: Record<string, unknown> = { alert, sound: "default" };
+    // content-available wakes the app briefly in the background so it can
+    // reload widget timelines — the lock-screen question widget updates
+    // the moment a push lands instead of on WidgetKit's ~15 min clock.
+    const aps: Record<string, unknown> = { alert, sound: "default", "content-available": 1 };
     if (opts.badge !== undefined) aps.badge = opts.badge;
     if (opts.category) aps.category = opts.category;
     if (opts.threadId) aps["thread-id"] = opts.threadId;

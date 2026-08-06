@@ -463,6 +463,8 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       link: link.up,
       session: st?.session ?? SESSION,
       panes: (st?.panes ?? []).map((p) => ({
+        // id is what /api/answer wants back; index is the human-facing number
+        id: p.id,
         index: p.index,
         name: p.name,
         status: p.status,

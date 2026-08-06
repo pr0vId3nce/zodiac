@@ -2901,7 +2901,13 @@ impl App {
                 && body.width >= 30
                 && body.height >= 12
             {
-                let w = (pref + 10).clamp(36, body.width.saturating_sub(4));
+                // Roomy now that nothing sits beside it: ~70% of the page,
+                // never narrower than the old docked width nor absurdly
+                // wide on a huge monitor.
+                let w = (body.width * 7 / 10)
+                    .max(pref + 10)
+                    .min(body.width.saturating_sub(6))
+                    .min(110);
                 let h = body.height.saturating_sub(4).min(38);
                 let rect = Rect {
                     x: body.x + (body.width - w) / 2,

@@ -458,6 +458,11 @@ struct App {
     home_queried: Option<Instant>,
     /// Card layout from the last home draw: (rect, pane id, accent index).
     home_cards: Vec<(Rect, u64, usize, bool)>,
+    /// Blocks view only: (pane id, row, in-left-column) for every pane in
+    /// visual order. The two columns fill independently, so once one runs
+    /// long the flat ±cols grid math over home_cards skips cards; arrow
+    /// keys navigate this instead. Empty in the other views.
+    home_block_nav: Vec<(u64, u16, bool)>,
     /// Cells reserved beside active claude blocks (blocks view) where the
     /// hopping mascot sprite is placed by kitty_overlay.
     home_mascots: Vec<Rect>,
@@ -614,6 +619,7 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         home_state: None,
         home_queried: None,
         home_cards: Vec::new(),
+        home_block_nav: Vec::new(),
         home_mascots: Vec::new(),
         kitty_on: crate::kitty::enabled(),
         kitty_placed: Vec::new(),
@@ -1774,6 +1780,9 @@ impl App {
         if key.modifiers.contains(KeyModifiers::ALT) {
             return false;
         }
+        if !self.home_block_nav.is_empty() {
+            return self.handle_home_blocks_key(key);
+        }
         let n = self.home_cards.len();
         let cols = self.home_cols.max(1);
         match key.code {
@@ -1808,6 +1817,51 @@ impl App {
                     }
                     self.leave_home();
                 }
+            }
+            _ => return false,
+        }
+        true
+    }
+
+    /// Arrow keys over the blocks view, where shells and agents fill their
+    /// columns independently: Up/Down stay in the selected pane's column,
+    /// Left/Right hop to the nearest-row block in the other column.
+    fn handle_home_blocks_key(&mut self, key: KeyEvent) -> bool {
+        let nav = &self.home_block_nav;
+        let n = nav.len();
+        let sel = self.home_sel.min(n - 1);
+        let (_, row, left) = nav[sel];
+        match key.code {
+            KeyCode::Esc => self.leave_home(),
+            KeyCode::Up => {
+                if let Some(i) = (0..sel).rev().find(|&i| nav[i].2 == left) {
+                    self.home_sel = i;
+                }
+            }
+            KeyCode::Down => {
+                if let Some(i) = (sel + 1..n).find(|&i| nav[i].2 == left) {
+                    self.home_sel = i;
+                }
+            }
+            KeyCode::Left | KeyCode::Right => {
+                let want_left = key.code == KeyCode::Left;
+                if left != want_left {
+                    if let Some(i) = (0..n)
+                        .filter(|&i| nav[i].2 == want_left)
+                        .min_by_key(|&i| nav[i].1.abs_diff(row))
+                    {
+                        self.home_sel = i;
+                    }
+                }
+            }
+            KeyCode::Enter => {
+                // By id, not home_cards[home_sel]: home_cards holds only the
+                // scrolled-into-view blocks, so its indices drift off nav's.
+                let id = nav[sel].0;
+                if let Some(idx) = self.panes.iter().position(|p| p.id == id) {
+                    self.focus(idx);
+                }
+                self.leave_home();
             }
             _ => return false,
         }
@@ -3324,6 +3378,7 @@ impl App {
     /// snapshot (refreshed ~1/s while the page is open).
     fn draw_home(&mut self, f: &mut Frame, area: Rect) {
         self.home_cards.clear();
+        self.home_block_nav.clear();
         self.home_mascots.clear();
         if self.pair_open {
             return self.draw_pair_overlay(f, area);
@@ -3674,8 +3729,9 @@ impl App {
         let agents: Vec<usize> = (0..state.panes.len())
             .filter(|&i| state.panes[i].agent.is_some())
             .collect();
-        // Visual order interleaves the columns row by row, so the stock
-        // grid navigation (home_cols = 2) works unchanged.
+        // Visual order interleaves the columns row by row. Once one column
+        // runs longer than the other this is no longer a rectangular grid,
+        // so home_block_nav (not ±cols index math) drives the arrow keys.
         let mut order: Vec<(usize, u16)> = Vec::new(); // (pane idx, row)
         for r in 0..shells.len().max(agents.len()) {
             if let Some(&i) = shells.get(r) {
@@ -3685,6 +3741,10 @@ impl App {
                 order.push((i, r as u16));
             }
         }
+        self.home_block_nav = order
+            .iter()
+            .map(|&(pi, r)| (state.panes[pi].id, r, state.panes[pi].agent.is_none()))
+            .collect();
         // Column headers + the rule under them.
         let hdr = Style::default().fg(Color::Indexed(246)).bold();
         let buf = f.buffer_mut();

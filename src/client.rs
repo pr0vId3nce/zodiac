@@ -3605,13 +3605,28 @@ impl App {
             let strip = Rect { height: 1, ..area };
             let label = Style::default().fg(crate::theme::color(pal.faint));
             let value = Style::default().fg(crate::theme::color(pal.dim));
+            // `❯ zodiac` with the blinking block cursor, same masthead as
+            // the iOS app. The session name stays visible (dim) only when
+            // it isn't the default "main".
+            let blink = (self.anim_start.elapsed().as_millis() / 530) % 2 == 0;
             let mut spans = vec![
                 Span::styled(
-                    format!(" ☾ {}", self.session),
+                    " ❯ ",
+                    Style::default().fg(crate::theme::color(pal.phosphor)).bold(),
+                ),
+                Span::styled(
+                    "zodiac",
                     Style::default().fg(crate::theme::color(pal.accent)).bold(),
                 ),
-                Span::styled(format!("  {}", hostname()), value),
+                Span::styled(
+                    if blink { "▊" } else { " " },
+                    Style::default().fg(crate::theme::color(pal.phosphor)),
+                ),
+                Span::styled(format!(" {}", hostname()), value),
             ];
+            if self.session != "main" {
+                spans.push(Span::styled(format!(" · {}", self.session), value));
+            }
             let mut right: Vec<Span> = Vec::new();
             if let Some(hv) = &state.host {
                 let up = fmt_uptime(hv.uptime_ms).trim_start_matches("up ").to_string();

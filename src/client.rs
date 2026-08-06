@@ -70,7 +70,7 @@ const CONTROLS: &[(&str, &str)] = &[
     ("Alt+~", "home page"),
     ("⇧PgUp/Dn", "scroll"),
     ("Ctrl+S", "settings"),
-    ("Alt+G", "chat panel"),
+    ("Alt+O", "oracle chat"),
     ("Alt+Q", "detach"),
     ("Alt+⇧Q", "kill session"),
 ];
@@ -547,6 +547,10 @@ struct App {
     chat_streaming: bool,
     chat_input: String,
     chat_focus: bool,
+    /// The sanctum floats: Alt+O opens the chat as a centered overlay on
+    /// the home page (no more docked column). Esc or a click outside
+    /// minimizes it.
+    chat_open: bool,
     /// Transcript scroll offset in wrapped lines, from the bottom.
     chat_scroll: usize,
     chat_rect: Rect,
@@ -690,6 +694,7 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         chat_streaming: false,
         chat_input: String::new(),
         chat_focus: false,
+        chat_open: false,
         chat_scroll: 0,
         chat_rect: Rect::default(),
         chat_art_rect: Rect::default(),
@@ -1007,6 +1012,13 @@ impl App {
             }
             if let K::Down(MouseButton::Left) = m.kind {
                 self.chat_focus = false;
+                // A click outside the floating chatbox minimizes it — and
+                // does nothing else, so a card underneath isn't opened by
+                // accident.
+                if self.chat_open {
+                    self.chat_open = false;
+                    return;
+                }
                 // Orrery stars first — they're small and sit above the grid.
                 if let Some(&(_, id)) = self.home_stars.iter().find(|(r, _)| r.contains(pos)) {
                     if let Some(idx) = self.panes.iter().position(|p| p.id == id) {
@@ -1572,14 +1584,27 @@ impl App {
             self.open_pair_overlay();
             return;
         }
-        // Alt+G: speak with the wizard (jumps to the home page if needed).
-        if alt && !ctrl && matches!(key.code, KeyCode::Char('g') | KeyCode::Char('G')) {
+        // Alt+O (and the old Alt+G): summon the oracle's floating chatbox,
+        // jumping to the home page first if needed. A second press
+        // minimizes it.
+        if alt
+            && !ctrl
+            && matches!(
+                key.code,
+                KeyCode::Char('o') | KeyCode::Char('O') | KeyCode::Char('g') | KeyCode::Char('G')
+            )
+        {
             if self.chat_tx.is_some() {
                 if !self.home {
                     self.toggle_home();
+                    self.chat_open = true;
                     self.chat_focus = true;
+                } else if self.chat_open {
+                    self.chat_open = false;
+                    self.chat_focus = false;
                 } else {
-                    self.chat_focus = !self.chat_focus;
+                    self.chat_open = true;
+                    self.chat_focus = true;
                 }
             }
             return;
@@ -1607,6 +1632,7 @@ impl App {
                         }
                     } else {
                         self.chat_focus = false;
+                        self.chat_open = false;
                     }
                 }
                 KeyCode::Enter => self.chat_submit(),
@@ -1848,6 +1874,7 @@ impl App {
         self.home = false;
         self.selection = None;
         self.chat_focus = false;
+        self.chat_open = false;
     }
 
     /// Opens the pairing QR overlay, re-reading the astrolabe bridge's
@@ -2277,24 +2304,6 @@ impl App {
     }
 
     /// Panel width for the current terminal width; 0 hides the panel.
-    fn chat_panel_width(&self, body_w: u16) -> u16 {
-        if self.chat_tx.is_none() {
-            return 0;
-        }
-        let pref: u16 = self
-            .settings
-            .chat_width
-            .parse()
-            .unwrap_or(40)
-            .clamp(28, 70);
-        // Keep at least one card column plus breathing room.
-        if body_w < pref + self.card_dims().0 + 8 {
-            0
-        } else {
-            pref
-        }
-    }
-
     fn eye_def(&self) -> &'static EyeDef {
         EYES.iter()
             .find(|e| e.name == self.settings.eye)
@@ -2881,19 +2890,37 @@ impl App {
         if self.home {
             self.sidebar_rect = Rect::default();
             self.main_rect = Rect::default();
-            let chat_w = self.chat_panel_width(body.width);
-            if chat_w > 0 {
-                let [cards, chat] =
-                    Layout::horizontal([Constraint::Min(1), Constraint::Length(chat_w)])
-                        .areas(body);
-                self.draw_home(f, cards);
-                self.draw_chat(f, chat);
+            self.draw_home(f, body);
+            self.draw_status(f, status);
+            // The sanctum floats: a centered overlay on Alt+O instead of a
+            // docked column, so the observatory keeps its full width. The
+            // chat_width setting still steers how wide it opens.
+            let pref: u16 = self.settings.chat_width.parse().unwrap_or(40).clamp(28, 70);
+            if self.chat_open
+                && self.chat_tx.is_some()
+                && body.width >= 30
+                && body.height >= 12
+            {
+                let w = (pref + 10).clamp(36, body.width.saturating_sub(4));
+                let h = body.height.saturating_sub(4).min(38);
+                let rect = Rect {
+                    x: body.x + (body.width - w) / 2,
+                    y: body.y + (body.height - h) / 2,
+                    width: w,
+                    height: h,
+                };
+                // Explicit bg on every cell (border row included) so the
+                // z=-1 card art can't bleed through the frame.
+                f.render_widget(Clear, rect);
+                f.render_widget(
+                    Block::default().style(Style::default().bg(Color::Rgb(6, 8, 16))),
+                    rect,
+                );
+                self.draw_chat(f, rect);
             } else {
                 self.chat_rect = Rect::default();
                 self.chat_art_rect = Rect::default();
-                self.draw_home(f, body);
             }
-            self.draw_status(f, status);
             if matches!(self.mode, Mode::Settings | Mode::SettingsEdit { .. }) {
                 self.draw_settings(f, area);
             }
@@ -4711,7 +4738,7 @@ impl App {
             ])
         } else {
             let ask = format!("❯ ask {who}… ");
-            let hint = "alt+g · /why · /wake · /sleep ";
+            let hint = "alt+o · /why · /wake · /sleep ";
             let pad = (inner.width as usize)
                 .saturating_sub(ask.chars().count() + hint.chars().count());
             Line::from(vec![
@@ -4746,7 +4773,12 @@ impl App {
         // regardless of the home view mode.
         if !self.pair_open
             && (matches!(self.mode, Mode::Settings | Mode::SettingsEdit { .. })
-                || (self.home && self.home_view() == "list"))
+                || (self.home && self.home_view() == "list")
+                // The floating chatbox: z=-1 card art would bleed through
+                // its background, so it hides like the settings popup does
+                // (the HAL portrait re-places right after — chat_overlay()
+                // runs later in the frame).
+                || (self.home && self.chat_open))
         {
             if !self.kitty_placed.is_empty() {
                 let _ = crate::kitty::delete_placements(&mut out);
@@ -5893,7 +5925,7 @@ impl App {
             } else if self.chat_focus {
                 "chat: ⏎ send · esc leave · /wake /sleep ".to_string()
             } else {
-                "←↑↓→ select · ⏎ open · alt+g oracle · alt+~ close ".to_string()
+                "←↑↓→ select · ⏎ open · alt+o oracle · alt+~ close ".to_string()
             };
             let used = left.chars().count() + count.chars().count() + hints.chars().count();
             spans.push(Span::styled(

@@ -4,8 +4,6 @@
 //! colors are fixed across themes (they carry meaning); everything else
 //! swaps with the `theme` setting.
 
-// gold_soft/phosphor come into use as later reskin phases land.
-#[allow(dead_code)]
 pub struct Palette {
     pub name: &'static str,
     /// Brass accent: hairlines, sigils, reticle brackets, headers.

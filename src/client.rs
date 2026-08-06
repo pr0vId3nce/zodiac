@@ -208,15 +208,6 @@ const HOME_GAP_X: u16 = 3;
 const HOME_GAP_Y: u16 = 1;
 /// Card-art glow colors by accent index: needs approval, thinking,
 /// working, finished, idle (order matches `card_status`).
-#[allow(dead_code)] // retired with the tarot painter (deleted in the reskin's last phase)
-const ACCENT_RGB: [(u8, u8, u8); 5] = [
-    (235, 90, 100),
-    (150, 110, 235),
-    (255, 150, 40),
-    (90, 200, 120),
-    (110, 110, 140),
-];
-
 /// Sidebar equalizer for working panes: each bar dips to half height and
 /// back once per cycle, staggered — a one-cell-tall rendition of the CSS
 /// bounce-and-stretch bars (3s cycle, 0.3s delay per bar).
@@ -2389,9 +2380,24 @@ impl App {
         color_by_name(&self.settings.select_color, "gold").1
     }
 
-    #[allow(dead_code)] // retired with the tarot painter (deleted in the reskin's last phase)
     fn select_rgb(&self) -> (u8, u8, u8) {
         color_by_name(&self.settings.select_color, "gold").2
+    }
+
+    /// The reticle's paint color: the Select color setting, except its
+    /// "gold" default resolves to the theme's own brass so themes stay
+    /// coherent out of the box.
+    fn reticle_rgb(&self) -> (u8, u8, u8) {
+        if color_by_name(&self.settings.select_color, "gold").0 == "gold" {
+            self.palette().accent
+        } else {
+            self.select_rgb()
+        }
+    }
+
+    /// Text-layer twin of `reticle_rgb`.
+    fn reticle_color(&self) -> Color {
+        crate::theme::color(self.reticle_rgb())
     }
 
     fn select_weight_idx(&self) -> usize {
@@ -3974,7 +3980,7 @@ impl App {
         let mut row1: Vec<Span> = vec![
             Span::styled(
                 if selected { "⌜" } else { " " },
-                Style::default().fg(crate::theme::color(pal.accent)).bold(),
+                Style::default().fg(self.reticle_color()).bold(),
             ),
             Span::styled("▎", base(crate::theme::STATUS_RAIL[accent])),
             Span::styled(
@@ -4023,7 +4029,7 @@ impl App {
         row3.push(Span::styled(up, base(pal.faint)));
         row3.push(Span::styled(
             if selected { " ⌟" } else { "  " },
-            Style::default().fg(crate::theme::color(pal.accent)).bold(),
+            Style::default().fg(self.reticle_color()).bold(),
         ));
         f.render_widget(
             Paragraph::new(vec![Line::from(row1), row2, Line::from(row3)]),
@@ -4169,7 +4175,7 @@ impl App {
         let mut title_spans = vec![
             Span::styled(
                 if selected { "⌜" } else { " " },
-                Style::default().fg(crate::theme::color(pal.accent)).bold(),
+                Style::default().fg(self.reticle_color()).bold(),
             ),
             Span::styled(
                 "▎",
@@ -4772,7 +4778,7 @@ impl App {
                 let id = crate::kitty::reticle_id(pw, ph, theme_idx);
                 if !self.kitty_sent.contains(&(pw, ph, id)) {
                     self.kitty_sent.retain(|&(_, _, i2)| i2 != id);
-                    let rgba = crate::kitty::reticle_rgba(pw, ph, pal.accent, 0.5);
+                    let rgba = crate::kitty::reticle_rgba(pw, ph, self.reticle_rgb(), 0.5);
                     let _ = crate::kitty::transmit(&mut out, id, pw, ph, &rgba);
                     self.kitty_sent.insert((pw, ph, id));
                 }
@@ -4871,7 +4877,9 @@ impl App {
                         fill,
                         edge,
                         rail: crate::theme::STATUS_RAIL[accent],
-                        brackets: selected.then_some(pal.accent),
+                        // The Select color setting owns the reticle;
+                        // "gold" (the default) resolves to theme brass.
+                        brackets: selected.then_some(self.reticle_rgb()),
                         roundel: Some((roundel.0, roundel.1, roundel.2, roundel.3)),
                     };
                     let rgba = crate::kitty::flat_card_rgba(pw, ph, &style);

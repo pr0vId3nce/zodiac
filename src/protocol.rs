@@ -162,6 +162,10 @@ pub struct SessionState {
     #[serde(default)]
     pub cols: u16,
     pub panes: Vec<PaneState>,
+    /// Host vitals for the home page's top strip: uptime, cpu, mem.
+    /// Absent from old servers, so everything reading it tolerates None.
+    #[serde(default)]
+    pub host: Option<HostVitals>,
     /// Random secret generated once per server process (see `server::run`) —
     /// rides along on every state broadcast so an observer (the astrolabe
     /// bridge) always knows the current pairing token without a separate
@@ -169,6 +173,16 @@ pub struct SessionState {
     /// detach/reattach, gone when the process exits.
     #[serde(default)]
     pub pairing_token: String,
+}
+
+/// A coarse picture of the host the server runs on, probed locally and
+/// cached a few seconds (see `server::host_vitals`). cpu_pct is the 1-min
+/// load average over the core count — a steadiness read, not a spot sample.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
+pub struct HostVitals {
+    pub uptime_ms: u64,
+    pub cpu_pct: u8,
+    pub mem_pct: u8,
 }
 
 #[derive(PartialEq)]

@@ -881,6 +881,7 @@ impl Server {
                     ssh: p.ssh_target(),
                 })
                 .collect(),
+            host: host_vitals(),
             pairing_token: self.pairing_token.clone(),
         }
     }
@@ -1076,4 +1077,127 @@ impl Server {
             i += 1;
         }
     }
+}
+
+/// Host vitals for the home page's top strip, cached a few seconds — the
+/// state broadcast fires ~1/s while a home page or observer is watching
+/// and none of these numbers move faster than that.
+fn host_vitals() -> Option<crate::protocol::HostVitals> {
+    use std::sync::Mutex;
+    use std::time::Instant;
+    static CACHE: Mutex<Option<(Instant, crate::protocol::HostVitals)>> = Mutex::new(None);
+    let mut cache = CACHE.lock().ok()?;
+    if let Some((at, v)) = cache.as_ref() {
+        if at.elapsed() < Duration::from_secs(5) {
+            return Some(v.clone());
+        }
+    }
+    let v = crate::protocol::HostVitals {
+        uptime_ms: host_uptime_ms()?,
+        cpu_pct: host_cpu_pct().unwrap_or(0),
+        mem_pct: host_mem_pct().unwrap_or(0),
+    };
+    *cache = Some((Instant::now(), v.clone()));
+    Some(v)
+}
+
+#[cfg(target_os = "linux")]
+fn host_uptime_ms() -> Option<u64> {
+    let s = std::fs::read_to_string("/proc/uptime").ok()?;
+    let secs: f64 = s.split_whitespace().next()?.parse().ok()?;
+    Some((secs * 1000.0) as u64)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn host_uptime_ms() -> Option<u64> {
+    // sysctl kern.boottime — a timeval of when the machine came up.
+    let mut tv = libc::timeval { tv_sec: 0, tv_usec: 0 };
+    let mut len = std::mem::size_of::<libc::timeval>();
+    let name = std::ffi::CString::new("kern.boottime").ok()?;
+    let ok = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            &mut tv as *mut _ as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    } == 0;
+    if !ok || tv.tv_sec == 0 {
+        return None;
+    }
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_secs() as i64;
+    Some(((now - tv.tv_sec as i64).max(0) as u64) * 1000)
+}
+
+/// 1-minute load average over the core count, as a percentage. A
+/// steadiness read rather than an instant sample, which suits a strip
+/// that refreshes every few seconds.
+fn host_cpu_pct() -> Option<u8> {
+    let mut loads = [0f64; 3];
+    if unsafe { libc::getloadavg(loads.as_mut_ptr(), 3) } < 1 {
+        return None;
+    }
+    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    Some(((loads[0] / cores as f64) * 100.0).clamp(0.0, 100.0) as u8)
+}
+
+#[cfg(target_os = "linux")]
+fn host_mem_pct() -> Option<u8> {
+    let s = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let field = |k: &str| -> Option<f64> {
+        s.lines()
+            .find(|l| l.starts_with(k))?
+            .split_whitespace()
+            .nth(1)?
+            .parse()
+            .ok()
+    };
+    let total = field("MemTotal:")?;
+    let avail = field("MemAvailable:")?;
+    Some((((total - avail) / total) * 100.0).clamp(0.0, 100.0) as u8)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn host_mem_pct() -> Option<u8> {
+    // macOS: page counts from `vm_stat` against hw.memsize. Spawning a
+    // process is fine at the cache's 5s cadence.
+    let mut memsize: u64 = 0;
+    let mut len = std::mem::size_of::<u64>();
+    let name = std::ffi::CString::new("hw.memsize").ok()?;
+    let ok = unsafe {
+        libc::sysctlbyname(
+            name.as_ptr(),
+            &mut memsize as *mut _ as *mut libc::c_void,
+            &mut len,
+            std::ptr::null_mut(),
+            0,
+        )
+    } == 0;
+    if !ok || memsize == 0 {
+        return None;
+    }
+    let out = std::process::Command::new("vm_stat").output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).into_owned();
+    let page: u64 = text
+        .lines()
+        .next()?
+        .split("page size of ")
+        .nth(1)?
+        .split_whitespace()
+        .next()?
+        .parse()
+        .ok()?;
+    let count = |k: &str| -> u64 {
+        text.lines()
+            .find(|l| l.starts_with(k))
+            .and_then(|l| l.rsplit_once(' '))
+            .and_then(|(_, n)| n.trim_end_matches('.').parse().ok())
+            .unwrap_or(0)
+    };
+    let used = (count("Pages active") + count("Pages wired down") + count("Pages occupied by compressor")) * page;
+    Some(((used as f64 / memsize as f64) * 100.0).clamp(0.0, 100.0) as u8)
 }

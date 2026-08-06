@@ -370,6 +370,16 @@ struct CPane {
     /// the ✳ rest frames mid-work read as working without fresh output
     /// alone doing so (see `working()`).
     last_title_working: Option<Instant>,
+    /// Output-rate history for the card sparkline: bytes per 50s bucket,
+    /// newest last, ~10 minutes deep. Client-side only — it starts fresh
+    /// on attach.
+    rate: std::collections::VecDeque<u32>,
+    rate_cur: u32,
+    rate_bucket_start: Option<Instant>,
+    /// Sparkline image version + content hash — a changed history gets a
+    /// fresh image id so the terminal-side cache never shows stale bars.
+    spark_ver: u32,
+    spark_hash: u64,
     activity: bool,
     attention: bool,
     bell_count: usize,
@@ -392,6 +402,11 @@ impl CPane {
             scroll: 0,
             last_output: None,
             last_title_working: None,
+            rate: std::collections::VecDeque::new(),
+            rate_cur: 0,
+            rate_bucket_start: None,
+            spark_ver: 0,
+            spark_hash: 0,
             activity: false,
             attention: false,
             bell_count: 0,
@@ -408,6 +423,25 @@ impl CPane {
         }
         self.size = (rows, cols);
         self.parser.set_size(rows, cols);
+    }
+
+    /// Roll the sparkline's 50s buckets forward to now, filling quiet
+    /// stretches with zeros. Called on output and before each render.
+    fn rate_tick(&mut self) {
+        const BUCKET: Duration = Duration::from_secs(50);
+        const DEPTH: usize = 12; // ~10 minutes
+        let now = Instant::now();
+        let start = *self.rate_bucket_start.get_or_insert(now);
+        let mut elapsed = now.duration_since(start);
+        while elapsed >= BUCKET {
+            self.rate.push_back(self.rate_cur);
+            self.rate_cur = 0;
+            if self.rate.len() > DEPTH {
+                self.rate.pop_front();
+            }
+            self.rate_bucket_start = Some(self.rate_bucket_start.unwrap() + BUCKET);
+            elapsed -= BUCKET;
+        }
     }
 
     fn poll_bell(&mut self) -> bool {
@@ -473,6 +507,13 @@ struct App {
     /// long the flat ±cols grid math over home_cards skips cards; arrow
     /// keys navigate this instead. Empty in the other views.
     home_block_nav: Vec<(u64, u16, bool)>,
+    /// Clickable star cells on the orrery arc: (cell rect, pane id).
+    home_stars: Vec<(Rect, u64)>,
+    /// Sparkline strips along card bottoms: (strip rect, pane id, accent).
+    home_sparks: Vec<(Rect, u64, usize)>,
+    /// The orrery's placement for kitty_overlay: its rect plus each dot's
+    /// pixel position and accent index within it. None when hidden.
+    orrery: Option<(Rect, Vec<(f32, f32, usize)>)>,
     /// Cells reserved beside active claude blocks (blocks view) where the
     /// hopping mascot sprite is placed by kitty_overlay.
     home_mascots: Vec<Rect>,
@@ -630,6 +671,9 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         home_queried: None,
         home_cards: Vec::new(),
         home_block_nav: Vec::new(),
+        home_stars: Vec::new(),
+        home_sparks: Vec::new(),
+        orrery: None,
         home_mascots: Vec::new(),
         kitty_on: crate::kitty::enabled(),
         kitty_placed: Vec::new(),
@@ -969,6 +1013,14 @@ impl App {
             }
             if let K::Down(MouseButton::Left) = m.kind {
                 self.chat_focus = false;
+                // Orrery stars first — they're small and sit above the grid.
+                if let Some(&(_, id)) = self.home_stars.iter().find(|(r, _)| r.contains(pos)) {
+                    if let Some(idx) = self.panes.iter().position(|p| p.id == id) {
+                        self.focus(idx);
+                    }
+                    self.leave_home();
+                    return;
+                }
                 if let Some(i) = self
                     .home_cards
                     .iter()
@@ -1184,6 +1236,8 @@ impl App {
                     p.parser.process(&f.data);
                     if !squelch {
                         p.last_output = Some(Instant::now());
+                        p.rate_tick();
+                        p.rate_cur = p.rate_cur.saturating_add(f.data.len() as u32);
                     }
                     // Braille frames only appear mid-work, so this stamp is
                     // trustworthy even during a repaint storm.
@@ -3425,6 +3479,9 @@ impl App {
     fn draw_home(&mut self, f: &mut Frame, area: Rect) {
         self.home_cards.clear();
         self.home_block_nav.clear();
+        self.home_stars.clear();
+        self.home_sparks.clear();
+        self.orrery = None;
         self.home_mascots.clear();
         if self.pair_open {
             return self.draw_pair_overlay(f, area);
@@ -3449,24 +3506,42 @@ impl App {
             return;
         }
         self.home_sel = self.home_sel.min(n - 1);
-        // Top strip: session moon + host, shared by every home view.
-        // (Host vitals join the right side once SessionState carries them.)
+        // Top strip: session moon + host on the left, host vitals on the
+        // right (absent while attached to an old server). Shared by every
+        // home view.
         let area = if area.height > 4 {
             let pal = self.palette();
             let strip = Rect { height: 1, ..area };
-            f.render_widget(
-                Paragraph::new(Line::from(vec![
-                    Span::styled(
-                        format!(" ☾ {}", self.session),
-                        Style::default().fg(crate::theme::color(pal.accent)).bold(),
-                    ),
-                    Span::styled(
-                        format!("  {}", hostname()),
-                        Style::default().fg(crate::theme::color(pal.dim)),
-                    ),
-                ])),
-                strip,
-            );
+            let label = Style::default().fg(crate::theme::color(pal.faint));
+            let value = Style::default().fg(crate::theme::color(pal.dim));
+            let mut spans = vec![
+                Span::styled(
+                    format!(" ☾ {}", self.session),
+                    Style::default().fg(crate::theme::color(pal.accent)).bold(),
+                ),
+                Span::styled(format!("  {}", hostname()), value),
+            ];
+            let mut right: Vec<Span> = Vec::new();
+            if let Some(hv) = &state.host {
+                let up = fmt_uptime(hv.uptime_ms).trim_start_matches("up ").to_string();
+                right.push(Span::styled("up ", label));
+                right.push(Span::styled(up, value));
+                right.push(Span::styled(" · cpu ", label));
+                right.push(Span::styled(format!("{}%", hv.cpu_pct), value));
+                right.push(Span::styled(" · mem ", label));
+                right.push(Span::styled(format!("{}%", hv.mem_pct), value));
+                right.push(Span::raw(" "));
+            }
+            let used: usize = spans
+                .iter()
+                .chain(right.iter())
+                .map(|s| s.content.chars().count())
+                .sum();
+            spans.push(Span::raw(
+                " ".repeat((area.width as usize).saturating_sub(used)),
+            ));
+            spans.extend(right);
+            f.render_widget(Paragraph::new(Line::from(spans)), strip);
             Rect {
                 y: area.y + 1,
                 height: area.height - 1,
@@ -3480,6 +3555,106 @@ impl App {
             "blocks" => return self.draw_home_blocks(f, area, &state),
             _ => {}
         }
+        // The orrery: a painted brass arc with one status star per pane,
+        // numeral labels, and the pane count under its mouth. Painted-layer
+        // polish only — without kitty (or on short terminals) the cards
+        // simply start higher.
+        let cell = crate::kitty::cell_size();
+        let area = if self.kitty_on && area.height >= 28 && cell.is_some() && area.width >= 40 {
+            let pal = self.palette();
+            let (cw, ch) = cell.unwrap();
+            let orr = Rect { height: 6, ..area };
+            let (pw, ph) = (orr.width as u32 * cw as u32, 6 * ch as u32);
+            let (fcx, fcy) = (pw as f32 / 2.0, ph as f32 * 0.92);
+            let rx = (pw as f32 * 0.42).min(ph as f32 * 4.5);
+            let ry = ph as f32 * 0.72;
+            let mut dots: Vec<(f32, f32, usize)> = Vec::with_capacity(n);
+            let mut counts = [0usize; 5];
+            for (i, p) in state.panes.iter().enumerate() {
+                let (_, _, _, accent) = card_status(p);
+                counts[accent] += 1;
+                let t = std::f32::consts::PI * (0.10 + 0.80 * ((i as f32 + 0.5) / n as f32));
+                let (x, y) = (fcx - rx * t.cos(), fcy - ry * t.sin());
+                dots.push((x, y, accent));
+                let col = orr.x + ((x / cw as f32) as u16).min(orr.width.saturating_sub(1));
+                let row = orr.y + ((y / ch as f32) as u16).min(5);
+                let label = self.card_numeral(i + 1);
+                let lw = (label.chars().count() as u16).min(4).max(1);
+                let lrect = Rect {
+                    x: col.saturating_sub(lw / 2).max(orr.x),
+                    y: (row + 1).min(orr.y + 5),
+                    width: lw.min(orr.right().saturating_sub(col.saturating_sub(lw / 2))),
+                    height: 1,
+                };
+                let style = if accent == 0 {
+                    Style::default()
+                        .fg(crate::theme::color(crate::theme::STATUS_TEXT[0]))
+                        .bold()
+                } else {
+                    Style::default().fg(crate::theme::color(pal.faint))
+                };
+                f.render_widget(Paragraph::new(Span::styled(label, style)), lrect);
+                self.home_stars.push((
+                    Rect {
+                        x: col.saturating_sub(1),
+                        y: row.saturating_sub(1),
+                        width: 3,
+                        height: 3,
+                    },
+                    p.id,
+                ));
+            }
+            // Count + summary, centered in the arc's mouth.
+            let mid = |dy: u16| Rect {
+                x: orr.x,
+                y: orr.y + dy,
+                width: orr.width,
+                height: 1,
+            };
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        roman(n),
+                        Style::default().fg(crate::theme::color(pal.fg)).bold(),
+                    ),
+                    Span::styled(
+                        " panes",
+                        Style::default().fg(crate::theme::color(pal.dim)),
+                    ),
+                ]))
+                .alignment(Alignment::Center),
+                mid(3),
+            );
+            let mut parts: Vec<Span> = Vec::new();
+            for (accent, word) in [(0usize, "need you"), (2, "working"), (3, "finished"), (4, "idle")] {
+                let c = if accent == 2 { counts[1] + counts[2] } else { counts[accent] };
+                if c == 0 {
+                    continue;
+                }
+                if !parts.is_empty() {
+                    parts.push(Span::styled(
+                        " · ",
+                        Style::default().fg(crate::theme::color(pal.faint)),
+                    ));
+                }
+                parts.push(Span::styled(
+                    format!("{c} {word}"),
+                    Style::default().fg(crate::theme::color(crate::theme::STATUS_TEXT[accent])),
+                ));
+            }
+            f.render_widget(
+                Paragraph::new(Line::from(parts)).alignment(Alignment::Center),
+                mid(4),
+            );
+            self.orrery = Some((orr, dots));
+            Rect {
+                y: area.y + 6,
+                height: area.height - 6,
+                ..area
+            }
+        } else {
+            area
+        };
         let (card_w, card_h) = self.card_dims();
         let mut cols = (((area.width.saturating_sub(2) + HOME_GAP_X) / (card_w + HOME_GAP_X))
             as usize)
@@ -3514,10 +3689,25 @@ impl App {
                 continue;
             }
             self.draw_card(f, rect, i + 1, p, i == self.home_sel);
+            let accent = card_status(p).3;
+            if self.kitty_on && rect.height >= 6 && rect.width >= 16 {
+                // Sparkline strip: left half of the card's bottom inner
+                // row (the uptime text keeps the right).
+                self.home_sparks.push((
+                    Rect {
+                        x: rect.x + 2,
+                        y: rect.bottom() - 2,
+                        width: (rect.width / 2).min(rect.width - 4),
+                        height: 1,
+                    },
+                    p.id,
+                    accent,
+                ));
+            }
             self.home_cards.push((
                 rect,
                 p.id,
-                card_status(p).3,
+                accent,
                 p.agent.as_deref() == Some("claude"),
             ));
         }
@@ -4497,6 +4687,78 @@ impl App {
                     self.kitty_sent.insert((pw, ph, id));
                 }
                 desired.push((rect, id));
+            }
+            // The orrery arc above the grid; its id changes with the dot
+            // layout, and the two low bits carry the needs-input pulse frame.
+            if let Some((rect, dots)) = self.orrery.clone() {
+                let (pw, ph) = (rect.width as u32 * cw as u32, rect.height as u32 * ch as u32);
+                let frame = if dots.iter().any(|d| d.2 == 0) {
+                    ((self.anim_start.elapsed().as_millis() / 300) % 4) as u8
+                } else {
+                    0
+                };
+                let id = crate::kitty::orrery_id(&dots, pw, ph, theme_idx, frame);
+                if !self.kitty_sent.contains(&(pw, ph, id)) {
+                    self.kitty_sent.retain(|&(_, _, i2)| i2 != id);
+                    let rgba = crate::kitty::orrery_rgba(
+                        pw,
+                        ph,
+                        &dots,
+                        &crate::theme::STATUS_RAIL,
+                        pal.accent,
+                        frame as f32 / 4.0,
+                    );
+                    let _ = crate::kitty::transmit(&mut out, id, pw, ph, &rgba);
+                    self.kitty_sent.insert((pw, ph, id));
+                }
+                desired.push((rect, id));
+            }
+            // Per-pane sparklines along the card bottoms. Data changes at
+            // most once per 50s bucket, so retransmits stay rare; a change
+            // rolls the image version and frees the stale image.
+            for (rect, pane_id, accent) in self.home_sparks.clone() {
+                let snapshot = {
+                    let Some(p) = self.pane_by_id(pane_id) else { continue };
+                    p.rate_tick();
+                    if p.rate.iter().all(|&b| b == 0) {
+                        continue;
+                    }
+                    let mut key = 0xcbf2_9ce4_8422_2325u64;
+                    for &b in &p.rate {
+                        key = key.wrapping_mul(0x100_0000_01b3) ^ b as u64;
+                    }
+                    let mut stale = None;
+                    if key != p.spark_hash {
+                        if p.spark_hash != 0 {
+                            stale = Some(crate::kitty::spark_id(pane_id, p.spark_ver));
+                        }
+                        p.spark_hash = key;
+                        p.spark_ver = p.spark_ver.wrapping_add(1);
+                    }
+                    (
+                        p.rate.iter().copied().collect::<Vec<u32>>(),
+                        crate::kitty::spark_id(pane_id, p.spark_ver),
+                        stale,
+                    )
+                };
+                let (buckets, sid, stale) = snapshot;
+                if let Some(old) = stale {
+                    let _ = crate::kitty::delete_image(&mut out, old);
+                    self.kitty_sent.retain(|&(_, _, i2)| i2 != old);
+                }
+                let (pw, ph) = (rect.width as u32 * cw as u32, ch as u32);
+                if !self.kitty_sent.contains(&(pw, ph, sid)) {
+                    self.kitty_sent.retain(|&(_, _, i2)| i2 != sid);
+                    let rgba = crate::kitty::spark_rgba(
+                        pw,
+                        ph,
+                        &buckets,
+                        crate::theme::STATUS_RAIL[accent],
+                    );
+                    let _ = crate::kitty::transmit(&mut out, sid, pw, ph, &rgba);
+                    self.kitty_sent.insert((pw, ph, sid));
+                }
+                desired.push((rect, sid));
             }
             desired
         };

@@ -399,6 +399,136 @@ pub fn flat_card_rgba(w: u32, h: u32, s: &FlatCard) -> Vec<u8> {
     px
 }
 
+/// Image-id namespace for the observatory's orrery arc. The id hashes the
+/// dot layout so any status/geometry change lands on a fresh id; the two
+/// low bits carry the needs-input pulse frame.
+pub const ORRERY_BASE: u32 = 0x4F525200; // "ORR\0"
+
+pub fn orrery_id(dots: &[(f32, f32, usize)], w: u32, h: u32, theme_idx: usize, frame: u8) -> u32 {
+    let mut key = (w as u64) << 40 | (h as u64) << 20 | theme_idx as u64;
+    for &(x, y, a) in dots {
+        key = hash(key ^ ((x as u64) << 24 | (y as u64) << 8 | a as u64));
+    }
+    ORRERY_BASE + ((hash(key) as u32 & 0x3FFF) << 2) + (frame as u32 & 3)
+}
+
+/// Straight-alpha overlay write: color wins where its alpha beats what's
+/// already there, alpha only ever grows. Right for sparse strokes on a
+/// transparent ground (stamp() would double-dim through its lerp-from-black).
+fn put_a(px: &mut [u8], w: u32, h: u32, x: i64, y: i64, col: (u8, u8, u8), a: f32) {
+    if x < 0 || y < 0 || x as u32 >= w || y as u32 >= h || a <= 0.003 {
+        return;
+    }
+    let o = ((y as u32 * w + x as u32) * 4) as usize;
+    let na = (a * 255.0).min(255.0) as u8;
+    if na >= px[o + 3] {
+        px[o] = col.0;
+        px[o + 1] = col.1;
+        px[o + 2] = col.2;
+    }
+    px[o + 3] = px[o + 3].max(na);
+}
+
+/// The observatory's orrery: a half-ellipse brass arc with an inner dashed
+/// ring, one status-colored dot per pane along it. Dot positions arrive in
+/// pixels (the text layer computes them too, for the numeral labels).
+/// needs_input dots ride an alpha pulse driven by `pulse` in [0,1).
+pub fn orrery_rgba(
+    w: u32,
+    h: u32,
+    dots: &[(f32, f32, usize)],
+    rails: &[(u8, u8, u8); 5],
+    accent: (u8, u8, u8),
+    pulse: f32,
+) -> Vec<u8> {
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    let (fw, fh) = (w as f32, h as f32);
+    let (cx, cy) = (fw / 2.0, fh * 0.92);
+    let rx = (fw * 0.42).min(fh * 4.5);
+    let ry = fh * 0.72;
+    let steps = (rx * 3.2) as u32;
+    for k in 0..=steps {
+        let t = std::f32::consts::PI * (0.10 + 0.80 * k as f32 / steps as f32);
+        let (x, y) = (cx - rx * t.cos(), cy - ry * t.sin());
+        // Solid outer arc at .30, dashed inner ring at .12.
+        for dy in -1..=1i64 {
+            for dx in -1..=1i64 {
+                let d = ((dx * dx + dy * dy) as f32).sqrt();
+                let a = (1.0 - d * 0.55).max(0.0);
+                put_a(&mut px, w, h, x as i64 + dx, y as i64 + dy, accent, a * 0.30);
+                if (k / 9) % 2 == 0 {
+                    let (ix, iy) = (cx - rx * 0.84 * t.cos(), cy - ry * 0.80 * t.sin());
+                    put_a(&mut px, w, h, ix as i64 + dx, iy as i64 + dy, accent, a * 0.12);
+                }
+            }
+        }
+    }
+    for &(x, y, acc) in dots {
+        let col = rails[acc.min(4)];
+        let needs = acc == 0;
+        let r = if needs { 5.5 } else { 4.5 };
+        let halo = if needs {
+            r + 4.0 + 2.0 * (pulse * std::f32::consts::TAU).sin()
+        } else {
+            r
+        };
+        let span = halo.ceil() as i64 + 1;
+        for dy in -span..=span {
+            for dx in -span..=span {
+                let d = ((dx * dx + dy * dy) as f32).sqrt();
+                let core = (r - d + 0.7).clamp(0.0, 1.0);
+                let glow = if needs {
+                    ((1.0 - (d - r).max(0.0) / (halo - r).max(1.0)).max(0.0)).powi(2)
+                        * (0.22 + 0.18 * (pulse * std::f32::consts::TAU).sin().abs())
+                } else {
+                    0.0
+                };
+                put_a(&mut px, w, h, x as i64 + dx, y as i64 + dy, col, core.max(glow));
+            }
+        }
+    }
+    px
+}
+
+/// Image-id namespace for the per-pane card sparklines. The version byte
+/// rolls whenever the bucket history changes, so stale terminal-side
+/// caches can never show old bars.
+pub const SPARK_BASE: u32 = 0x53504B00; // "SPK\0"
+
+pub fn spark_id(pane_id: u64, ver: u32) -> u32 {
+    SPARK_BASE + ((pane_id as u32 & 0xFF) << 8) + (ver & 0xFF)
+}
+
+/// A pane's output-rate sparkline: up to 12 bars (50s buckets, newest at
+/// the right edge) in the pane's status color, quiet buckets as faint
+/// 1px stubs. Transparent ground; height normalized to the loudest bucket.
+pub fn spark_rgba(w: u32, h: u32, buckets: &[u32], col: (u8, u8, u8)) -> Vec<u8> {
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    const SLOTS: u32 = 12;
+    let max = buckets.iter().copied().max().unwrap_or(0).max(1) as f32;
+    let slot_w = (w / SLOTS).max(1);
+    let bar_w = slot_w.saturating_sub(slot_w / 4).max(1);
+    let first_slot = SLOTS.saturating_sub(buckets.len() as u32);
+    for (i, &b) in buckets.iter().enumerate() {
+        let slot = first_slot + i as u32;
+        // log-ish scale so a chatty compile doesn't flatten everything else
+        let v = ((b as f32).ln_1p() / max.ln_1p()).clamp(0.0, 1.0);
+        let bar_h = ((v * (h as f32 - 1.0)) as u32).max(1);
+        let a = if b == 0 { 0.18 } else { 0.35 + 0.45 * v };
+        let x0 = slot * slot_w;
+        for y in h.saturating_sub(bar_h)..h {
+            for x in x0..(x0 + bar_w).min(w) {
+                let o = ((y * w + x) * 4) as usize;
+                px[o] = col.0;
+                px[o + 1] = col.1;
+                px[o + 2] = col.2;
+                px[o + 3] = (a * 255.0) as u8;
+            }
+        }
+    }
+    px
+}
+
 /// Image-id base for the orb cursor's animation frames ("WOR\0"-ish),
 /// clear of the card range and the pane-image range.
 pub const ORB_BASE: u32 = 0x574F_5200;

@@ -3893,35 +3893,53 @@ impl App {
     /// List view of the home page: one compact block per pane, stacked and
     /// centered, sharing the cards' selection/outline settings. Painted art
     /// stays out of this view — kitty_overlay skips it entirely.
+    /// The ledger: full-width rows under hairline separators, panes that
+    /// need you sorted first. Selection reads as a reticle bracket pair +
+    /// bold name rather than a border.
     fn draw_home_list(&mut self, f: &mut Frame, area: Rect, state: &SessionState) {
         let n = state.panes.len();
         self.home_cols = 1;
-        const ITEM_H: u16 = 4; // bordered block: 2 content lines
-        const STRIDE: u16 = ITEM_H + 1;
-        let w = area.width.saturating_sub(4).clamp(24, 76);
-        let vis = (((area.height + STRIDE - ITEM_H) / STRIDE) as usize).max(1);
+        const ITEM_H: u16 = 3;
+        const STRIDE: u16 = ITEM_H + 1; // + hairline
+        if area.width < 24 || area.height < ITEM_H {
+            return;
+        }
+        let w = area.width.saturating_sub(4);
+        let x0 = area.x + 2;
+        // needs_input rows surface to the top; order is stable otherwise.
+        let mut order: Vec<usize> = (0..n).collect();
+        order.sort_by_key(|&i| card_status(&state.panes[i]).3 != 0);
+        let vis = ((area.height + STRIDE - ITEM_H) / STRIDE).max(1) as usize;
         let off = self.home_sel.saturating_sub(vis - 1);
-        let shown = n.min(vis) as u16;
-        let x0 = area.x + area.width.saturating_sub(w) / 2;
-        let y0 = area.y
-            + area
-                .height
-                .saturating_sub(shown * STRIDE - (STRIDE - ITEM_H))
-                / 2;
-        for (i, p) in state.panes.iter().enumerate() {
-            if i < off || i >= off + vis {
+        for (vi, &pi) in order.iter().enumerate() {
+            if vi < off || vi >= off + vis {
                 continue;
             }
             let rect = Rect {
                 x: x0,
-                y: y0 + (i - off) as u16 * STRIDE,
+                y: area.y + (vi - off) as u16 * STRIDE,
                 width: w,
                 height: ITEM_H,
             };
             if rect.bottom() > area.bottom() {
                 continue;
             }
-            self.draw_list_block(f, rect, i + 1, p, i == self.home_sel);
+            let p = &state.panes[pi];
+            self.draw_list_block(f, rect, pi + 1, p, vi == self.home_sel);
+            // Hairline under the row.
+            if rect.bottom() < area.bottom() {
+                f.render_widget(
+                    Paragraph::new(Span::styled(
+                        "─".repeat(w as usize),
+                        Style::default().fg(crate::theme::color(self.palette().edge)),
+                    )),
+                    Rect {
+                        y: rect.bottom(),
+                        height: 1,
+                        ..rect
+                    },
+                );
+            }
             self.home_cards.push((
                 rect,
                 p.id,
@@ -3932,78 +3950,85 @@ impl App {
     }
 
     fn draw_list_block(&self, f: &mut Frame, rect: Rect, num: usize, p: &PaneState, selected: bool) {
-        let (label, glyph, scolor, _) = card_status(p);
+        let pal = self.palette();
+        let (_, _, _, accent) = card_status(p);
         f.render_widget(Clear, rect);
-        let bt = if selected {
-            match SELECT_WEIGHTS[self.select_weight_idx()].0 {
-                "thick" => BorderType::Thick,
-                "heavy" => BorderType::Double,
-                _ => BorderType::Rounded,
+        let needs = accent == 0;
+        // Faint red wash across rows that want a human.
+        let wash = needs.then_some(Color::Rgb(26, 14, 17));
+        let base = |c: (u8, u8, u8)| {
+            let mut s = Style::default().fg(crate::theme::color(c));
+            if let Some(bg) = wash {
+                s = s.bg(bg);
             }
-        } else if self.card_outline() == "double" {
-            BorderType::Double
-        } else {
-            BorderType::Rounded
+            s
         };
-        let border_style = if selected {
-            Style::default()
-                .fg(self.select_color())
-                .add_modifier(Modifier::BOLD)
+        let iw = rect.width as usize;
+        let sigil = format!("{}\u{FE0E}", ZODIAC[(num - 1) % ZODIAC.len()]);
+        let numeral = roman(num);
+        let status = format!("{} {}", STATUS_GLYPH[accent], STATUS_WORD[accent]);
+        let title_style = base(pal.fg).add_modifier(Modifier::BOLD);
+        let name_max =
+            iw.saturating_sub(9 + numeral.chars().count() + status.chars().count());
+        let name = truncate(&p.name, name_max);
+        let mut row1: Vec<Span> = vec![
+            Span::styled(
+                if selected { "⌜" } else { " " },
+                Style::default().fg(crate::theme::color(pal.accent)).bold(),
+            ),
+            Span::styled("▎", base(crate::theme::STATUS_RAIL[accent])),
+            Span::styled(
+                format!("{sigil} {numeral:<3} "),
+                base(pal.accent),
+            ),
+        ];
+        if accent == 1 || accent == 2 {
+            row1.extend(self.shimmer_spans(&name, title_style));
         } else {
-            Style::default().fg(Color::Indexed(101))
-        };
-        let title_style = if selected {
-            Style::default()
-                .fg(Color::Indexed(220))
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(Color::Indexed(230))
-                .add_modifier(Modifier::BOLD)
-        };
-        let name = truncate(&p.name, rect.width.saturating_sub(14) as usize);
-        let block = Block::bordered()
-            .border_type(bt)
-            .border_style(border_style)
-            .title_top(
-                Line::from(Span::styled(
-                    format!(" {} · {} ", self.card_numeral(num), name),
-                    title_style,
-                ))
-                .left_aligned(),
-            )
-            .title_top(
-                Line::from(Span::styled(
-                    format!(" {glyph} {label} "),
-                    Style::default().fg(scolor).add_modifier(Modifier::BOLD),
-                ))
-                .right_aligned(),
-            );
-        let inner = block.inner(rect);
-        f.render_widget(block, rect);
-        let gold = Style::default().fg(Color::Indexed(179));
-        let dim = Style::default().fg(Color::Indexed(246));
-        let faint = Style::default().fg(Color::Indexed(243));
-        let agent_line = match (&p.agent, &p.version) {
+            row1.push(Span::styled(name.clone(), title_style));
+        }
+        let used = 7 + numeral.chars().count().max(3) + name.chars().count();
+        row1.push(Span::raw(" ".repeat(iw.saturating_sub(used + status.chars().count() + 1))));
+        row1.push(Span::styled(
+            status,
+            base(crate::theme::STATUS_TEXT[accent]),
+        ));
+        // Line 2: the recap/subtitle, indented past the sigil column.
+        let note = p.subtitle.as_deref().or(p.recap.as_deref()).unwrap_or("");
+        let row2 = Line::from(Span::styled(
+            format!("       {}", truncate(note, iw.saturating_sub(8))),
+            base(pal.dim).add_modifier(Modifier::ITALIC),
+        ));
+        // Line 3: agent · cwd, uptime at the right edge.
+        let agent = match (&p.agent, &p.version) {
             (Some(a), Some(v)) => format!("{a} {}", version_token(v)),
             (Some(a), None) => a.clone(),
             (None, _) => "shell".into(),
         };
-        let dir = p
-            .cwd
-            .as_deref()
-            .map(|d| short_dir(d, inner.width.saturating_sub(14) as usize))
-            .unwrap_or_default();
-        let left = vec![
-            Line::from(Span::styled(format!(" {agent_line}"), gold)),
-            Line::from(Span::styled(format!(" {dir}"), faint)),
-        ];
-        let right = vec![
-            Line::from(Span::styled(format!("{} ", fmt_uptime(p.uptime_ms)), dim)),
-            Line::default(),
-        ];
-        f.render_widget(Paragraph::new(left), inner);
-        f.render_widget(Paragraph::new(right).alignment(Alignment::Right), inner);
+        let mut meta = agent;
+        if let Some(d) = p.cwd.as_deref() {
+            meta.push_str(" · ");
+            meta.push_str(&short_dir(d, iw.saturating_sub(meta.chars().count() + 22)));
+        }
+        if let Some(h) = p.ssh.as_deref() {
+            meta.push_str(" · ssh ");
+            meta.push_str(h);
+        }
+        let up = format!("↑{}", fmt_uptime(p.uptime_ms).trim_start_matches("up "));
+        let meta = truncate(&meta, iw.saturating_sub(10 + up.chars().count()));
+        let mut row3 = vec![Span::styled(format!("       {meta}"), base(pal.faint))];
+        row3.push(Span::raw(" ".repeat(
+            iw.saturating_sub(7 + meta.chars().count() + up.chars().count() + 2),
+        )));
+        row3.push(Span::styled(up, base(pal.faint)));
+        row3.push(Span::styled(
+            if selected { " ⌟" } else { "  " },
+            Style::default().fg(crate::theme::color(pal.accent)).bold(),
+        ));
+        f.render_widget(
+            Paragraph::new(vec![Line::from(row1), row2, Line::from(row3)]),
+            rect,
+        );
     }
 
     /// Blocks view: two flat columns divided by rules — shells on the left,
@@ -4012,17 +4037,21 @@ impl App {
     /// get the hopping mascot sprite (placed by kitty_overlay).
     fn draw_home_blocks(&mut self, f: &mut Frame, area: Rect, state: &SessionState) {
         self.home_cols = 2;
+        let pal = self.palette();
         let sep = Style::default().fg(self.home_sep_color());
-        // 4 info rows, extra breathing room with bigger card sizes, then
-        // the rule underneath.
-        let stride = (5 + self.card_size_idx()) as u16;
-        if area.width < 20 || area.height < stride + 2 {
+        // Title + meta rows, the transcript well, breathing room that
+        // grows with the card-size setting, then the rule underneath.
+        let stride = (8 + self.card_size_idx()) as u16;
+        if area.width < 30 || area.height < stride + 2 {
             return;
         }
-        let col_w = area.width.saturating_sub(5) / 2;
+        // Shells keep a fixed narrow column; agents get the rest — their
+        // blocks carry the transcript well and earn the width.
+        let shell_w = 30.min(area.width.saturating_sub(5) / 2);
         let lx = area.x + 1;
-        let sx = lx + col_w + 1;
+        let sx = lx + shell_w + 1;
         let rx = sx + 2;
+        let agent_w = area.right().saturating_sub(rx + 1);
         let shells: Vec<usize> = (0..state.panes.len())
             .filter(|&i| state.panes[i].agent.is_none())
             .collect();
@@ -4046,10 +4075,12 @@ impl App {
             .map(|&(pi, r)| (state.panes[pi].id, r, state.panes[pi].agent.is_none()))
             .collect();
         // Column headers + the rule under them.
-        let hdr = Style::default().fg(Color::Indexed(246)).bold();
+        let hdr = Style::default()
+            .fg(crate::theme::color(pal.faint))
+            .bold();
         let buf = f.buffer_mut();
-        buf.set_string(lx, area.y, "Shells", hdr);
-        buf.set_string(rx, area.y, "Agents", hdr);
+        buf.set_string(lx, area.y, "S H E L L S", hdr);
+        buf.set_string(rx, area.y, "A G E N T S", hdr);
         let rule: String = "─".repeat(area.width.saturating_sub(2) as usize);
         buf.set_string(area.x + 1, area.y + 1, &rule, sep);
         // Vertical rule between the columns, full height.
@@ -4064,7 +4095,6 @@ impl App {
             .map(|&(_, r)| r as usize)
             .unwrap_or(0);
         let off = sel_row.saturating_sub(vis - 1);
-        let hsep: String = "─".repeat(col_w as usize);
         for (vi, &(pi, row)) in order.iter().enumerate() {
             let r = row as usize;
             if r < off || r >= off + vis {
@@ -4072,6 +4102,7 @@ impl App {
             }
             let p = &state.panes[pi];
             let left = p.agent.is_none();
+            let col_w = if left { shell_w } else { agent_w };
             let rect = Rect {
                 x: if left { lx } else { rx },
                 y: y0 + ((r - off) as u16) * stride,
@@ -4085,7 +4116,7 @@ impl App {
             let (_, _, _, accent) = card_status(p);
             let claude = p.agent.as_deref() == Some("claude");
             let active = claude && (accent == 1 || accent == 2);
-            let mascot_w: u16 = if active && self.kitty_on && col_w > 24 { 6 } else { 0 };
+            let mascot_w: u16 = if active && self.kitty_on && col_w > 40 { 6 } else { 0 };
             self.draw_block(f, rect, pi + 1, p, selected, mascot_w);
             if mascot_w > 0 {
                 self.home_mascots.push(Rect {
@@ -4102,6 +4133,7 @@ impl App {
             } else {
                 sep
             };
+            let hsep: String = "─".repeat(col_w as usize);
             f.buffer_mut().set_string(rect.x, rect.bottom(), &hsep, st);
             self.home_cards.push((rect, p.id, accent, claude));
         }
@@ -4118,68 +4150,92 @@ impl App {
         selected: bool,
         mascot_w: u16,
     ) {
-        let (label, glyph, scolor, _) = card_status(p);
+        let pal = self.palette();
+        let (_, _, _, accent) = card_status(p);
         f.render_widget(Clear, rect);
-        let gold = Style::default().fg(Color::Indexed(179));
-        let dim = Style::default().fg(Color::Indexed(246));
-        let faint = Style::default().fg(Color::Indexed(243));
+        let dim = Style::default().fg(crate::theme::color(pal.dim));
         let title_style = if selected {
             Style::default()
                 .fg(self.select_color())
                 .add_modifier(Modifier::BOLD)
         } else {
             Style::default()
-                .fg(Color::Indexed(230))
+                .fg(crate::theme::color(pal.fg))
                 .add_modifier(Modifier::BOLD)
         };
-        let marker = if selected { "›" } else { " " };
         let tw = rect.width.saturating_sub(mascot_w) as usize;
-        let ssh_suffix = p.ssh.as_deref().map(|h| format!(" — SSH: {h}"));
-        let ssh_len = ssh_suffix.as_deref().map_or(0, |s| s.chars().count());
-        let name = truncate(&p.name, tw.saturating_sub(12 + ssh_len));
-        let agent_line = match (&p.agent, &p.version) {
+        let name = truncate(&p.name, tw.saturating_sub(18));
+        let sigil = format!("{}\u{FE0E}", ZODIAC[(num - 1) % ZODIAC.len()]);
+        let mut title_spans = vec![
+            Span::styled(
+                if selected { "⌜" } else { " " },
+                Style::default().fg(crate::theme::color(pal.accent)).bold(),
+            ),
+            Span::styled(
+                "▎",
+                Style::default().fg(crate::theme::color(crate::theme::STATUS_RAIL[accent])),
+            ),
+            Span::styled(
+                format!("{sigil} "),
+                Style::default().fg(crate::theme::color(pal.accent)),
+            ),
+        ];
+        if accent == 1 || accent == 2 {
+            title_spans.extend(self.shimmer_spans(&name, title_style));
+        } else {
+            title_spans.push(Span::styled(name, title_style));
+        }
+        // Meta: agent + version · uptime · cwd (· ssh), one dim line.
+        let mut meta = match (&p.agent, &p.version) {
             (Some(a), Some(v)) => format!("{a} {}", version_token(v)),
             (Some(a), None) => a.clone(),
             (None, _) => "shell".into(),
         };
-        let recap_line = match &p.recap {
-            Some(r) => Line::from(vec![
-                Span::styled("  ⏺ ".to_string(), Style::default().fg(scolor)),
-                Span::styled(
-                    truncate(r, tw.saturating_sub(5)),
-                    Style::default()
-                        .fg(Color::Indexed(246))
-                        .add_modifier(Modifier::ITALIC),
-                ),
-            ]),
-            None => Line::default(),
-        };
-        let mut title_spans = vec![Span::styled(
-            format!("{marker} {} · {}", self.card_numeral(num), name),
-            title_style,
-        )];
-        if let Some(sfx) = &ssh_suffix {
-            title_spans.push(Span::styled(sfx.clone(), Style::default().fg(Color::Indexed(108))));
+        meta.push_str(" · ↑");
+        meta.push_str(fmt_uptime(p.uptime_ms).trim_start_matches("up "));
+        if let Some(d) = p.cwd.as_deref() {
+            meta.push_str(" · ");
+            meta.push_str(&short_dir(d, tw.saturating_sub(meta.chars().count() + 5)));
         }
-        let left = vec![
+        if let Some(h) = p.ssh.as_deref() {
+            meta.push_str(" · ssh ");
+            meta.push_str(h);
+        }
+        let mut lines = vec![
             Line::from(title_spans),
-            Line::from(vec![
-                Span::styled(format!("  {agent_line}"), gold),
-                Span::styled(format!(" · {}", fmt_uptime(p.uptime_ms)), dim),
-            ]),
             Line::from(Span::styled(
-                format!(
-                    "  {}",
-                    p.cwd
-                        .as_deref()
-                        .map(|d| short_dir(d, tw.saturating_sub(3)))
-                        .unwrap_or_default()
-                ),
-                faint,
+                format!("   {}", truncate(&meta, tw.saturating_sub(4))),
+                dim,
             )),
-            recap_line,
         ];
-        f.render_widget(Paragraph::new(left), rect);
+        let well_rows = (rect.height as usize).saturating_sub(3);
+        if !p.tail.is_empty() && well_rows > 0 {
+            // The transcript well: the pane's last rendered lines on an
+            // inset darker ground.
+            let well_bg = Color::Rgb(5, 7, 16);
+            let well_fg = Style::default().fg(Color::Rgb(178, 186, 206)).bg(well_bg);
+            let ww = tw.saturating_sub(6);
+            for l in p.tail.iter().rev().take(well_rows).rev() {
+                let t = truncate(l, ww);
+                let pad = ww.saturating_sub(t.chars().count());
+                lines.push(Line::from(vec![
+                    Span::raw("   "),
+                    Span::styled(format!(" {t}{} ", " ".repeat(pad)), well_fg),
+                ]));
+            }
+        } else if let Some(r) = &p.recap {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    "   ⏺ ".to_string(),
+                    Style::default().fg(crate::theme::color(crate::theme::STATUS_TEXT[accent])),
+                ),
+                Span::styled(
+                    truncate(r, tw.saturating_sub(6)),
+                    dim.add_modifier(Modifier::ITALIC),
+                ),
+            ]));
+        }
+        f.render_widget(Paragraph::new(lines), rect);
         // Status pinned to the block's top-right, clear of the mascot zone.
         let srect = Rect {
             x: rect.x,
@@ -4189,8 +4245,8 @@ impl App {
         };
         f.render_widget(
             Paragraph::new(Line::from(Span::styled(
-                format!("{glyph} {label}"),
-                Style::default().fg(scolor).add_modifier(Modifier::BOLD),
+                format!("{} {}", STATUS_GLYPH[accent], STATUS_WORD[accent]),
+                Style::default().fg(crate::theme::color(crate::theme::STATUS_TEXT[accent])),
             )))
             .alignment(Alignment::Right),
             srect,

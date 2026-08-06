@@ -313,6 +313,29 @@ impl SrvPane {
         None
     }
 
+    /// The last `n` non-blank rendered screen lines, oldest first — the
+    /// charts view's transcript well. Only meaningful for agent panes;
+    /// callers skip shells.
+    pub fn tail_lines(&self, n: usize) -> Vec<String> {
+        let text = self.screen_text();
+        let mut out: Vec<String> = text
+            .lines()
+            .rev()
+            .map(str::trim_end)
+            .filter(|l| !l.trim().is_empty())
+            .take(n)
+            .map(|l| {
+                let mut s: String = l.chars().take(120).collect();
+                if l.chars().nth(120).is_some() {
+                    s.push('…');
+                }
+                s
+            })
+            .collect();
+        out.reverse();
+        out
+    }
+
     /// Semantic agent status, herdr-style. A braille title frame means
     /// working; "✳" is ambiguous: Claude Code's title spinner cycles
     /// ✳/⠂/⠐/… while working and merely rests on ✳ when idle. Mid-work rest

@@ -879,6 +879,11 @@ impl Server {
                     recap: p.recap(),
                     subtitle: p.subtitle.clone(),
                     ssh: p.ssh_target(),
+                    tail: if p.agent().is_some() {
+                        p.tail_lines(3)
+                    } else {
+                        Vec::new()
+                    },
                 })
                 .collect(),
             host: host_vitals(),

@@ -149,6 +149,10 @@ pub struct PaneState {
     /// The host this pane's shell is `ssh`'d into, if any.
     #[serde(default)]
     pub ssh: Option<String>,
+    /// The last few non-blank lines of the pane's rendered screen — the
+    /// charts view's transcript well. Empty for shells.
+    #[serde(default)]
+    pub tail: Vec<String>,
 }
 
 #[derive(Serialize, Deserialize, Clone)]

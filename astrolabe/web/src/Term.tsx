@@ -292,7 +292,8 @@ export const Term = forwardRef<
       fontSize: mirrorFont,
       fontFamily: MONO,
       lineHeight: 1.1,
-      scrollback: 10000,
+      // sized to hold everything a full 2 MiB server ring can replay
+      scrollback: 30000,
       disableStdin: true,
       convertEol: false,
       theme: themeColors(),

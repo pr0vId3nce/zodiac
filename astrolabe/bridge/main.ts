@@ -369,6 +369,16 @@ function onClientMessage(c: Client, raw: string) {
         }
         break;
       }
+      case "rename": {
+        if (
+          paneExists(msg.pane) &&
+          typeof msg.name === "string" &&
+          msg.name.length <= 80
+        ) {
+          link.rename(msg.pane, msg.name);
+        }
+        break;
+      }
       case "input": {
         if (paneExists(msg.pane) && typeof msg.data === "string") {
           link.input(msg.pane, Buffer.from(msg.data, "utf8"));

@@ -11,6 +11,7 @@ import { EventEmitter } from "node:events";
 
 // client -> server
 export const T_INPUT = 1;
+export const T_RENAME = 5;
 export const T_QUERY = 11;
 export const T_READ_SCREEN = 12;
 export const T_WATCH = 14;
@@ -111,6 +112,11 @@ export class ZodiacLink extends EventEmitter {
 
   input(pane: number, data: Buffer) {
     this.send(T_INPUT, pane, data);
+  }
+
+  /** Rename a pane; an empty name clears the pin back to auto-naming. */
+  rename(pane: number, name: string) {
+    this.send(T_RENAME, pane, Buffer.from(name, "utf8"));
   }
 
   /** Type text, pause, then Enter — same pacing as `zodiac prompt`. */

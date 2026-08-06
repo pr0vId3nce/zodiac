@@ -93,10 +93,11 @@ struct Server {
     client_gfx: bool,
     /// Image payloads already delivered this attach: (pane, image, ver).
     gfx_sent: std::collections::HashSet<(u64, u32, u32)>,
-    /// Random secret minted once for this process's lifetime — see
-    /// `gen_pairing_token`. Rides along on every `SessionState` broadcast so
-    /// the astrolabe bridge (and, via it, the phone) can tell a fresh server
-    /// launch apart from a client detach/reattach, which never touches this.
+    /// Random secret minted on this session's first-ever launch and
+    /// persisted in the state dir — see `load_or_mint_pairing_token`. Rides
+    /// along on every `SessionState` broadcast so the astrolabe bridge (and,
+    /// via it, the phone) can authenticate; surviving restarts means a phone
+    /// paired once stays paired.
     pairing_token: String,
 }
 
@@ -120,6 +121,32 @@ fn gen_pairing_token() -> String {
         buf.copy_from_slice(&seed.to_le_bytes()[..16]);
     }
     buf.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The session's pairing token, persisted at
+/// `<state_dir>/<session>/pairing_token` (0600) so phones paired once stay
+/// paired across server restarts. Minted on first launch; deleting the file
+/// revokes every paired phone — the next launch mints a fresh token and
+/// each phone re-scans the Alt+P QR.
+fn load_or_mint_pairing_token(session: &str) -> String {
+    let path = crate::protocol::state_dir(session).join("pairing_token");
+    if let Ok(tok) = std::fs::read_to_string(&path) {
+        let tok = tok.trim().to_string();
+        if tok.len() >= 32 && tok.chars().all(|c| c.is_ascii_hexdigit()) {
+            return tok;
+        }
+    }
+    let tok = gen_pairing_token();
+    if let Some(dir) = path.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    let _ = std::fs::write(&path, &tok);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    tok
 }
 
 /// Output arriving this soon after a resize is treated as the SIGWINCH
@@ -178,7 +205,7 @@ pub fn run(session: &str) -> Result<()> {
         client_cell: (0, 0),
         client_gfx: false,
         gfx_sent: std::collections::HashSet::new(),
-        pairing_token: gen_pairing_token(),
+        pairing_token: load_or_mint_pairing_token(session),
     };
     srv.restore()?;
     srv.save_meta();

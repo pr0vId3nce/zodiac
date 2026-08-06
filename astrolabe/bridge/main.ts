@@ -63,11 +63,12 @@ const TOKEN = process.env.ASTROLABE_TOKEN || null;
 const PUSH_REDACT = !!process.env.ASTROLABE_PUSH_REDACT;
 const MAX_CLIENTS = 20;
 
-/** The connected zodiac server's current per-launch pairing token (see
-    src/server.rs's gen_pairing_token / Alt+P in the TUI). Rotates on a
-    fresh zodiac launch, stable across detach/reattach, `null` before the
-    first state arrives or against an old server that predates this field —
-    updated by the `link.on("state", ...)` handler below. */
+/** The connected zodiac server's pairing token (see src/server.rs's
+    load_or_mint_pairing_token / Alt+P in the TUI). Persisted server-side,
+    so it survives restarts — a phone paired once stays paired until the
+    token file is deleted. `null` before the first state arrives or against
+    an old server that predates this field — updated by the
+    `link.on("state", ...)` handler below. */
 let sessionToken: string | null = null;
 
 if (!TOKEN) {

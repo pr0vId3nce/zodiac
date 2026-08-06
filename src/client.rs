@@ -5290,7 +5290,9 @@ impl App {
             Some(S::Sleeping) => (0.60, 0.70, 0.45),
             _ => (0.60, 0.65, 0.12), // away/unknown: nearly monochrome
         };
-        let (cx, cy) = (rect.width as f32 / 2.0, rect.height as f32 / 2.0 - 0.1);
+        // −1.1: centered, then lifted exactly one cell so the orb floats
+        // clear of the status line beneath it.
+        let (cx, cy) = (rect.width as f32 / 2.0, rect.height as f32 / 2.0 - 1.1);
         let ry = rect.height as f32 * 0.48;
         let rx = ry * 2.05; // terminal cells are ~2:1
         let ramp: &[char] = &[' ', '·', ':', '≈', '∗', 'o', 'O', '@'];
@@ -5693,7 +5695,7 @@ impl App {
                 Style::default().fg(crate::theme::color(pal.accent)).bold(),
             ),
             Span::styled(
-                if blink { "▏" } else { " " },
+                if blink { " ▏" } else { "  " },
                 Style::default().fg(crate::theme::color(pal.phosphor)),
             ),
         ]

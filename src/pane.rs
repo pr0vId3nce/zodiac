@@ -40,6 +40,12 @@ pub struct SrvPane {
     /// ✳ rest frames mid-work read as working without fresh output alone
     /// doing so (see `status()`).
     last_title_working: Option<Instant>,
+    /// Process-walk memos: (when probed, result). `agent()`/`ssh_target()`
+    /// run several times per pane per state broadcast, and each fresh walk
+    /// reads the whole process table — the tree doesn't change fast enough
+    /// to deserve that. RefCell: panes live on the single event-loop thread.
+    agent_memo: std::cell::RefCell<Option<(Instant, Option<String>)>>,
+    ssh_memo: std::cell::RefCell<Option<(Instant, Option<String>)>>,
     pub activity: bool,
     pub attention: bool,
     pub auto_resume: bool,
@@ -161,6 +167,8 @@ impl SrvPane {
             bell_count: 0,
             last_output: None,
             last_title_working: None,
+            agent_memo: std::cell::RefCell::new(None),
+            ssh_memo: std::cell::RefCell::new(None),
             activity: false,
             attention: false,
             auto_resume: true,
@@ -226,7 +234,13 @@ impl SrvPane {
             }
         }
         self.ring.extend_from_slice(&out);
-        if self.ring.len() > RING_CAP {
+        // Trim with hysteresis: draining to CAP on every 8 KiB read is a
+        // ~2 MiB memmove per chunk once full (~250× write amplification
+        // during a big cat). Letting it overshoot by a block first makes
+        // the copy amortized-rare; replay consumers only ever want "about
+        // the last RING_CAP bytes" anyway.
+        const RING_SLACK: usize = 256 * 1024;
+        if self.ring.len() > RING_CAP + RING_SLACK {
             let cut = self.ring.len() - RING_CAP;
             self.ring.drain(..cut);
         }
@@ -291,51 +305,6 @@ impl SrvPane {
         h.finish()
     }
 
-    /// The agent's most recent transcript bullet: the lowest on-screen line
-    /// starting with "⏺"/"●" (Claude Code's response/tool markers). Shells
-    /// get None, as does an agent screen with no bullet in view.
-    pub fn recap(&self) -> Option<String> {
-        self.agent()?;
-        for line in self.screen_text().lines().rev() {
-            let t = line.trim_start();
-            if let Some(rest) = t.strip_prefix('⏺').or_else(|| t.strip_prefix('●')) {
-                let text = rest.split_whitespace().collect::<Vec<_>>().join(" ");
-                if text.is_empty() {
-                    continue;
-                }
-                let mut out: String = text.chars().take(120).collect();
-                if text.chars().nth(120).is_some() {
-                    out.push('…');
-                }
-                return Some(out);
-            }
-        }
-        None
-    }
-
-    /// The last `n` non-blank rendered screen lines, oldest first — the
-    /// charts view's transcript well. Only meaningful for agent panes;
-    /// callers skip shells.
-    pub fn tail_lines(&self, n: usize) -> Vec<String> {
-        let text = self.screen_text();
-        let mut out: Vec<String> = text
-            .lines()
-            .rev()
-            .map(str::trim_end)
-            .filter(|l| !l.trim().is_empty())
-            .take(n)
-            .map(|l| {
-                let mut s: String = l.chars().take(120).collect();
-                if l.chars().nth(120).is_some() {
-                    s.push('…');
-                }
-                s
-            })
-            .collect();
-        out.reverse();
-        out
-    }
-
     /// Semantic agent status, herdr-style. A braille title frame means
     /// working; "✳" is ambiguous: Claude Code's title spinner cycles
     /// ✳/⠂/⠐/… while working and merely rests on ✳ when idle. Mid-work rest
@@ -377,20 +346,33 @@ impl SrvPane {
         stall_match(self.parser.screen(), conn_watch)
     }
 
-    /// Which agent runs in this pane: title patterns first, then a /proc
-    /// walk over the shell's descendants for known agent binaries.
+    /// Which agent runs in this pane: title patterns first (cheap, always
+    /// fresh), then a process-tree walk memoized for a couple of seconds.
     pub fn agent(&self) -> Option<String> {
         if let Some(a) = crate::protocol::agent_from_title(&self.title()) {
             return Some(a.to_string());
         }
-        self.pid.and_then(detect_agent_process)
+        if let Some((t, v)) = self.agent_memo.borrow().clone() {
+            if t.elapsed() < Duration::from_secs(2) {
+                return v;
+            }
+        }
+        let v = self.pid.and_then(detect_agent_process);
+        *self.agent_memo.borrow_mut() = Some((Instant::now(), v.clone()));
+        v
     }
 
-    /// The host this pane's shell is `ssh`'d into, if any — a /proc walk
-    /// over its descendants, same shape as `agent()` but for a live `ssh`
-    /// client process instead of a known agent binary.
+    /// The host this pane's shell is `ssh`'d into, if any — a process walk
+    /// over its descendants, same shape as `agent()`, memoized the same way.
     pub fn ssh_target(&self) -> Option<String> {
-        self.pid.and_then(detect_ssh_process)
+        if let Some((t, v)) = self.ssh_memo.borrow().clone() {
+            if t.elapsed() < Duration::from_secs(2) {
+                return v;
+            }
+        }
+        let v = self.pid.and_then(detect_ssh_process);
+        *self.ssh_memo.borrow_mut() = Some((Instant::now(), v.clone()));
+        v
     }
 
     /// API-stall watchdog: true when this pane should be auto-resumed now.
@@ -1216,6 +1198,49 @@ fn macos_args(pid: u32) -> Vec<String> {
         args.push(String::from_utf8_lossy(chunk).into_owned());
     }
     args
+}
+
+/// The agent's most recent transcript bullet out of an already-rendered
+/// screen: the lowest line starting with "⏺"/"●" (Claude Code's response/
+/// tool markers). Free function so `state()` can render each pane's screen
+/// once and feed both this and `tail_lines_in`.
+pub fn recap_in(text: &str) -> Option<String> {
+    for line in text.lines().rev() {
+        let t = line.trim_start();
+        if let Some(rest) = t.strip_prefix('⏺').or_else(|| t.strip_prefix('●')) {
+            let s = rest.split_whitespace().collect::<Vec<_>>().join(" ");
+            if s.is_empty() {
+                continue;
+            }
+            let mut out: String = s.chars().take(120).collect();
+            if s.chars().nth(120).is_some() {
+                out.push('…');
+            }
+            return Some(out);
+        }
+    }
+    None
+}
+
+/// The last `n` non-blank lines of an already-rendered screen, oldest
+/// first — the charts view's transcript well.
+pub fn tail_lines_in(text: &str, n: usize) -> Vec<String> {
+    let mut out: Vec<String> = text
+        .lines()
+        .rev()
+        .map(str::trim_end)
+        .filter(|l| !l.trim().is_empty())
+        .take(n)
+        .map(|l| {
+            let mut s: String = l.chars().take(120).collect();
+            if l.chars().nth(120).is_some() {
+                s.push('…');
+            }
+            s
+        })
+        .collect();
+    out.reverse();
+    out
 }
 
 /// Find a known agent binary among the descendants of `root`. Matches the

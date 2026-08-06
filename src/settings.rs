@@ -7,7 +7,7 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     #[serde(default)]
     pub spinner: String,
@@ -206,6 +206,24 @@ impl Settings {
             .ok()
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default()
+    }
+
+    /// `load()` behind a 1s cache — the server's per-second ticks re-read
+    /// config several times a tick to apply toggles live; one disk read +
+    /// parse per second is exactly as live.
+    pub fn cached() -> Self {
+        use std::sync::Mutex;
+        use std::time::{Duration, Instant};
+        static CACHE: Mutex<Option<(Instant, Settings)>> = Mutex::new(None);
+        let mut cache = CACHE.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some((at, s)) = cache.as_ref() {
+            if at.elapsed() < Duration::from_secs(1) {
+                return s.clone();
+            }
+        }
+        let s = Self::load();
+        *cache = Some((Instant::now(), s.clone()));
+        s
     }
 
     /// The finish sound as it would resolve right now: "off", a file name

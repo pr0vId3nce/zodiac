@@ -498,6 +498,12 @@ struct App {
     /// long the flat ±cols grid math over home_cards skips cards; arrow
     /// keys navigate this instead. Empty in the other views.
     home_block_nav: Vec<(u64, u16, bool)>,
+    /// Every pane's id in the current home view's drawn order (cards:
+    /// pane order, list: needs-first sort, blocks: column interleave).
+    /// `home_sel` indexes THIS — home_cards only holds the rows that were
+    /// scrolled into view, so keyboard math over it broke off-screen
+    /// selection (Enter no-oping or opening the wrong pane).
+    home_order: Vec<u64>,
     /// Clickable star cells on the orrery arc: (cell rect, pane id).
     home_stars: Vec<(Rect, u64)>,
     /// Sparkline strips along card bottoms: (strip rect, pane id, accent).
@@ -507,6 +513,10 @@ struct App {
     /// The orrery's placement for kitty_overlay: its rect plus each dot's
     /// pixel position and accent index within it. None when hidden.
     orrery: Option<(Rect, Vec<(f32, f32, usize)>)>,
+    /// The live orrery layout's image-id family (id with the two pulse-
+    /// frame bits masked off) — a changed layout frees the old family's
+    /// four frames instead of letting every status change leak images.
+    orrery_live: Option<u32>,
     /// Cells reserved beside active claude blocks (blocks view) where the
     /// hopping mascot sprite is placed by kitty_overlay.
     home_mascots: Vec<Rect>,
@@ -668,10 +678,12 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         home_queried: None,
         home_cards: Vec::new(),
         home_block_nav: Vec::new(),
+        home_order: Vec::new(),
         home_stars: Vec::new(),
         home_sparks: Vec::new(),
         sidebar_row_off: 0,
         orrery: None,
+        orrery_live: None,
         home_mascots: Vec::new(),
         kitty_on: crate::kitty::enabled(),
         kitty_placed: Vec::new(),
@@ -1032,8 +1044,12 @@ impl App {
                     .iter()
                     .position(|(r, _, _, _)| r.contains(pos))
                 {
-                    self.home_sel = i;
                     let id = self.home_cards[i].1;
+                    // home_sel indexes the full drawn order, not the
+                    // visible-row list the hit-test searched.
+                    if let Some(o) = self.home_order.iter().position(|&x| x == id) {
+                        self.home_sel = o;
+                    }
                     if let Some(idx) = self.panes.iter().position(|p| p.id == id) {
                         self.focus(idx);
                     }
@@ -1864,7 +1880,14 @@ impl App {
             self.leave_home();
         } else {
             self.home = true;
-            self.home_sel = self.active;
+            // Land on the pane we're leaving. The list/blocks views draw
+            // in their own order, so map by id through the last drawn
+            // order rather than assuming pane order.
+            self.home_sel = self
+                .panes
+                .get(self.active)
+                .and_then(|p| self.home_order.iter().position(|&id| id == p.id))
+                .unwrap_or(self.active);
             self.send(T_QUERY, 0, &[]);
             self.home_queried = Some(Instant::now());
         }
@@ -1898,7 +1921,9 @@ impl App {
         if !self.home_block_nav.is_empty() {
             return self.handle_home_blocks_key(key);
         }
-        let n = self.home_cards.len();
+        // The drawn order covers every pane; home_cards only holds the
+        // scrolled-into-view rows and must not bound navigation.
+        let n = self.home_order.len();
         let cols = self.home_cols.max(1);
         match key.code {
             KeyCode::Esc => self.leave_home(),
@@ -1926,7 +1951,7 @@ impl App {
                 }
             }
             KeyCode::Enter => {
-                if let Some(&(_, id, _, _)) = self.home_cards.get(self.home_sel) {
+                if let Some(&id) = self.home_order.get(self.home_sel) {
                     if let Some(idx) = self.panes.iter().position(|p| p.id == id) {
                         self.focus(idx);
                     }
@@ -3627,8 +3652,12 @@ impl App {
         };
         let n = state.panes.len();
         if n == 0 {
+            self.home_order.clear();
             return;
         }
+        // Default (cards) order; the list/blocks branches overwrite it
+        // with their own drawn order before returning.
+        self.home_order = state.panes.iter().map(|p| p.id).collect();
         self.home_sel = self.home_sel.min(n - 1);
         // Top strip: session moon + host on the left, host vitals on the
         // right (absent while attached to an old server). Shared by every
@@ -3993,6 +4022,7 @@ impl App {
         // needs_input rows surface to the top; order is stable otherwise.
         let mut order: Vec<usize> = (0..n).collect();
         order.sort_by_key(|&i| card_status(&state.panes[i]).3 != 0);
+        self.home_order = order.iter().map(|&pi| state.panes[pi].id).collect();
         let vis = ((area.height + STRIDE - ITEM_H) / STRIDE).max(1) as usize;
         let off = self.home_sel.saturating_sub(vis - 1);
         for (vi, &pi) in order.iter().enumerate() {
@@ -4154,6 +4184,7 @@ impl App {
             .iter()
             .map(|&(pi, r)| (state.panes[pi].id, r, state.panes[pi].agent.is_none()))
             .collect();
+        self.home_order = self.home_block_nav.iter().map(|&(id, _, _)| id).collect();
         // Column headers + the rule under them.
         let hdr = Style::default()
             .fg(crate::theme::color(pal.faint))
@@ -4815,8 +4846,26 @@ impl App {
             self.card_numeral_style(),
         );
         if self.kitty_last_icon != style_key {
+            // Free the old style's images terminal-side before forgetting
+            // them — clear() alone leaked the whole previous set into the
+            // terminal's store on every theme/setting cycle. Their
+            // placements die with them, so force a full re-place too.
+            for &(_, _, id) in self.kitty_sent.iter() {
+                let _ = crate::kitty::delete_image(&mut out, id);
+            }
             self.kitty_sent.clear();
+            self.kitty_placed.clear();
             self.kitty_last_icon = style_key;
+        }
+        // Safety valve for churny id spaces (orrery layouts, scrollbar
+        // buckets, resizes): past a sane ceiling, drop everything and let
+        // the next frames retransmit just what's actually visible.
+        if self.kitty_sent.len() > 160 {
+            for &(_, _, id) in self.kitty_sent.iter() {
+                let _ = crate::kitty::delete_image(&mut out, id);
+            }
+            self.kitty_sent.clear();
+            self.kitty_placed.clear();
         }
 
         // Desired placements: the pairing QR alone while that overlay is
@@ -4906,9 +4955,12 @@ impl App {
                 .unwrap_or(0);
             let size_idx = self.card_size_idx();
             let cards = self.home_cards.clone();
+            // By id: home_cards holds only the visible rows, so its index
+            // diverges from home_sel whenever the grid is scrolled.
+            let sel_id = self.home_order.get(self.home_sel).copied();
             let mut desired: Vec<(Rect, u32)> = Vec::with_capacity(cards.len());
-            for (i, &(rect, _, accent, _claude)) in cards.iter().enumerate() {
-                let selected = i == self.home_sel;
+            for &(rect, id, accent, _claude) in cards.iter() {
+                let selected = Some(id) == sel_id;
                 let id = crate::kitty::flat_card_id(accent, size_idx, selected, theme_idx);
                 let (pw, ph) = (rect.width as u32 * cw as u32, rect.height as u32 * ch as u32);
                 // Transmit up front so placement swaps below are instant.
@@ -4971,6 +5023,17 @@ impl App {
                     0
                 };
                 let id = crate::kitty::orrery_id(&dots, pw, ph, theme_idx, frame);
+                // A new layout retires the old one's four pulse frames.
+                let family = id & !3;
+                if self.orrery_live != Some(family) {
+                    if let Some(old) = self.orrery_live {
+                        for f in 0..4 {
+                            let _ = crate::kitty::delete_image(&mut out, old + f);
+                        }
+                        self.kitty_sent.retain(|&(_, _, i2)| (i2 & !3) != old);
+                    }
+                    self.orrery_live = Some(family);
+                }
                 if !self.kitty_sent.contains(&(pw, ph, id)) {
                     self.kitty_sent.retain(|&(_, _, i2)| i2 != id);
                     let rgba = crate::kitty::orrery_rgba(
@@ -5049,7 +5112,11 @@ impl App {
             self.chat_placed = None;
         }
         // Per-placement diff: place the new image first, then drop the old
-        // one, so the card never shows bare background (no flicker).
+        // one, so the card never shows bare background (no flicker). The
+        // cursor jumps are wrapped in save/restore — this runs after
+        // ratatui parked the hardware cursor at the pane's prompt, and the
+        // other overlays already do the same.
+        let _ = write!(out, "\x1b7");
         for (i, &(rect, id)) in desired.iter().enumerate() {
             let pid = i as u32 + 1;
             let old = self.kitty_placed.get(i).copied();
@@ -5064,6 +5131,7 @@ impl App {
                 }
             }
         }
+        let _ = write!(out, "\x1b8");
         let _ = out.flush();
         self.kitty_placed = desired;
     }

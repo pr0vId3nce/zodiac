@@ -68,13 +68,29 @@ fn restore_banner(agent: &str) -> Vec<u8> {
     format!("\x1b[7m zodiac: restored session — {agent} was not preserved \x1b[0m\r\n").into_bytes()
 }
 
+/// One client connection's write side: frames go to a per-connection
+/// writer thread through a bounded queue, so a stalled peer (suspended
+/// bridge, asleep phone mid-transfer) can never block the event loop —
+/// it just fills its queue and gets dropped.
+struct ConnWriter {
+    tx: std::sync::mpsc::SyncSender<Vec<u8>>,
+    /// Kept for shutdown(): closing both halves unblocks the writer
+    /// thread mid-`write_all` and stops the reader thread.
+    stream: UnixStream,
+}
+
+/// Frames a connection may fall behind by before it's declared dead. An
+/// attach replay is ~a dozen frames; steady state is a handful in flight —
+/// hundreds queued means the peer stopped reading.
+const CONN_QUEUE: usize = 512;
+
 struct Server {
     session: String,
     panes: Vec<SrvPane>,
     active: u64,
     next_id: u64,
     size: (u16, u16),
-    conns: HashMap<u64, UnixStream>,
+    conns: HashMap<u64, ConnWriter>,
     ui: Option<u64>,
     /// Read-only observers (T_WATCH): they receive replay + live output +
     /// pane open/close, but never graphics, and attach never kicks them.
@@ -280,7 +296,10 @@ impl Server {
 
     fn drop_conn(&mut self, gen: u64) {
         if let Some(c) = self.conns.remove(&gen) {
-            let _ = c.shutdown(std::net::Shutdown::Both);
+            // Dropping `tx` ends the writer thread once its queue drains;
+            // the shutdown unblocks it immediately if it's stuck in
+            // write_all, and stops the reader thread too.
+            let _ = c.stream.shutdown(std::net::Shutdown::Both);
         }
         if self.ui == Some(gen) {
             self.ui = None;
@@ -289,8 +308,10 @@ impl Server {
     }
 
     fn reply(&mut self, gen: u64, typ: u8, id: u64, data: &[u8]) {
-        let dead = match self.conns.get_mut(&gen) {
-            Some(c) => write_frame(c, typ, id, data).is_err(),
+        let dead = match self.conns.get(&gen) {
+            // try_send never blocks: a peer that stopped reading fills its
+            // queue and is dropped here instead of wedging the event loop.
+            Some(c) => c.tx.try_send(encode_frame(typ, id, data)).is_err(),
             None => false,
         };
         if dead {
@@ -318,6 +339,9 @@ impl Server {
                 let Ok(mut rd) = stream.try_clone() else {
                     return;
                 };
+                let Ok(mut wr) = stream.try_clone() else {
+                    return;
+                };
                 let tx = self.tx.clone();
                 std::thread::spawn(move || loop {
                     match read_frame(&mut rd) {
@@ -332,7 +356,21 @@ impl Server {
                         }
                     }
                 });
-                self.conns.insert(gen, stream);
+                // Writer thread: drains this connection's bounded queue so
+                // socket writes never run on the event loop. Exits when the
+                // queue's sender is dropped (drop_conn) or a write fails.
+                let (wtx, wrx) = std::sync::mpsc::sync_channel::<Vec<u8>>(CONN_QUEUE);
+                let wtx_evt = self.tx.clone();
+                std::thread::spawn(move || {
+                    use std::io::Write as _;
+                    while let Ok(buf) = wrx.recv() {
+                        if wr.write_all(&buf).and_then(|_| wr.flush()).is_err() {
+                            let _ = wtx_evt.send(SrvEvent::ClientGone(gen));
+                            break;
+                        }
+                    }
+                });
+                self.conns.insert(gen, ConnWriter { tx: wtx, stream });
             }
             SrvEvent::ClientGone(gen) => self.drop_conn(gen),
             SrvEvent::Client(gen, frame) => self.client_frame(gen, frame),
@@ -543,7 +581,7 @@ impl Server {
         let session = self.session.clone();
         let tx = self.tx.clone();
         // Re-read each tick so a settings-page toggle applies live.
-        let conn_watch = crate::settings::Settings::load().connection_watch;
+        let conn_watch = crate::settings::Settings::cached().connection_watch;
         for p in &mut self.panes {
             if p.stall_due(conn_watch) {
                 notify(
@@ -570,7 +608,7 @@ impl Server {
             p.prev_status = status;
         }
         if finished {
-            if let Some(path) = crate::settings::Settings::load().finish_sound_path() {
+            if let Some(path) = crate::settings::Settings::cached().finish_sound_path() {
                 play_sound(&path);
             }
         }
@@ -582,7 +620,7 @@ impl Server {
     /// never writes to a pane, only logs and notifies. Re-read from settings
     /// every tick so the on/off toggle applies live.
     fn monitor_tick(&mut self) {
-        if !crate::settings::Settings::load().pane_monitor {
+        if !crate::settings::Settings::cached().pane_monitor {
             return;
         }
         let now = Instant::now();
@@ -681,7 +719,7 @@ impl Server {
     }
 
     fn subtitle_tick(&mut self) {
-        if !crate::settings::Settings::load().pane_monitor {
+        if !crate::settings::Settings::cached().pane_monitor {
             return;
         }
         let now = Instant::now();
@@ -860,30 +898,36 @@ impl Server {
                 .panes
                 .iter()
                 .enumerate()
-                .map(|(i, p)| PaneState {
-                    index: i + 1,
-                    id: p.id,
-                    name: p.name.clone(),
-                    title: p.title(),
-                    status: p.status().to_string(),
-                    agent: p.agent(),
-                    cwd: p.cwd(),
-                    focused: self.ui.is_some() && self.active == p.id,
-                    auto_resume: p.auto_resume,
-                    uptime_ms: p.uptime_ms(),
-                    version: p
-                        .agent()
-                        .and_then(|a| self.versions.get(&a).cloned().flatten())
-                        .filter(|v| !v.is_empty()),
-                    thinking: p.thinking(),
-                    recap: p.recap(),
-                    subtitle: p.subtitle.clone(),
-                    ssh: p.ssh_target(),
-                    tail: if p.agent().is_some() {
-                        p.tail_lines(3)
-                    } else {
-                        Vec::new()
-                    },
+                .map(|(i, p)| {
+                    // Resolve the agent once and render the screen once per
+                    // pane per broadcast — recap and the transcript well
+                    // both read from the same text.
+                    let agent = p.agent();
+                    let text = agent.is_some().then(|| p.screen_text());
+                    PaneState {
+                        index: i + 1,
+                        id: p.id,
+                        name: p.name.clone(),
+                        title: p.title(),
+                        status: p.status().to_string(),
+                        cwd: p.cwd(),
+                        focused: self.ui.is_some() && self.active == p.id,
+                        auto_resume: p.auto_resume,
+                        uptime_ms: p.uptime_ms(),
+                        version: agent
+                            .as_ref()
+                            .and_then(|a| self.versions.get(a).cloned().flatten())
+                            .filter(|v| !v.is_empty()),
+                        thinking: p.thinking(),
+                        recap: text.as_deref().and_then(crate::pane::recap_in),
+                        subtitle: p.subtitle.clone(),
+                        ssh: p.ssh_target(),
+                        tail: text
+                            .as_deref()
+                            .map(|t| crate::pane::tail_lines_in(t, 3))
+                            .unwrap_or_default(),
+                        agent,
+                    }
                 })
                 .collect(),
             host: host_vitals(),

@@ -255,6 +255,17 @@ pub fn play_sound(path: &std::path::Path) {
     }
 }
 
+/// A frame as one owned wire buffer — for writer threads that queue frames
+/// instead of writing them inline.
+pub fn encode_frame(typ: u8, id: u64, data: &[u8]) -> Vec<u8> {
+    let mut buf = Vec::with_capacity(13 + data.len());
+    buf.push(typ);
+    buf.extend_from_slice(&id.to_le_bytes());
+    buf.extend_from_slice(&(data.len() as u32).to_le_bytes());
+    buf.extend_from_slice(data);
+    buf
+}
+
 pub fn write_frame(w: &mut impl Write, typ: u8, id: u64, data: &[u8]) -> std::io::Result<()> {
     let mut hdr = [0u8; 13];
     hdr[0] = typ;

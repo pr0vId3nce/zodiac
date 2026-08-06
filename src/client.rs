@@ -37,8 +37,6 @@ const IN_PROGRESS_WINDOW: Duration = Duration::from_secs(5);
 /// braille frames stop and "working" clears within this window.
 const TITLE_BRIDGE: Duration = Duration::from_secs(2);
 
-const WORKING_COLOR: Color = Color::Indexed(208);
-
 /// True black. `Color::Black` is ANSI index 0, which most terminal themes
 /// tint dark grey rather than #000 — this asks for the RGB value directly.
 const OLED_BLACK: Color = Color::Rgb(0, 0, 0);
@@ -51,11 +49,11 @@ const RESIZE_SQUELCH: Duration = Duration::from_millis(1200);
 /// blinks (closes briefly) once per period.
 const EYE_PERIOD_MS: u64 = 4000;
 const EYE_BLINK_MS: u64 = 160;
-const SETTINGS_ROWS: usize = 30;
+const SETTINGS_ROWS: usize = 31;
 
 /// Settings rows at and beyond this index are free-text fields (edited via
 /// `Mode::SettingsEdit`) rather than cyclable presets.
-const TEXT_SETTINGS_START: usize = 26;
+const TEXT_SETTINGS_START: usize = 27;
 
 /// The key reference pinned to the settings page's Controls column — the
 /// same bindings the bottom bar hints at (hideable there).
@@ -210,6 +208,7 @@ const HOME_GAP_X: u16 = 3;
 const HOME_GAP_Y: u16 = 1;
 /// Card-art glow colors by accent index: needs approval, thinking,
 /// working, finished, idle (order matches `card_status`).
+#[allow(dead_code)] // retired with the tarot painter (deleted in the reskin's last phase)
 const ACCENT_RGB: [(u8, u8, u8); 5] = [
     (235, 90, 100),
     (150, 110, 235),
@@ -2305,10 +2304,19 @@ impl App {
         pick(CARD_OUTLINES, &self.settings.card_outline, "double")
     }
 
+    fn theme_name(&self) -> &'static str {
+        pick(crate::theme::THEMES, &self.settings.theme, "night")
+    }
+
+    fn palette(&self) -> &'static crate::theme::Palette {
+        crate::theme::palette(self.theme_name())
+    }
+
     fn select_color(&self) -> Color {
         color_by_name(&self.settings.select_color, "gold").1
     }
 
+    #[allow(dead_code)] // retired with the tarot painter (deleted in the reskin's last phase)
     fn select_rgb(&self) -> (u8, u8, u8) {
         color_by_name(&self.settings.select_color, "gold").2
     }
@@ -2329,7 +2337,7 @@ impl App {
     }
 
     fn card_numeral_style(&self) -> &'static str {
-        pick(CARD_NUMERALS, &self.settings.card_numeral, "roman")
+        pick(CARD_NUMERALS, &self.settings.card_numeral, "zodiac")
     }
 
     /// The card's number in the configured style; zodiac wraps after ♓.
@@ -2577,20 +2585,24 @@ impl App {
             25 => {
                 self.settings.chat_face = cycle_pick(CHAT_FACES, self.chat_face(), dir);
             }
+            26 => {
+                self.settings.theme =
+                    cycle_pick(crate::theme::THEMES, self.theme_name(), dir);
+            }
             _ => {}
         }
         self.settings.save();
     }
 
     /// Enter free-text edit mode for the settings row under the cursor
-    /// (rows 26-29: chat endpoint/model/ssh/service), seeded with the
+    /// (rows 27-30: chat endpoint/model/ssh/service), seeded with the
     /// field's current value. No-op on cyclable rows.
     fn start_settings_edit(&mut self) {
         let buf = match self.settings_row {
-            26 => self.settings.chat_endpoint.clone(),
-            27 => self.settings.chat_model.clone(),
-            28 => self.settings.chat_ssh.clone(),
-            29 => self.settings.chat_service.clone(),
+            27 => self.settings.chat_endpoint.clone(),
+            28 => self.settings.chat_model.clone(),
+            29 => self.settings.chat_ssh.clone(),
+            30 => self.settings.chat_service.clone(),
             _ => return,
         };
         self.mode = Mode::SettingsEdit {
@@ -2604,10 +2616,10 @@ impl App {
     /// built once at startup, not re-read live.
     fn apply_settings_edit(&mut self, row: usize, val: String) {
         match row {
-            26 => self.settings.chat_endpoint = val,
-            27 => self.settings.chat_model = val,
-            28 => self.settings.chat_ssh = val,
-            29 => self.settings.chat_service = val,
+            27 => self.settings.chat_endpoint = val,
+            28 => self.settings.chat_model = val,
+            29 => self.settings.chat_ssh = val,
+            30 => self.settings.chat_service = val,
             _ => {}
         }
         self.settings.save();
@@ -2957,7 +2969,7 @@ impl App {
         // always visible here even when the bottom-bar hints are hidden.
         let two_col = area.width >= 92;
         let w = if two_col { 90 } else { 60.min(area.width) };
-        let h = 36.min(area.height);
+        let h = 37.min(area.height);
         let rect = Rect {
             x: (area.width - w) / 2,
             y: (area.height - h) / 2,
@@ -3366,21 +3378,30 @@ impl App {
                     ),
                 }],
             ),
-            text_row(
+            row(
                 26,
+                "Theme",
+                self.theme_name(),
+                vec![Span::styled(
+                    "▆▆▆".to_string(),
+                    Style::default().fg(crate::theme::color(self.palette().accent)),
+                )],
+            ),
+            text_row(
+                27,
                 "Chat endpoint",
                 &self.settings.chat_endpoint,
                 "http://bigbox:8091",
             ),
             text_row(
-                27,
+                28,
                 "Chat model",
                 &self.settings.chat_model,
                 "qwen3.6-35b-a3b",
             ),
-            text_row(28, "Chat ssh", &self.settings.chat_ssh, "des@bigbox"),
+            text_row(29, "Chat ssh", &self.settings.chat_ssh, "des@bigbox"),
             text_row(
-                29,
+                30,
                 "Chat service",
                 &self.settings.chat_service,
                 "llama-server",
@@ -3428,6 +3449,32 @@ impl App {
             return;
         }
         self.home_sel = self.home_sel.min(n - 1);
+        // Top strip: session moon + host, shared by every home view.
+        // (Host vitals join the right side once SessionState carries them.)
+        let area = if area.height > 4 {
+            let pal = self.palette();
+            let strip = Rect { height: 1, ..area };
+            f.render_widget(
+                Paragraph::new(Line::from(vec![
+                    Span::styled(
+                        format!(" ☾ {}", self.session),
+                        Style::default().fg(crate::theme::color(pal.accent)).bold(),
+                    ),
+                    Span::styled(
+                        format!("  {}", hostname()),
+                        Style::default().fg(crate::theme::color(pal.dim)),
+                    ),
+                ])),
+                strip,
+            );
+            Rect {
+                y: area.y + 1,
+                height: area.height - 1,
+                ..area
+            }
+        } else {
+            area
+        };
         match self.home_view() {
             "list" => return self.draw_home_list(f, area, &state),
             "blocks" => return self.draw_home_blocks(f, area, &state),
@@ -3922,12 +3969,15 @@ impl App {
         );
     }
 
+    /// One observatory card, "brass instrument" style: sigil roundel +
+    /// name with the status right-aligned, agent · cwd underneath, the
+    /// recap in the middle, uptime pinned to the bottom. The painted layer
+    /// supplies fill/edge/rail/roundel-ring; without kitty a text border
+    /// and a `▎` rail glyph stand in.
     fn draw_card(&self, f: &mut Frame, rect: Rect, num: usize, p: &PaneState, selected: bool) {
-        let (label, glyph, scolor, _) = card_status(p);
+        let pal = self.palette();
+        let (_, _, _, accent) = card_status(p);
         f.render_widget(Clear, rect);
-        // With painted art the card edge lives in the image (frame rings +
-        // selection ring), so no text border — box-drawing lines run
-        // through cell centers and would layer against the art's frame.
         let inner = if self.kitty_on || self.card_outline() == "none" {
             rect.inner(ratatui::layout::Margin {
                 horizontal: 1,
@@ -3950,7 +4000,7 @@ impl App {
                     .fg(self.select_color())
                     .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Indexed(101))
+                Style::default().fg(crate::theme::color(pal.edge))
             };
             let block = Block::bordered().border_type(bt).border_style(border_style);
             let inner = block.inner(rect);
@@ -3958,91 +4008,113 @@ impl App {
             inner
         };
 
-        let gold = Style::default().fg(Color::Indexed(179));
-        let dim = Style::default().fg(Color::Indexed(246));
-        let faint = Style::default().fg(Color::Indexed(243));
-        let title_style = if selected {
-            Style::default()
-                .fg(Color::Indexed(220))
-                .add_modifier(Modifier::BOLD)
-        } else {
-            Style::default()
-                .fg(Color::Indexed(230))
-                .add_modifier(Modifier::BOLD)
+        let idle_shell = p.agent.is_none() && accent == 4;
+        // Idle shells get the 60% treatment: every color halves toward
+        // the background so live agents carry the page.
+        let tone = |c: (u8, u8, u8)| {
+            if idle_shell {
+                crate::theme::color((c.0 / 2, c.1 / 2, c.2 / 2))
+            } else {
+                crate::theme::color(c)
+            }
         };
-        let ssh_suffix = p.ssh.as_deref().map(|h| format!(" — SSH: {h}"));
-        let ssh_len = ssh_suffix.as_deref().map_or(0, |s| s.chars().count());
-        let name = truncate(&p.name, (inner.width as usize).saturating_sub(6 + ssh_len));
-        let agent_line = match (&p.agent, &p.version) {
+        let acc = tone(pal.accent);
+        let dim = Style::default().fg(tone(pal.dim));
+        let faint = Style::default().fg(tone(pal.faint));
+        let fg = tone(pal.fg);
+        let stext = tone(crate::theme::STATUS_TEXT[accent]);
+        let iw = inner.width as usize;
+        let ih = inner.height as usize;
+        if iw < 8 || ih < 3 {
+            return;
+        }
+
+        // Row 1: roundel sigil (ring is painted, glyph is text) · numeral +
+        // name · right-aligned status word.
+        let sigil = format!("{}\u{FE0E}", ZODIAC[(num - 1) % ZODIAC.len()]);
+        let numeral = match self.card_numeral_style() {
+            // Zodiac numerals would repeat the roundel glyph.
+            "zodiac" | "zodiac-white" => String::new(),
+            _ => format!("{} · ", self.card_numeral(num)),
+        };
+        let status = format!("{} {}", STATUS_GLYPH[accent], STATUS_WORD[accent]);
+        let status_cells = status.chars().count();
+        let name_max = iw
+            .saturating_sub(4 + numeral.chars().count() + status_cells + 2);
+        let name = truncate(&p.name, name_max);
+        let left_cells = 4 + numeral.chars().count() + name.chars().count();
+        let pad = iw.saturating_sub(left_cells + status_cells);
+        let title_style = Style::default().fg(fg).add_modifier(Modifier::BOLD);
+        let mut row1: Vec<Span> = vec![
+            if self.kitty_on {
+                Span::raw(" ")
+            } else {
+                // Text fallback for the painted status rail.
+                Span::styled("▎", Style::default().fg(tone(crate::theme::STATUS_RAIL[accent])))
+            },
+            Span::styled(sigil, Style::default().fg(acc)),
+            Span::raw("  "),
+        ];
+        if !numeral.is_empty() {
+            row1.push(Span::styled(numeral, Style::default().fg(acc)));
+        }
+        if accent == 1 || accent == 2 {
+            // Working/thinking names shimmer, same as the sidebar.
+            row1.extend(self.shimmer_spans(&name, title_style));
+        } else {
+            row1.push(Span::styled(name, title_style));
+        }
+        row1.push(Span::raw(" ".repeat(pad)));
+        row1.push(Span::styled(status, Style::default().fg(stext)));
+        let mut lines: Vec<Line> = vec![Line::from(row1)];
+
+        // Row 2: agent + version · cwd (· ssh), indented past the roundel.
+        let agent = match (&p.agent, &p.version) {
             (Some(a), Some(v)) => format!("{a} {}", version_token(v)),
             (Some(a), None) => a.clone(),
             (None, _) => "shell".into(),
         };
-        let dir = p
-            .cwd
-            .as_deref()
-            .map(|d| short_dir(d, inner.width.saturating_sub(2) as usize))
-            .unwrap_or_default();
-        // Layout adapts to the card-size setting: the header sits just
-        // below the emblem zone (painted art anchors it near the top), a
-        // breathing row appears when there's room, and the fallback's
-        // ornament only renders when it fits.
-        let ih = inner.height as usize;
-        let mut lines: Vec<Line> = Vec::new();
-        if self.kitty_on {
-            // Keep clear of the painted emblem (top ~27% of the card).
-            let pad = ((rect.height as f32 * 0.27) as usize)
-                .saturating_sub(1)
-                .clamp(1, ih.saturating_sub(6));
-            lines.resize_with(pad, Line::default);
-        } else if p.agent.as_deref() == Some("claude") {
-            // Emblem: Claude's ✳ in coral for claude panes, a `>_` prompt
-            // otherwise (mirrors the painted card art).
-            lines.push(Line::from(vec![
-                Span::styled("✦  ".to_string(), gold),
-                Span::styled(
-                    "✳".to_string(),
-                    Style::default().fg(Color::Indexed(209)).bold(),
-                ),
-                Span::styled("  ✦".to_string(), gold),
-            ]));
-            lines.push(Line::default());
-        } else {
-            lines.push(Line::from(Span::styled(">_".to_string(), gold.bold())));
-            lines.push(Line::default());
+        let mut meta = agent;
+        if let Some(d) = p.cwd.as_deref() {
+            meta.push_str(" · ");
+            meta.push_str(&short_dir(d, iw.saturating_sub(meta.chars().count() + 6)));
         }
-        let mut title_spans = vec![Span::styled(
-            format!("{} · {}", self.card_numeral(num), name),
-            title_style,
-        )];
-        if let Some(sfx) = &ssh_suffix {
-            title_spans.push(Span::styled(sfx.clone(), Style::default().fg(Color::Indexed(108))));
+        if let Some(h) = p.ssh.as_deref() {
+            meta.push_str(" · ssh ");
+            meta.push_str(h);
         }
-        lines.push(Line::from(title_spans));
-        lines.push(Line::from(Span::styled("──────────", faint)));
-        if ih >= lines.len() + 6 {
-            lines.push(Line::default());
-        }
-        lines.push(Line::from(Span::styled(agent_line, gold)));
-        lines.push(Line::from(Span::styled(fmt_uptime(p.uptime_ms), dim)));
-        lines.push(Line::from(Span::styled(
-            format!("{glyph} {label}"),
-            Style::default().fg(scolor).add_modifier(Modifier::BOLD),
-        )));
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled(truncate(&meta, iw.saturating_sub(4)), dim),
+        ]));
+
+        // Recap (or nothing) in the card's middle.
         if let Some(sub) = &p.subtitle {
-            if ih >= lines.len() + 3 {
-                lines.push(Line::from(Span::styled(
-                    truncate(sub, inner.width.saturating_sub(2) as usize),
-                    Style::default().fg(Color::Indexed(246)).add_modifier(Modifier::ITALIC),
-                )));
+            if ih >= 5 && !idle_shell {
+                lines.push(Line::default());
+                lines.push(Line::from(vec![
+                    Span::raw(" "),
+                    Span::styled(
+                        truncate(sub, iw.saturating_sub(2)),
+                        Style::default().fg(tone(pal.dim)).add_modifier(Modifier::ITALIC),
+                    ),
+                ]));
             }
         }
-        lines.push(Line::from(Span::styled(dir, faint)));
-        if !self.kitty_on && ih >= lines.len() + 2 {
-            lines.push(Line::default());
-            lines.push(Line::from(Span::styled("✦  ·  ✦".to_string(), gold)));
+
+        // Uptime pinned to the bottom-right (the sparkline's future row).
+        if ih > lines.len() {
+            let up = format!("↑{}", fmt_uptime(p.uptime_ms).trim_start_matches("up "));
+            let pad = iw.saturating_sub(up.chars().count() + 1);
+            while lines.len() < ih - 1 {
+                lines.push(Line::default());
+            }
+            lines.push(Line::from(vec![
+                Span::raw(" ".repeat(pad)),
+                Span::styled(up, faint),
+            ]));
         }
-        f.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
+        f.render_widget(Paragraph::new(lines), inner);
     }
 
     /// The Wizard's chat panel on the right edge of the home page:
@@ -4322,13 +4394,14 @@ impl App {
         // Setting changes repaint image data in place; selection changes
         // are handled by the per-placement diff below.
         let style_key = format!(
-            "{}|{}|{}|{}|{}|{}",
+            "{}|{}|{}|{}|{}|{}|{}",
             self.settings.card_icon,
             self.card_outline(),
             color_by_name(&self.settings.select_color, "gold").0,
             SELECT_WEIGHTS[self.select_weight_idx()].0,
             self.select_style(),
             self.claude_style(),
+            self.theme_name(),
         );
         if self.kitty_last_icon != style_key {
             self.kitty_sent.clear();
@@ -4367,49 +4440,59 @@ impl App {
             }
             v
         } else {
-            let (size_idx, (_, scale)) = (self.card_icon_idx(), CARD_ICON_SIZES[self.card_icon_idx()]);
+            let pal = self.palette();
+            let theme_idx = crate::theme::THEMES
+                .iter()
+                .position(|t| *t == pal.name)
+                .unwrap_or(0);
+            let size_idx = self.card_size_idx();
             let cards = self.home_cards.clone();
             let mut desired: Vec<(Rect, u32)> = Vec::with_capacity(cards.len());
-            for (i, &(rect, _, accent, claude)) in cards.iter().enumerate() {
+            for (i, &(rect, _, accent, _claude)) in cards.iter().enumerate() {
                 let selected = i == self.home_sel;
-                // Working/thinking claude gets the bouncing mascot (frame from
-                // the shared animation clock — placement swaps animate it);
-                // idle claude keeps the ✳ star.
-                let mark = if claude {
-                    if accent == 1 || accent == 2 {
-                        crate::kitty::CardMark::ClaudeRun(
-                            ((self.anim_start.elapsed().as_millis() / 250) % 4) as u8,
-                        )
-                    } else {
-                        crate::kitty::CardMark::Claude
-                    }
-                } else {
-                    crate::kitty::CardMark::Terminal
-                };
-                let id = crate::kitty::image_id(accent, mark, size_idx, selected);
+                let id = crate::kitty::flat_card_id(accent, size_idx, selected, theme_idx);
                 let (pw, ph) = (rect.width as u32 * cw as u32, rect.height as u32 * ch as u32);
                 // Transmit up front so placement swaps below are instant.
                 if !self.kitty_sent.contains(&(pw, ph, id)) {
                     self.kitty_sent.retain(|&(_, _, i2)| i2 != id);
-                    let style = crate::kitty::CardStyle {
-                        accent: ACCENT_RGB[accent],
-                        mark,
-                        icon_scale: scale,
-                        rings: match self.card_outline() {
-                            "single" => 1,
-                            "none" => 0,
-                            _ => 2,
-                        },
-                        sel: selected.then(|| {
-                            (
-                                self.select_rgb(),
-                                (ph as f32 * SELECT_WEIGHTS[self.select_weight_idx()].1).max(1.5),
-                            )
-                        }),
-                        sel_glow: self.select_style() == "glow",
-                        mascot_soft: self.claude_style() == "soft",
+                    let needs = accent == 0;
+                    let fill = if needs {
+                        // Faint red wash baked into the fill.
+                        (20, 13, 16)
+                    } else if selected {
+                        pal.card_sel
+                    } else {
+                        pal.card
                     };
-                    let rgba = crate::kitty::card_rgba(pw, ph, &style);
+                    let edge = if needs {
+                        (74, 34, 40)
+                    } else if selected {
+                        // Brass-tinted edge marks the selection even before
+                        // the brackets register.
+                        (
+                            (pal.edge.0 as u16 + pal.accent.0 as u16 / 5) as u8,
+                            (pal.edge.1 as u16 + pal.accent.1 as u16 / 5) as u8,
+                            (pal.edge.2 as u16 + pal.accent.2 as u16 / 6) as u8,
+                        )
+                    } else {
+                        pal.edge
+                    };
+                    // Ring centered on the sigil glyph draw_card places at
+                    // inner cell (2, 1) — one margin cell + one pad row in.
+                    let roundel = (
+                        2.5 * cw as f32,
+                        1.5 * ch as f32,
+                        (ch as f32 * 0.95).min(cw as f32 * 1.6),
+                        pal.accent,
+                    );
+                    let style = crate::kitty::FlatCard {
+                        fill,
+                        edge,
+                        rail: crate::theme::STATUS_RAIL[accent],
+                        brackets: selected.then_some(pal.accent),
+                        roundel: Some((roundel.0, roundel.1, roundel.2, roundel.3)),
+                    };
+                    let rgba = crate::kitty::flat_card_rgba(pw, ph, &style);
                     let _ = crate::kitty::transmit(&mut out, id, pw, ph, &rgba);
                     self.kitty_sent.insert((pw, ph, id));
                 }
@@ -5130,24 +5213,32 @@ impl App {
     fn draw_status(&self, f: &mut Frame, area: Rect) {
         let mut spans: Vec<Span> = Vec::new();
         if self.home {
-            spans.push(Span::styled(
-                format!(" ☾ {}", self.session),
-                Style::default().fg(Color::Cyan),
-            ));
+            let pal = self.palette();
+            let left = format!(" ☾ {}", self.session);
+            let count = format!(" · {} panes", self.panes.len());
             let hints = if self.settings.hide_controls {
-                format!(" · {} panes", self.panes.len())
+                String::new()
             } else if self.chat_focus {
-                format!(
-                    " · {} panes · chat: Enter send · Esc leave · /wake /sleep",
-                    self.panes.len()
-                )
+                "chat: ⏎ send · esc leave · /wake /sleep ".to_string()
             } else {
-                format!(
-                    " · {} panes · ←↑↓→ select · Enter open · Alt+G wizard · Alt+~ close",
-                    self.panes.len()
-                )
+                "←↑↓→ select · ⏎ open · alt+g oracle · alt+~ close ".to_string()
             };
-            spans.push(Span::styled(hints, Style::default().fg(Color::DarkGray)));
+            let used = left.chars().count() + count.chars().count() + hints.chars().count();
+            spans.push(Span::styled(
+                left,
+                Style::default().fg(crate::theme::color(pal.accent)).bold(),
+            ));
+            spans.push(Span::styled(
+                count,
+                Style::default().fg(crate::theme::color(pal.dim)),
+            ));
+            spans.push(Span::raw(
+                " ".repeat((area.width as usize).saturating_sub(used)),
+            ));
+            spans.push(Span::styled(
+                hints,
+                Style::default().fg(crate::theme::color(pal.faint)),
+            ));
             f.render_widget(Paragraph::new(Line::from(spans)), area);
             return;
         }
@@ -5231,6 +5322,28 @@ fn copy_to_clipboard(text: &str) {
             let _ = child.wait();
         });
     }
+}
+
+/// Status glyph/word per accent index (needs_input, thinking, working,
+/// finished, idle) — the brass-instrument vocabulary.
+const STATUS_GLYPH: [&str; 5] = ["●", "◐", "●", "✓", "○"];
+const STATUS_WORD: [&str; 5] = ["needs you", "thinking", "working", "finished", "idle"];
+
+/// This machine's short hostname, cached (it can't change mid-session in
+/// any way we care about).
+fn hostname() -> &'static str {
+    static HOST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    HOST.get_or_init(|| {
+        let mut buf = [0u8; 256];
+        let ok = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) } == 0;
+        if !ok {
+            return String::new();
+        }
+        let end = buf.iter().position(|&b| b == 0).unwrap_or(buf.len());
+        String::from_utf8_lossy(&buf[..end])
+            .trim_end_matches(".local")
+            .to_string()
+    })
 }
 
 /// Card status: (label, glyph, text color, accent index into ACCENT_RGB).

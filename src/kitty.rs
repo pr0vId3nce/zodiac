@@ -12,11 +12,16 @@ use std::io::Write;
 /// Image ids are namespaced so we never collide with another app's ids in
 /// the same terminal. One image per status accent; retransmitted (same id)
 /// when the card pixel size changes.
+// The tarot-card painter below (ID_BASE/CardMark/CardStyle/card_rgba) is
+// superseded by the flat brass cards and gets deleted in the reskin's last
+// phase once nothing falls back to it.
+#[allow(dead_code)]
 const ID_BASE: u32 = 0x57444700; // "WDG\0"
 
 /// The emblem painted at the top of the card: a `>_` terminal prompt for
 /// plain shells, Claude's ✳ starburst for idle claude panes, or the
 /// bouncing mascot (4 animation frames) while claude is working/thinking.
+#[allow(dead_code)]
 #[derive(Clone, Copy, PartialEq)]
 pub enum CardMark {
     Terminal,
@@ -24,6 +29,7 @@ pub enum CardMark {
     ClaudeRun(u8),
 }
 
+#[allow(dead_code)]
 pub fn image_id(accent_idx: usize, mark: CardMark, size_idx: usize, selected: bool) -> u32 {
     let code = match mark {
         CardMark::Terminal => 0,
@@ -34,6 +40,7 @@ pub fn image_id(accent_idx: usize, mark: CardMark, size_idx: usize, selected: bo
 }
 
 /// Everything that shapes one card's pixels.
+#[allow(dead_code)]
 pub struct CardStyle {
     pub accent: (u8, u8, u8),
     pub mark: CardMark,
@@ -122,6 +129,7 @@ fn seg(px: &mut [u8], w: u32, h: u32, a: (f32, f32), b: (f32, f32), th: f32, col
 /// Paint one card: indigo night-sky gradient with vignette, double
 /// gold frame, star field, the pane's emblem up top (`>_` prompt or Claude
 /// starburst), and a soft glow from the bottom in the status accent color.
+#[allow(dead_code)]
 pub fn card_rgba(w: u32, h: u32, style: &CardStyle) -> Vec<u8> {
     let accent = style.accent;
     let mark = style.mark;
@@ -294,6 +302,98 @@ pub fn card_rgba(w: u32, h: u32, style: &CardStyle) -> Vec<u8> {
                     }
                 }
             }
+        }
+    }
+    px
+}
+
+/// Image-id namespace for the flat "brass instrument" cards, clear of the
+/// tarot-card range.
+pub const FLAT_BASE: u32 = 0x464C_5400; // "FLT\0"
+
+pub fn flat_card_id(accent_idx: usize, size_idx: usize, selected: bool, theme_idx: usize) -> u32 {
+    FLAT_BASE
+        + theme_idx as u32 * 256
+        + size_idx as u32 * 32
+        + accent_idx as u32 * 2
+        + selected as u32
+}
+
+/// Everything that shapes one flat card's pixels. Colors arrive
+/// pre-resolved (theme + status already applied) so the painter stays dumb.
+pub struct FlatCard {
+    /// Card body fill; a whisper of vertical falloff is added on top.
+    pub fill: (u8, u8, u8),
+    /// 1px edge line.
+    pub edge: (u8, u8, u8),
+    /// 2px status rail along the left edge.
+    pub rail: (u8, u8, u8),
+    /// Reticle corner brackets (the selection language) when selected.
+    pub brackets: Option<(u8, u8, u8)>,
+    /// Sigil roundel ring: center px, radius, color. The glyph itself is
+    /// text — only the ring is painted, so the sigil stays font-crisp.
+    pub roundel: Option<(f32, f32, f32, (u8, u8, u8))>,
+}
+
+/// Paint one flat brass-instrument card: solid night fill, hairline edge,
+/// status rail, roundel ring, and reticle brackets when selected.
+pub fn flat_card_rgba(w: u32, h: u32, s: &FlatCard) -> Vec<u8> {
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    for y in 0..h {
+        // Barely-there falloff toward the bottom so the fill doesn't read
+        // as dead-flat plastic.
+        let k = 1.0 - 0.10 * (y as f32 / h as f32);
+        let (r, g, b) = (
+            (s.fill.0 as f32 * k) as u8,
+            (s.fill.1 as f32 * k) as u8,
+            (s.fill.2 as f32 * k) as u8,
+        );
+        for x in 0..w {
+            let o = ((y * w + x) * 4) as usize;
+            let on_edge = x == 0 || y == 0 || x == w - 1 || y == h - 1;
+            let (cr, cg, cb) = if x < 2 {
+                s.rail
+            } else if on_edge {
+                s.edge
+            } else {
+                (r, g, b)
+            };
+            px[o] = cr;
+            px[o + 1] = cg;
+            px[o + 2] = cb;
+            px[o + 3] = 255;
+        }
+    }
+    if let Some((cx, cy, rad, col)) = s.roundel {
+        // Antialiased ring, ~1.5px stroke, with a faint interior wash.
+        for y in 0..h {
+            for x in 0..w {
+                let d = ((x as f32 - cx).powi(2) + (y as f32 - cy).powi(2)).sqrt();
+                let ring = (0.75 - (d - rad).abs() + 0.7).clamp(0.0, 1.0);
+                let wash = if d < rad { 0.08 } else { 0.0 };
+                let a = ring.max(wash);
+                if a > 0.01 {
+                    let o = ((y * w + x) * 4) as usize;
+                    px[o] = (px[o] as f32 + (col.0 as f32 - px[o] as f32) * a) as u8;
+                    px[o + 1] = (px[o + 1] as f32 + (col.1 as f32 - px[o + 1] as f32) * a) as u8;
+                    px[o + 2] = (px[o + 2] as f32 + (col.2 as f32 - px[o + 2] as f32) * a) as u8;
+                }
+            }
+        }
+    }
+    if let Some(col) = s.brackets {
+        let arm = (w.min(h) as f32 * 0.10).clamp(8.0, 13.0);
+        let th = 1.1;
+        let inset = 3.0;
+        let (fw, fh) = (w as f32, h as f32);
+        for (cx, cy, dx, dy) in [
+            (inset, inset, 1.0, 1.0),
+            (fw - 1.0 - inset, inset, -1.0, 1.0),
+            (inset, fh - 1.0 - inset, 1.0, -1.0),
+            (fw - 1.0 - inset, fh - 1.0 - inset, -1.0, -1.0),
+        ] {
+            seg(&mut px, w, h, (cx, cy), (cx + dx * arm, cy), th, col);
+            seg(&mut px, w, h, (cx, cy), (cx, cy + dy * arm), th, col);
         }
     }
     px

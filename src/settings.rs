@@ -43,6 +43,10 @@ pub struct Settings {
     /// Chat panel character: "assistant", "oracle" (ascii orb), or "hal".
     #[serde(default)]
     pub chat_face: String,
+    /// UI palette: "night" (navy + brass), "oled-orange", or "oled-green"
+    /// (true-black variants).
+    #[serde(default)]
+    pub theme: String,
     /// Size of the emblem painted on home-page cards: small/medium/large/huge.
     #[serde(default)]
     pub card_icon: String,
@@ -59,7 +63,7 @@ pub struct Settings {
     /// "ring" (hard square).
     #[serde(default)]
     pub select_style: String,
-    /// Card numbering: "roman" (default), "arabic", or "zodiac".
+    /// Card numbering: "zodiac" (default), "roman", or "arabic".
     #[serde(default)]
     pub card_numeral: String,
     /// Mascot body shape: "hard" (boxy, default) or "soft" (rounded).

@@ -9,6 +9,7 @@ mod query;
 mod server;
 mod settings;
 mod snapshot;
+mod theme;
 mod term;
 mod chat;
 

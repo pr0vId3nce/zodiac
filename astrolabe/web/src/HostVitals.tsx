@@ -1,10 +1,8 @@
 // The computer's vitals — uptime, battery, CPU, memory — polled from the
-// bridge's GET /api/host. Shown in the herd header when running inside the
-// native iOS shell, where the old "zodiac ✶ session" branding row would
-// otherwise repeat what the native title bar already says. One row, always:
-// stats that don't fit truncate rather than wrap.
+// bridge's GET /api/host, rendered as the orrery header's quiet text run:
+// dim labels, values in fg, no icons. Stats that don't fit truncate rather
+// than wrap.
 import { useEffect, useState } from "react";
-import { BatteryCharging, BatteryMedium, Cpu, MemoryStick, Power } from "lucide-react";
 import { getToken } from "./auth";
 
 interface HostStats {
@@ -51,28 +49,23 @@ export function HostVitals() {
 
   if (!stats) return null;
 
-  const chip = (icon: React.ReactNode, text: string, tint?: string) => (
-    <span className={`flex items-center gap-1 ${tint ?? "text-zinc-400"}`}>
-      {icon}
-      <span className="font-mono text-caption tabular-nums">{text}</span>
+  const stat = (label: string, value: string, tint?: string) => (
+    <span>
+      {label} <span className={tint ?? "text-fg"}>{value}</span>
     </span>
   );
 
   return (
-    <div className="flex min-w-0 items-center gap-3 overflow-hidden whitespace-nowrap">
-      {chip(<Power className="h-3 w-3" />, uptimeText(stats.uptime))}
+    <div className="flex min-w-0 items-center gap-2.5 overflow-hidden whitespace-nowrap font-mono text-[10px] tabular-nums text-dim">
+      {stat("up", uptimeText(stats.uptime))}
       {stats.battery &&
-        chip(
-          stats.battery.charging ? (
-            <BatteryCharging className="h-3 w-3" />
-          ) : (
-            <BatteryMedium className="h-3 w-3" />
-          ),
-          `${stats.battery.pct}%`,
-          !stats.battery.charging && stats.battery.pct <= 20 ? "text-red-400" : undefined
+        stat(
+          "bat",
+          `${stats.battery.pct}%${stats.battery.charging ? "+" : ""}`,
+          !stats.battery.charging && stats.battery.pct <= 20 ? "text-red-300" : undefined
         )}
-      {stats.cpu !== null && chip(<Cpu className="h-3 w-3" />, `${stats.cpu}%`)}
-      {stats.mem && chip(<MemoryStick className="h-3 w-3" />, `${stats.mem.pct}%`)}
+      {stats.cpu !== null && stat("cpu", `${stats.cpu}%`)}
+      {stats.mem && stat("mem", `${stats.mem.pct}%`)}
     </div>
   );
 }

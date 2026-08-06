@@ -64,13 +64,6 @@ export const Button = forwardRef<
   );
 });
 
-const STATUS_STYLE: Record<string, string> = {
-  working: "bg-orange-500/15 text-orange-300 border-orange-500/40",
-  needs_input: "bg-red-500/15 text-red-300 border-red-500/50",
-  done: "bg-emerald-500/15 text-emerald-300 border-emerald-500/40",
-  idle: "bg-zinc-500/15 text-zinc-400 border-zinc-500/30",
-};
-
 export const STATUS_LABEL: Record<string, string> = {
   working: "working",
   needs_input: "needs you",
@@ -78,20 +71,108 @@ export const STATUS_LABEL: Record<string, string> = {
   idle: "idle",
 };
 
-export function StatusChip({ status, thinking }: { status: string; thinking?: boolean }) {
+/* The redesign's fixed status colors — identical across all three themes
+   (they map 1:1 onto Tailwind's orange/red/emerald/zinc steps):
+   dot: working #fb923c · needs_input #f87171 · done #34d399 · idle #52525b
+   text: working #fdba74 · needs_input #fca5a5 · done #6ee7b7 · idle #a1a1aa */
+export const STATUS_DOT: Record<string, string> = {
+  working: "bg-orange-400",
+  needs_input: "bg-red-400",
+  done: "bg-emerald-400",
+  idle: "bg-zinc-600",
+};
+export const STATUS_TEXT: Record<string, string> = {
+  working: "text-orange-300",
+  needs_input: "text-red-300",
+  done: "text-emerald-300",
+  idle: "text-zinc-400",
+};
+
+const STATUS_GLYPH: Record<string, string> = {
+  working: "●",
+  needs_input: "●",
+  done: "✓",
+  idle: "○",
+};
+
+export const ROMAN = [
+  "I", "II", "III", "IV", "V", "VI", "VII", "VIII", "IX", "X", "XI", "XII",
+];
+export function roman(n: number) {
+  return ROMAN[n - 1] ?? String(n);
+}
+
+/** Panes I–XII wear their zodiac sigils; the numeral system was already
+    there, the sigil rides along with it. Past XII it wraps. */
+const SIGILS = ["♈", "♉", "♊", "♋", "♌", "♍", "♎", "♏", "♐", "♑", "♒", "♓"];
+export function sigil(index: number) {
+  return SIGILS[(index - 1) % SIGILS.length];
+}
+
+export function shortDuration(ms: number) {
+  const m = Math.floor(ms / 60000);
+  if (m < 1) return "now";
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h`;
+  return `${Math.floor(h / 24)}d`;
+}
+
+/** The ledger's right-aligned status column: glyph + label (+ how long,
+    when known) in the status text color. `since` is when the status was
+    last observed to change — no server timestamp exists, so rows only
+    grow a duration once this client has seen a transition. */
+export function StatusGlyph({
+  status,
+  thinking,
+  sinceMs,
+  className,
+}: {
+  status: string;
+  thinking?: boolean;
+  sinceMs?: number | null;
+  className?: string;
+}) {
+  const label =
+    status === "working" && thinking ? "thinking" : (STATUS_LABEL[status] ?? status);
+  const glyph = status === "working" && thinking ? "◐" : (STATUS_GLYPH[status] ?? "○");
+  const dur =
+    sinceMs != null && (status === "needs_input" || status === "done")
+      ? ` · ${shortDuration(Date.now() - sinceMs)}`
+      : "";
   return (
     <span
       className={cn(
-        "inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-caption font-semibold",
-        STATUS_STYLE[status] ?? STATUS_STYLE.idle,
-        status === "needs_input" && "pulse-red"
+        "shrink-0 font-mono text-[10px]",
+        STATUS_TEXT[status] ?? STATUS_TEXT.idle,
+        status === "needs_input" && "font-bold",
+        className
       )}
     >
-      {status === "working" && (
-        <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-orange-400" />
-      )}
-      {STATUS_LABEL[status] ?? status}
-      {thinking ? " · thinking" : ""}
+      {glyph} {label}
+      {dur}
+    </span>
+  );
+}
+
+/** The reticle header's status pill — needs_input gets the bordered,
+    pulsing treatment; everything else stays a quiet glyph column. */
+export function StatusPill({
+  status,
+  thinking,
+  sinceMs,
+}: {
+  status: string;
+  thinking?: boolean;
+  sinceMs?: number | null;
+}) {
+  if (status !== "needs_input") {
+    return <StatusGlyph status={status} thinking={thinking} sinceMs={sinceMs} className="text-caption" />;
+  }
+  const dur = sinceMs != null ? ` · ${shortDuration(Date.now() - sinceMs)}` : "";
+  return (
+    <span className="pulse-red shrink-0 rounded-full border border-red-400/50 bg-red-400/10 px-2 py-0.5 font-mono text-caption font-bold text-red-300">
+      ● needs you{dur}
     </span>
   );
 }

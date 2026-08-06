@@ -3,14 +3,12 @@ import {
   AArrowDown,
   AArrowUp,
   ArrowDownToLine,
-  ArrowLeft,
   ChevronDown,
   ChevronUp,
   Keyboard,
   MoreHorizontal,
   Search,
   SendHorizonal,
-  SlashSquare,
   SquareTerminal,
   WrapText,
   X,
@@ -20,10 +18,42 @@ import { client } from "./ws";
 import { Term, type TermHandle, type ViewMode } from "./Term";
 import { KeyPad } from "./KeyPad";
 import { SlashPalette } from "./SlashPalette";
-import { Button, Sheet, StatusChip } from "./ui";
+import { Button, ROMAN, Sheet, StatusPill, cn, roman, sigil } from "./ui";
+import { observeStatus } from "./statusClock";
 import { useSwipeBack } from "./useSwipeBack";
 import { usePinchZoom } from "./usePinchZoom";
 import { hapticTap } from "./native";
+
+function uptime(ms: number) {
+  const m = Math.floor(ms / 60000);
+  if (m < 60) return `${m}m`;
+  const h = Math.floor(m / 60);
+  if (h < 48) return `${h}h ${m % 60}m`;
+  return `${Math.floor(h / 24)}d ${h % 24}h`;
+}
+
+function tail(p: string | null, n = 2) {
+  if (!p) return "";
+  const parts = p.replace(/\/+$/, "").split("/");
+  return parts.slice(-n).join("/");
+}
+
+/** One brass corner of the scan-reticle frame around the terminal — the
+    pairing motif promoted to the app's signature. */
+function Bracket({ pos }: { pos: "tl" | "tr" | "bl" | "br" }) {
+  const cls = {
+    tl: "left-0 top-0 rounded-tl-md border-l-2 border-t-2",
+    tr: "right-0 top-0 rounded-tr-md border-r-2 border-t-2",
+    bl: "bottom-0 left-0 rounded-bl-md border-b-2 border-l-2",
+    br: "bottom-0 right-0 rounded-br-md border-b-2 border-r-2",
+  }[pos];
+  return (
+    <span
+      aria-hidden
+      className={cn("pointer-events-none absolute z-10 h-[18px] w-[18px] border-gold/55", cls)}
+    />
+  );
+}
 
 // Mirror font: fit ~110 cols (where agent content lives) instead of the full
 // desktop grid, and never drop below readable — the rest scrolls sideways.
@@ -151,9 +181,16 @@ export function Pane({
     box.current?.focus();
   };
 
+  // durations ("needs you · 4m") tick forward without any state change
+  const [, bump] = useState(0);
+  useEffect(() => {
+    const t = setInterval(() => bump((n) => n + 1), 30_000);
+    return () => clearInterval(t);
+  }, []);
+  const since = observeStatus(pane.id, pane.status);
   const status = useMemo(
-    () => <StatusChip status={pane.status} thinking={pane.thinking} />,
-    [pane.status, pane.thinking]
+    () => <StatusPill status={pane.status} thinking={pane.thinking} sinceMs={since} />,
+    [pane.status, pane.thinking, since]
   );
 
   const swipe = useSwipeBack(onSwipeComplete ?? onBack);
@@ -184,26 +221,50 @@ export function Pane({
         style={{ touchAction: "pan-y" }}
         {...swipe.handlers}
       >
-      {/* header — back, name, status, search, and one overflow icon for
-          everything else (mode/font are "set once" prefs, search is used
-          mid-read often enough to deserve staying one tap away) */}
+      {/* header — a two-line ledger: sigil + numeral + name + status pill,
+          then agent · cwd · uptime with search/overflow folded into the
+          second line's right edge */}
       <header
         ref={header}
-        className="safe-top flex items-center gap-2 border-b border-card-edge bg-sky-mid/70 px-2 py-2 backdrop-blur"
+        className="safe-top flex flex-col gap-[3px] border-b border-card-edge/80 bg-sky-mid/70 px-4 pb-2.5 pt-2 font-mono backdrop-blur"
       >
-        <Button size="icon" variant="ghost" onClick={onBack} aria-label="back">
-          <ArrowLeft className="h-5 w-5" />
-        </Button>
-        <div className="min-w-0 flex-1">
-          <div className="truncate text-body font-semibold">{pane.name}</div>
+        <div className="flex items-center gap-2.5">
+          <button
+            onClick={onBack}
+            aria-label="back"
+            className="-ml-2 flex h-11 w-8 shrink-0 items-center justify-center text-[16px] text-zinc-300"
+          >
+            ‹
+          </button>
+          <span className="shrink-0 whitespace-nowrap text-[13px] text-gold">
+            {sigil(pane.index)} {roman(pane.index)}
+          </span>
+          <span className="min-w-0 flex-1 truncate text-[16px] font-semibold text-white">
+            {pane.name}
+          </span>
+          {status}
         </div>
-        {status}
-        <Button size="icon" variant="ghost" onClick={() => setSearching((s) => !s)} aria-label="search">
-          <Search className="h-4 w-4" />
-        </Button>
-        <Button size="icon" variant="ghost" onClick={() => setMoreOpen(true)} aria-label="more">
-          <MoreHorizontal className="h-5 w-5" />
-        </Button>
+        <div className="flex items-center gap-2.5 pl-[26px] text-[9.5px] text-dim">
+          {pane.agent && <span>{pane.version ?? pane.agent}</span>}
+          {pane.cwd && <span className="truncate">{tail(pane.cwd)}</span>}
+          <span className="tabular-nums">↑{uptime(pane.uptime_ms)}</span>
+          <span className="ml-auto flex shrink-0 items-center gap-1 text-zinc-300">
+            <button
+              onClick={() => setSearching((s) => !s)}
+              aria-label="search"
+              className="flex h-8 w-8 items-center justify-center"
+            >
+              <Search className="h-3.5 w-3.5" />
+            </button>
+            <button
+              onClick={() => setMoreOpen(true)}
+              aria-label="more"
+              className="flex h-8 w-8 items-center justify-center"
+            >
+              <MoreHorizontal className="h-4 w-4" />
+            </button>
+          </span>
+        </div>
       </header>
 
       {watch === false && (
@@ -245,17 +306,23 @@ export function Pane({
         </div>
       )}
 
-      {/* terminal mirror */}
-      <div className="relative min-h-0 flex-1" {...pinch}>
-        <Term
-          ref={term}
-          pane={pane.id}
-          rows={rows}
-          cols={cols}
-          mode={mode}
-          mirrorFont={mirrorFont}
-          readFont={readFont}
-        />
+      {/* terminal mirror, framed by the scan-reticle corner brackets */}
+      <div className="relative mx-3 my-2.5 min-h-0 flex-1" {...pinch}>
+        <Bracket pos="tl" />
+        <Bracket pos="tr" />
+        <Bracket pos="bl" />
+        <Bracket pos="br" />
+        <div className="h-full overflow-hidden rounded-md bg-[rgba(4,6,14,0.6)] p-1.5">
+          <Term
+            ref={term}
+            pane={pane.id}
+            rows={rows}
+            cols={cols}
+            mode={mode}
+            mirrorFont={mirrorFont}
+            readFont={readFont}
+          />
+        </div>
         <button
           onClick={() => term.current?.scrollToBottom()}
           className="absolute bottom-2 right-2 flex h-11 w-11 items-center justify-center rounded-full border border-card-edge bg-sky-mid/80 text-zinc-300 backdrop-blur active:scale-95"
@@ -272,11 +339,14 @@ export function Pane({
             these send the option's digit instead (plus the composer text
             as a follow-up note, if any). */}
         {pane.status === "needs_input" && pane.options?.length ? (
-          <div className="px-2 pt-2">
+          <div className="px-3.5 pt-3">
             {pane.question && (
-              <div className="mb-1.5 text-subhead text-zinc-300">{pane.question}</div>
+              <div className="mb-2 flex items-baseline gap-2 font-mono">
+                <span className="text-caption font-bold text-red-300">?</span>
+                <span className="text-subhead text-gold-soft">{pane.question}</span>
+              </div>
             )}
-            <div className="flex flex-col gap-1.5">
+            <div className="flex flex-col gap-[7px]">
               {pane.options.map((opt, i) => (
                 <button
                   key={i}
@@ -285,47 +355,65 @@ export function Pane({
                     setText("");
                     hapticTap("success", header.current);
                   }}
-                  className="flex items-baseline gap-2 rounded-xl border border-gold/40 bg-sky-deep px-3 py-2 text-left text-subhead active:scale-[0.98]"
+                  className={cn(
+                    "flex items-center gap-3 rounded-[10px] border px-3 py-[11px] text-left active:scale-[0.98]",
+                    i === 0
+                      ? "border-gold/55 bg-gold/8 text-white"
+                      : "border-card-edge/90 bg-card/60 text-zinc-300"
+                  )}
                 >
-                  <span className="font-mono text-gold">{i + 1}.</span>
-                  <span className="min-w-0 flex-1">{opt}</span>
+                  <span
+                    className={cn(
+                      "flex h-[26px] w-[26px] shrink-0 items-center justify-center rounded-full border font-mono text-[12px]",
+                      i === 0 ? "border-gold/60 text-gold" : "border-dim/40 text-dim"
+                    )}
+                  >
+                    {ROMAN[i] ?? i + 1}
+                  </span>
+                  <span className="min-w-0 flex-1 font-mono text-subhead">{opt}</span>
                 </button>
               ))}
             </div>
-            <div className="mt-1 text-caption text-zinc-500">
-              text below is sent as a note with your answer
+            <div className="mt-1.5 font-mono text-[10px] text-zinc-600">
+              anything typed below rides along as a note
             </div>
           </div>
         ) : null}
-        <div className="flex items-end gap-2 px-2 pt-2 pb-1.5">
-          <Button
-            size="icon"
-            variant="ghost"
+        <div className="flex items-center gap-2 px-3.5 pb-1.5 pt-2.5">
+          <div
+            className="flex min-w-0 flex-1 items-center gap-2 rounded-[10px] border border-card-edge bg-[rgba(4,6,14,0.8)] px-3 py-[7px]"
+            onClick={() => box.current?.focus()}
+          >
+            <span className="shrink-0 font-mono font-bold text-prompt">❯</span>
+            <textarea
+              ref={box}
+              value={text}
+              onChange={(e) => setText(e.target.value)}
+              rows={Math.min(5, Math.max(1, text.split("\n").length))}
+              placeholder={`reply to ${pane.name}…`}
+              className="min-w-0 flex-1 resize-none bg-transparent py-1 text-[16px] outline-none placeholder:text-zinc-600"
+            />
+            {!text && (
+              <span aria-hidden className="cursor-blink shrink-0 font-mono text-gold">
+                ▍
+              </span>
+            )}
+          </div>
+          <button
             onClick={() => setPalette(true)}
             aria-label="slash commands"
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[10px] border border-card-edge font-mono text-subhead text-dim active:scale-95"
           >
-            <SlashSquare className="h-5 w-5" />
-          </Button>
-          <Button
-            size="icon"
-            variant="ghost"
-            onClick={() => setPad((p) => !p)}
-            aria-label="special keys"
-            className={pad ? "text-gold" : ""}
+            /
+          </button>
+          <button
+            ref={sendBtn}
+            onClick={() => sendText(true)}
+            aria-label="send"
+            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[10px] bg-gold text-sky-deep active:scale-95"
           >
-            <Keyboard className="h-5 w-5" />
-          </Button>
-          <textarea
-            ref={box}
-            value={text}
-            onChange={(e) => setText(e.target.value)}
-            rows={Math.min(5, Math.max(1, text.split("\n").length))}
-            placeholder={`reply to ${pane.name}…`}
-            className="min-w-0 flex-1 resize-none rounded-xl border border-card-edge bg-sky-deep px-3 py-2 text-[16px] outline-none placeholder:text-zinc-600 focus:border-gold/50"
-          />
-          <Button ref={sendBtn} size="icon" variant="gold" onClick={() => sendText(true)} aria-label="send">
             <SendHorizonal className="h-4 w-4" />
-          </Button>
+          </button>
         </div>
         {pad && <KeyPad pane={pane.id} />}
       </div>
@@ -339,6 +427,21 @@ export function Pane({
 
       <Sheet open={moreOpen} onClose={() => setMoreOpen(false)} title="view options">
         <div className="space-y-4 px-2 pb-2">
+          <div>
+            <div className="mb-1.5 px-1 text-caption font-semibold uppercase tracking-wider text-zinc-500">
+              input
+            </div>
+            <Button
+              variant={pad ? "gold" : "default"}
+              onClick={() => {
+                setPad((p) => !p);
+                setMoreOpen(false);
+              }}
+              className="w-full"
+            >
+              <Keyboard className="h-4 w-4" /> special keys {pad ? "on" : "off"}
+            </Button>
+          </div>
           <div>
             <div className="mb-1.5 px-1 text-caption font-semibold uppercase tracking-wider text-zinc-500">
               display

@@ -9,6 +9,10 @@
   --color-gold: #d4af37;
   --color-gold-soft: #f5e6b8;
   --color-fg: #e6e8f0;
+  --color-dim: #7f8ba3;
+  /* the ❯ prompt glyph — phosphor on night, collapsing into the accent on
+     the deliberately-monochrome OLED looks (Theme.swift's prompt color) */
+  --color-prompt: #23d18b;
   --font-mono: "SFMono-Regular", ui-monospace, Menlo, Consolas, monospace;
 
   /* Type scale — named so the same handful of sizes gets reused everywhere
@@ -39,6 +43,8 @@ html[data-theme="oled-orange"] {
   --color-gold: #ff9f0a;
   --color-gold-soft: #ffd9a0;
   --color-fg: #f2e9de;
+  --color-dim: #9e8c75;
+  --color-prompt: #ff9f0a;
 }
 html[data-theme="oled-green"] {
   --color-sky-deep: #000000;
@@ -48,6 +54,7 @@ html[data-theme="oled-green"] {
   --color-gold: #23d18b;
   --color-gold-soft: #a9f0d1;
   --color-fg: #e0f2e9;
+  --color-dim: #73a087;
 }
 
 html,
@@ -117,6 +124,36 @@ body,
 }
 .pulse-red {
   animation: pulse-red 1.6s ease-out infinite;
+}
+
+/* the status rail / orrery star glow for needs_input — a breathing red
+   halo, distinct from pulse-red's expanding ring on the status pill */
+@keyframes glow-red {
+  0%,
+  100% {
+    box-shadow: 0 0 6px 2px rgba(248, 113, 113, 0.7);
+  }
+  50% {
+    box-shadow: 0 0 12px 4px rgba(248, 113, 113, 0.35);
+  }
+}
+.glow-red {
+  animation: glow-red 1.8s ease-in-out infinite;
+}
+
+/* the ▍ block cursor in the title row and the composer prompt */
+@keyframes cursor-blink {
+  0%,
+  49% {
+    opacity: 0.9;
+  }
+  50%,
+  100% {
+    opacity: 0.12;
+  }
+}
+.cursor-blink {
+  animation: cursor-blink 1.4s step-end infinite;
 }
 
 /* Haptic-feel fallback (native.ts) — a quick overshoot bounce standing in

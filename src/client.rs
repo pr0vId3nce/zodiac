@@ -511,6 +511,8 @@ struct App {
     home_stars: Vec<(Rect, u64)>,
     /// Sparkline strips along card bottoms: (strip rect, pane id, accent).
     home_sparks: Vec<(Rect, u64, usize)>,
+    /// Rows the sidebar header occupies above the pane rows (click math).
+    sidebar_row_off: u16,
     /// The orrery's placement for kitty_overlay: its rect plus each dot's
     /// pixel position and accent index within it. None when hidden.
     orrery: Option<(Rect, Vec<(f32, f32, usize)>)>,
@@ -673,6 +675,7 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         home_block_nav: Vec::new(),
         home_stars: Vec::new(),
         home_sparks: Vec::new(),
+        sidebar_row_off: 0,
         orrery: None,
         home_mascots: Vec::new(),
         kitty_on: crate::kitty::enabled(),
@@ -1046,9 +1049,10 @@ impl App {
                     // Row math uses the inner rect: a surround frame shifts
                     // the first row down by one; border clicks do nothing.
                     if self.sidebar_inner.contains(pos) {
-                        let idx = (m.row - self.sidebar_inner.y) as usize;
-                        if idx < self.panes.len() {
-                            self.focus(idx);
+                        let row = (m.row - self.sidebar_inner.y) as usize;
+                        let off = self.sidebar_row_off as usize;
+                        if row >= off && row - off < self.panes.len() {
+                            self.focus(row - off);
                         }
                     }
                     self.selection = None;
@@ -1808,14 +1812,29 @@ impl App {
         }
         let p = &self.panes[i];
         if p.attention {
-            return Some(Color::Red);
+            return Some(crate::theme::color(crate::theme::STATUS_TEXT[0]));
         }
         if self.working(i) {
-            Some(Color::Indexed(208))
+            Some(crate::theme::color(crate::theme::STATUS_RAIL[2]))
         } else if p.activity {
-            Some(Color::Green)
+            Some(crate::theme::color(crate::theme::STATUS_TEXT[3]))
         } else {
             None
+        }
+    }
+
+    /// Client-side status accent index for a pane (the sidebar's rail),
+    /// same order as `card_status`: needs, thinking, working, done, idle.
+    fn pane_accent(&self, i: usize) -> usize {
+        let p = &self.panes[i];
+        if p.attention {
+            0
+        } else if self.working(i) {
+            2
+        } else if p.activity {
+            3
+        } else {
+            4
         }
     }
 
@@ -2785,6 +2804,22 @@ impl App {
         let [sidebar, main] =
             Layout::horizontal([Constraint::Length(sb_w), Constraint::Min(1)]).areas(body);
 
+        // The pane header (identity row + hairline) rides above the pane;
+        // zoom reclaims it. Carved before main_size so the pty tracks the
+        // pane's real footprint.
+        let (header, main) = if !self.zoom && !self.home && main.height > 8 {
+            (
+                Some(Rect { height: 2, ..main }),
+                Rect {
+                    y: main.y + 2,
+                    height: main.height - 2,
+                    ..main
+                },
+            )
+        } else {
+            (None, main)
+        };
+
         self.main_size = (main.height.max(2), main.width.max(10));
         for p in &mut self.panes {
             p.resize(self.main_size.0, self.main_size.1);
@@ -2819,6 +2854,9 @@ impl App {
         }
 
         self.draw_sidebar(f, sidebar);
+        if let Some(h) = header {
+            self.draw_pane_header(f, h);
+        }
 
         self.sidebar_rect = sidebar;
         self.main_rect = main;
@@ -4558,13 +4596,13 @@ impl App {
         use std::io::Write as _;
         let mut out = std::io::stdout();
         // Card art hides while the settings popup covers the page (z=-1
-        // images would bleed through its background), in list view, and
-        // off home entirely. The pairing overlay overrides all of that —
-        // it takes over the page regardless of the home view mode.
+        // images would bleed through its background) and in list view.
+        // Attached (not home) gets its own chrome below. The pairing
+        // overlay overrides all of that — it takes over the page
+        // regardless of the home view mode.
         if !self.pair_open
-            && (!self.home
-                || matches!(self.mode, Mode::Settings | Mode::SettingsEdit { .. })
-                || self.home_view() == "list")
+            && (matches!(self.mode, Mode::Settings | Mode::SettingsEdit { .. })
+                || (self.home && self.home_view() == "list"))
         {
             if !self.kitty_placed.is_empty() {
                 let _ = crate::kitty::delete_placements(&mut out);
@@ -4613,6 +4651,54 @@ impl App {
                 }
                 _ => Vec::new(),
             }
+        } else if !self.home {
+            // Attached chrome: reticle brackets on the focused pane's
+            // corners, plus the scrollbar strip while scrolled back.
+            let pal = self.palette();
+            let theme_idx = crate::theme::THEMES
+                .iter()
+                .position(|t| *t == pal.name)
+                .unwrap_or(0);
+            let rect = self.main_rect;
+            let mut v: Vec<(Rect, u32)> = Vec::new();
+            if rect.width > 6 && rect.height > 3 {
+                let (pw, ph) = (rect.width as u32 * cw as u32, rect.height as u32 * ch as u32);
+                let id = crate::kitty::reticle_id(pw, ph, theme_idx);
+                if !self.kitty_sent.contains(&(pw, ph, id)) {
+                    self.kitty_sent.retain(|&(_, _, i2)| i2 != id);
+                    let rgba = crate::kitty::reticle_rgba(pw, ph, pal.accent, 0.5);
+                    let _ = crate::kitty::transmit(&mut out, id, pw, ph, &rgba);
+                    self.kitty_sent.insert((pw, ph, id));
+                }
+                v.push((rect, id));
+                let scroll = self.panes.get(self.active).map_or(0, |p| p.scroll);
+                if scroll > 0 {
+                    // Thumb position from how far back we've scrolled,
+                    // quantized so a handful of strip images covers it.
+                    let frac = scroll as f32 / (scroll + rect.height as usize) as f32;
+                    let bucket = (frac * 15.0) as u8;
+                    let strip = Rect {
+                        x: rect.right() - 1,
+                        width: 1,
+                        ..rect
+                    };
+                    let (sw, sh) = (cw as u32, rect.height as u32 * ch as u32);
+                    let sid = crate::kitty::scrollbar_id(sh, theme_idx, bucket);
+                    if !self.kitty_sent.contains(&(sw, sh, sid)) {
+                        self.kitty_sent.retain(|&(_, _, i2)| i2 != sid);
+                        let rgba = crate::kitty::scrollbar_rgba(
+                            sw,
+                            sh,
+                            pal.accent,
+                            bucket as f32 / 15.0,
+                        );
+                        let _ = crate::kitty::transmit(&mut out, sid, sw, sh, &rgba);
+                        self.kitty_sent.insert((sw, sh, sid));
+                    }
+                    v.push((strip, sid));
+                }
+            }
+            v
         } else if self.home_view() == "blocks" {
             let frame = ((self.anim_start.elapsed().as_millis() / 250) % 4) as u8;
             let soft = self.claude_style() == "soft";
@@ -5349,6 +5435,118 @@ impl App {
         let _ = out.flush();
     }
 
+    /// The pane header riding above the focused pane: sigil + numeral,
+    /// name, agent · cwd · uptime, a right-aligned status word, and a
+    /// hairline underneath. Metadata comes from the last T_STATE snapshot
+    /// (refreshed every few seconds while attached), so it may trail
+    /// reality by a beat — identity, not telemetry.
+    fn draw_pane_header(&self, f: &mut Frame, area: Rect) {
+        let Some(p) = self.panes.get(self.active) else { return };
+        let pal = self.palette();
+        let acc = crate::theme::color(pal.accent);
+        let dim = Style::default().fg(crate::theme::color(pal.dim));
+        let iw = area.width as usize;
+        let sigil = format!("{}\u{FE0E}", ZODIAC[self.active % ZODIAC.len()]);
+        let numeral = roman(self.active + 1);
+        let meta = self
+            .home_state
+            .as_ref()
+            .and_then(|s| s.panes.iter().find(|sp| sp.id == p.id));
+        let mut info = String::new();
+        if let Some(m) = meta {
+            match (&m.agent, &m.version) {
+                (Some(a), Some(v)) => info = format!("{a} {}", version_token(v)),
+                (Some(a), None) => info = a.clone(),
+                _ => {}
+            }
+            if let Some(d) = m.cwd.as_deref() {
+                if !info.is_empty() {
+                    info.push_str(" · ");
+                }
+                info.push_str(&short_dir(d, 28));
+            }
+            if m.uptime_ms > 0 {
+                if !info.is_empty() {
+                    info.push_str(" · ");
+                }
+                info.push('↑');
+                info.push_str(fmt_uptime(m.uptime_ms).trim_start_matches("up "));
+            }
+        }
+        // Right-aligned status word: what the pane is up to, colored by
+        // state. The focused pane's sticky flags are cleared, so this
+        // reads the live signals instead.
+        let (word, wstyle) = if self.working(self.active) {
+            (
+                "● working",
+                Style::default().fg(crate::theme::color(crate::theme::STATUS_TEXT[2])),
+            )
+        } else if meta.is_some_and(|m| m.agent.is_some()) {
+            (
+                "○ idle",
+                Style::default().fg(crate::theme::color(crate::theme::STATUS_TEXT[4])),
+            )
+        } else {
+            ("", Style::default())
+        };
+        let left = format!(" {sigil} {numeral} · ");
+        let left_cells = 6 + numeral.chars().count();
+        let name = truncate(
+            &p.name,
+            iw.saturating_sub(left_cells + info.chars().count() + word.chars().count() + 6),
+        );
+        let mut spans = vec![
+            Span::styled(left, Style::default().fg(acc).bold()),
+            Span::styled(
+                name.clone(),
+                Style::default().fg(crate::theme::color(pal.fg)).bold(),
+            ),
+        ];
+        if !info.is_empty() {
+            spans.push(Span::styled(format!("  {info}"), dim));
+        }
+        let used: usize = left_cells
+            + name.chars().count()
+            + if info.is_empty() { 0 } else { 2 + info.chars().count() };
+        let pad = iw.saturating_sub(used + word.chars().count() + 1);
+        spans.push(Span::raw(" ".repeat(pad)));
+        spans.push(Span::styled(word, wstyle));
+        f.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect { height: 1, ..area },
+        );
+        // The hairline under the header.
+        f.render_widget(
+            Paragraph::new(Span::styled(
+                "─".repeat(iw),
+                Style::default().fg(crate::theme::color(pal.edge)),
+            )),
+            Rect {
+                y: area.y + 1,
+                height: 1,
+                ..area
+            },
+        );
+    }
+
+    /// The 3-cell sidebar row prefix for a background pane: `▎` status
+    /// rail + the pane's sigil. Same width as the old `NN ` number column,
+    /// so every padding calculation downstream holds.
+    fn sidebar_prefix(&self, i: usize) -> Vec<Span<'static>> {
+        let pal = self.palette();
+        vec![
+            Span::styled(
+                "▎",
+                Style::default()
+                    .fg(crate::theme::color(crate::theme::STATUS_RAIL[self.pane_accent(i)])),
+            ),
+            Span::styled(
+                format!("{}\u{FE0E} ", ZODIAC[i % ZODIAC.len()]),
+                Style::default().fg(crate::theme::color(pal.accent)),
+            ),
+        ]
+    }
+
     fn draw_sidebar(&mut self, f: &mut Frame, area: Rect) {
         if area.width == 0 {
             return;
@@ -5358,20 +5556,39 @@ impl App {
         self.sidebar_inner = inner;
         f.render_widget(block, area);
 
+        let pal = self.palette();
         let mut lines: Vec<Line> = Vec::new();
+        // Header: session moon + hairline, when there's room for it.
+        let header =
+            !self.collapsed && inner.height as usize >= self.panes.len() + 3 && inner.width >= 8;
+        self.sidebar_row_off = if header { 2 } else { 0 };
+        if header {
+            lines.push(Line::from(vec![
+                Span::styled(
+                    format!(" ☾ {}", truncate(&self.session, inner.width.saturating_sub(4) as usize)),
+                    Style::default().fg(crate::theme::color(pal.accent)).bold(),
+                ),
+            ]));
+            lines.push(Line::from(Span::styled(
+                "─".repeat(inner.width as usize),
+                Style::default().fg(crate::theme::color(pal.edge)),
+            )));
+        }
         for (i, p) in self.panes.iter().enumerate() {
             let active = i == self.active;
             let working = self.working(i);
             // Working rows keep the plain gray name — the spinner alone is
             // the indicator, painted orange in its own span.
             let style = if active {
-                Style::default().fg(Color::Cyan).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(crate::theme::color(pal.fg))
+                    .add_modifier(Modifier::BOLD)
             } else if working {
-                Style::default().fg(Color::Gray)
+                Style::default().fg(crate::theme::color(pal.dim))
             } else if let Some(color) = self.status_color(i) {
                 Style::default().fg(color).add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(Color::Gray)
+                Style::default().fg(crate::theme::color(pal.dim))
             };
             let anim_style = Style::default()
                 .fg(self.spinner_color())
@@ -5448,7 +5665,7 @@ impl App {
                 let aw = anim.chars().count() as u16;
                 let w = inner.width.saturating_sub(3 + aw + ssh_len as u16) as usize;
                 let name = truncate(&p.name, w.saturating_sub(1));
-                let mut spans = vec![Span::styled(format!("{:>2} ", i + 1), style)];
+                let mut spans = self.sidebar_prefix(i);
                 spans.extend(self.shimmer_spans(&name, style));
                 if ssh.is_some() {
                     spans.push(Span::styled("-SSH", ssh_tag_style));
@@ -5458,16 +5675,24 @@ impl App {
                 Line::from(spans)
             } else {
                 let name = truncate(&p.name, inner.width.saturating_sub(4 + ssh_len as u16) as usize);
+                let mut spans = self.sidebar_prefix(i);
+                spans.push(Span::styled(name, style));
                 if ssh.is_some() {
-                    Line::from(vec![
-                        Span::styled(format!("{:>2} {name}", i + 1), style),
-                        Span::styled("-SSH", ssh_tag_style),
-                    ])
-                } else {
-                    Line::from(Span::styled(format!("{:>2} {name}", i + 1), style))
+                    spans.push(Span::styled("-SSH", ssh_tag_style));
                 }
+                Line::from(spans)
             };
             lines.push(line);
+        }
+        // Footer pinned to the sidebar's last row.
+        if !self.collapsed && inner.height as usize > lines.len() + 1 && inner.width >= 14 {
+            while lines.len() < inner.height as usize - 1 {
+                lines.push(Line::default());
+            }
+            lines.push(Line::from(Span::styled(
+                " alt+~ observatory",
+                Style::default().fg(crate::theme::color(pal.faint)),
+            )));
         }
         f.render_widget(Paragraph::new(lines), inner);
     }
@@ -5510,22 +5735,36 @@ impl App {
                 Style::default().fg(Color::Yellow),
             ));
         } else {
+            let pal = self.palette();
             if let Some(p) = self.panes.get(self.active) {
                 spans.push(Span::styled(
-                    format!(" {} · {}", self.active + 1, p.name),
-                    Style::default().fg(Color::Cyan),
+                    format!(
+                        " {}\u{FE0E} {} · {}",
+                        ZODIAC[self.active % ZODIAC.len()],
+                        roman(self.active + 1),
+                        p.name
+                    ),
+                    Style::default().fg(crate::theme::color(pal.accent)).bold(),
                 ));
                 let title = p.parser.screen().title().to_string();
                 if self.working(self.active) {
+                    // Current activity in gold-soft — the LLM subtitle when
+                    // there is one, plain "working" otherwise.
+                    let doing = self
+                        .home_state
+                        .as_ref()
+                        .and_then(|s| s.panes.iter().find(|sp| sp.id == p.id))
+                        .and_then(|sp| sp.subtitle.clone())
+                        .unwrap_or_else(|| "working".into());
                     spans.push(Span::styled(
-                        " · working",
-                        Style::default().fg(self.spinner_color()),
+                        format!(" · ✶ {}", truncate(&doing, 40)),
+                        Style::default().fg(crate::theme::color(pal.gold_soft)),
                     ));
                 }
                 if !title.is_empty() {
                     spans.push(Span::styled(
                         format!(" · {}", truncate(&title, 40)),
-                        Style::default().fg(Color::DarkGray),
+                        Style::default().fg(crate::theme::color(pal.faint)),
                     ));
                 }
                 if self.zoom {
@@ -5551,9 +5790,16 @@ impl App {
                 }
             }
             if !self.settings.hide_controls {
+                let hints =
+                    "alt+n/w new/close · alt+r rename · alt+↑↓/1-9 switch · alt+z zoom · ⇧pgup scroll · alt+q detach ";
+                let used: usize = spans.iter().map(|s| s.content.chars().count()).sum::<usize>()
+                    + hints.chars().count();
+                spans.push(Span::raw(
+                    " ".repeat((area.width as usize).saturating_sub(used)),
+                ));
                 spans.push(Span::styled(
-                    "  Alt+N/W new/close · Alt+R rename · Alt+↑↓/1-9 switch · Alt+PgUp/Dn move · Alt+T bar · Alt+Z zoom · ⇧PgUp scroll · Alt+Q detach · Alt+⇧Q kill",
-                    Style::default().fg(Color::DarkGray),
+                    hints,
+                    Style::default().fg(crate::theme::color(pal.faint)),
                 ));
             }
         }

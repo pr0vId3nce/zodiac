@@ -490,6 +490,64 @@ pub fn orrery_rgba(
     px
 }
 
+/// Image-id namespace for the attached view's chrome: the focused pane's
+/// reticle brackets and the scrollback scrollbar.
+pub const CHROME_BASE: u32 = 0x52544C00; // "RTL\0"
+
+pub fn reticle_id(w: u32, h: u32, theme_idx: usize) -> u32 {
+    CHROME_BASE + ((hash((w as u64) << 24 ^ (h as u64) << 4 ^ theme_idx as u64) as u32) & 0x3FF)
+}
+
+pub fn scrollbar_id(h: u32, theme_idx: usize, bucket: u8) -> u32 {
+    CHROME_BASE
+        + 0x400
+        + (((hash((h as u64) << 8 ^ theme_idx as u64) as u32) & 0x3F) << 4)
+        + (bucket as u32 & 0xF)
+}
+
+/// Four corner brackets on a transparent ground — the selection reticle at
+/// pane scale.
+pub fn reticle_rgba(w: u32, h: u32, col: (u8, u8, u8), alpha: f32) -> Vec<u8> {
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    let arm = (w.min(h) as f32 * 0.08).clamp(10.0, 18.0) as i64;
+    let (wi, hi) = (w as i64, h as i64);
+    for (cx, cy, dx, dy) in [
+        (1i64, 1i64, 1i64, 1i64),
+        (wi - 2, 1, -1, 1),
+        (1, hi - 2, 1, -1),
+        (wi - 2, hi - 2, -1, -1),
+    ] {
+        for k in 0..arm {
+            for t in 0..2i64 {
+                put_a(&mut px, w, h, cx + dx * k, cy + dy * t, col, alpha);
+                put_a(&mut px, w, h, cx + dx * t, cy + dy * k, col, alpha);
+            }
+        }
+    }
+    px
+}
+
+/// The scrollback scrollbar: a faint 2px track down the right edge of a
+/// one-cell-wide strip, with the thumb at `frac` (0 = bottom, 1 = top).
+pub fn scrollbar_rgba(w: u32, h: u32, col: (u8, u8, u8), frac: f32) -> Vec<u8> {
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    let x0 = w.saturating_sub(2);
+    for y in 0..h {
+        for x in x0..w {
+            put_a(&mut px, w, h, x as i64, y as i64, col, 0.12);
+        }
+    }
+    let th = (h / 8).max(18).min(h);
+    let center = (1.0 - frac.clamp(0.0, 1.0)) * h as f32;
+    let top = (center - th as f32 / 2.0).clamp(0.0, (h - th) as f32) as u32;
+    for y in top..(top + th).min(h) {
+        for x in x0..w {
+            put_a(&mut px, w, h, x as i64, y as i64, col, 0.55);
+        }
+    }
+    px
+}
+
 /// Image-id namespace for the per-pane card sparklines. The version byte
 /// rolls whenever the bucket history changes, so stale terminal-side
 /// caches can never show old bars.

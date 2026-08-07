@@ -28,7 +28,8 @@ Astrolabe ships none of its own.
   plain browser gets a "use the iOS app" notice. The bundle's supported
   home is the iOS app's WKWebView; `?web=1` (sticky) re-enables browser
   access for development.
-- **ios** (not in this repo — it ships through the App Store separately):
+- **ios** (developed in-tree at `astrolabe/ios` but excluded from the
+  published repo; it ships through TestFlight/the App Store):
   the product, and fully native as of Aug 2026 — the agents screen, pane
   view, terminal (SwiftTerm core + a native renderer), composer, question
   buttons, keys pad and slash suggestions are all SwiftUI, speaking the

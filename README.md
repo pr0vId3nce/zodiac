@@ -19,7 +19,7 @@ Also here: a phone UI over Tailscale ([astrolabe](astrolabe/README.md)), a
 scripting CLI, kitty-graphics support inside panes, and a watchdog that
 un-sticks Claude Code when the API stalls.
 
-The built-in chat panel defaults to the author's own model server. To point
+The built-in chat panel is disabled until you give it an endpoint. To point
 it at a model of your own instead, see [LOCAL_MODEL.md](LOCAL_MODEL.md).
 
 ---
@@ -139,7 +139,7 @@ and friends for itself.
 | `Alt+PgUp` / `Alt+PgDn` | Move pane up/down (numbers are positional) |
 | `Alt+T` | Collapse the sidebar to numbers only |
 | `Alt+Z` | Zoom the active pane full-width |
-| `Alt+G` | Chat panel (see below) |
+| `Alt+O` | Chat overlay (see below; `Alt+G` still works as a legacy alias) |
 | `Alt+P` | Pairing QR for the phone UI |
 | `Ctrl+S` | Settings — the one non-Alt binding, since inner apps don't see `Ctrl+S` |
 | `Shift+PgUp` / `Shift+PgDn` | Scrollback in the active pane (any keystroke snaps back to live) |
@@ -206,7 +206,7 @@ Every command talks to the running server over its socket without disturbing
 the attached UI. `-s <session>` selects a session (default `main`).
 
 ```
-zodiac ls [--json]                   # panes with status: working | idle | done | needs_input
+zodiac ls [--json]                   # panes with status (alias: list)
 zodiac read <pane>                   # print a pane's rendered screen
 zodiac send <pane> <text> [--enter]  # type into a pane
 zodiac prompt <pane> <text>          # submit text + Enter (prompt an agent)
@@ -239,22 +239,27 @@ It rides a read-only observer mode in the server (`T_WATCH`): observers get
 state, replay and live output without ever disturbing the attached UI.
 Pairing is by QR (`Alt+P`) carrying a token the server mints per launch.
 
-Three pieces: a TypeScript **bridge** (zodiac's socket on one side, HTTP +
-WebSocket on the other), a React **PWA**, and a native **iOS** app — named
-zodiac on the phone too — that holds
-a list of paired computers, delivers push notifications, and shows the
-selected machine's uptime, battery, CPU and memory in its title bar. The iOS
-sources live outside this repo; everything they talk to is here. See
-[astrolabe/README.md](astrolabe/README.md).
+Two live pieces: a TypeScript **bridge** (zodiac's socket on one side, HTTP +
+WebSocket on the other) and a native **iOS** app — named zodiac on the phone
+too — that holds a list of paired computers, renders panes natively (herd
+view, terminal mirror, answer buttons, widgets), delivers push notifications,
+and shows the selected machine's uptime, battery, CPU and memory. A React
+web mirror also lives in `astrolabe/web` but is paused in favor of the
+native app — the bridge serves it only with `?web=1`. The iOS sources are
+developed in-tree but not published with this repo; everything they talk to
+is here. See [astrolabe/README.md](astrolabe/README.md).
 
 ## Chat panel
 
-`Alt+G` opens a chat panel on the home page that talks to an
+`Alt+O` summons a floating chat overlay on the home page (Esc or a click
+outside minimizes it; `Alt+G` remains as a legacy alias) that talks to an
 OpenAI-compatible endpoint over your tailnet (a llama-server, by default).
 It's a general assistant, not a session narrator: the pane overview isn't fed
 to it unless the question sounds like it concerns the session, plus one turn
 of momentum so follow-ups still land. It can pull the overview in itself via
-a `read_panes` tool, and `/why <n>` attaches it outright. `/wake` and
+a `read_panes` tool, and `/why <n>` attaches it outright (`/read <n>` — or
+its older name `/scry <n>` — quotes a pane's screen into the transcript).
+`/wake` and
 `/sleep` start and stop the model's systemd unit over ssh.
 
 It can also search the web and fetch URLs when a question turns on facts it
@@ -264,22 +269,28 @@ runs the client.
 
 `chat_endpoint`, `chat_model`, `chat_ssh`, and `chat_service` are editable
 right from the settings page (see below) — that's how you point zodiac at
-your own model instead of the author's `bigbox`. See
+your own model. See
 [LOCAL_MODEL.md](LOCAL_MODEL.md) for a walkthrough. The rest live only in
 `~/.config/zodiac/config.json`:
 
 | key | default | what |
 | --- | --- | --- |
 | `chat_panel` | `true` | show the panel at all |
-| `chat_endpoint` | `http://bigbox:8091` | OpenAI-compatible endpoint |
+| `chat_endpoint` | *(empty — chat disabled until set)* | OpenAI-compatible endpoint, e.g. `http://mybox:8091` |
 | `chat_model` | `qwen3.6-35b-a3b` | model name sent with each request |
-| `chat_ssh` | `des@bigbox` | where `/wake` and `/sleep` ssh to |
-| `chat_service` | `llama-server` | the systemd --user unit they start/stop |
+| `chat_ssh` | *(empty — `/wake`/`/sleep` disabled)* | where `/wake` and `/sleep` ssh to, e.g. `me@mybox` |
+| `chat_service` | *(empty)* | the systemd --user unit they start/stop, e.g. `llama-server` |
 | `chat_width` | `40` | panel width in cells |
 | `chat_search_url` | *(empty)* | Wikipedia when empty; a SearXNG base URL (needs `json` in `search.formats`) or `https://api.search.brave.com` otherwise |
 | `chat_search_key` | *(empty)* | API key, for backends that want one |
-| `pane_monitor` | `true` | the background summarizer and stuck-pane check (see below) |
+| `pane_monitor` | `true` | the background summarizer and stuck-pane check (see below; inert until `monitor_endpoint` is set) |
+| `monitor_endpoint` | *(empty — monitor disabled until set)* | OpenAI-compatible endpoint for the background model |
+| `monitor_model` | *(empty)* | model name for monitor requests (llama-server ignores it) |
 | `chat_act` | `false` | allow `prompt_pane`/`send_keys` — see below |
+
+Blank means *off*, not a hidden default: with no `chat_endpoint` the panel
+shows "not configured" and makes no network calls at all, and with no
+`chat_ssh`/`chat_service` the wake/sleep spells simply aren't offered.
 
 These were once named `wizard_*`; a config using the old names still loads
 (each key kept an alias), and gets rewritten to the new ones the next time
@@ -299,10 +310,12 @@ one-line summary under each pane's status and to flag panes that have been
 "working" with an unchanged screen for three minutes. It never writes to a
 pane — it produces a notification and a log line, nothing more.
 
-This one is not configurable yet: the host, port and model name are constants
-in `src/monitor.rs`, pointing at a CPU-only llama-server on the author's
-tailnet. Edit those (or set `pane_monitor: false`) until it grows real
-settings.
+Point it at any OpenAI-compatible endpoint with the `Monitor endpoint` /
+`Monitor model` fields in `Ctrl+S` (or `monitor_endpoint` / `monitor_model`
+in config.json) — a small CPU-class model is plenty. Until an endpoint is
+set, the monitor and summaries are fully disabled; changes apply live, no
+restart needed. A single llama-server can back both this and the chat panel,
+though a separate small model keeps background ticks off your chat GPU.
 
 ## Settings
 
@@ -330,8 +343,10 @@ carries a keybinding reference in its right column.
 | Conn-error resume | Immediate `--resume` on "Connection closed mid-response" |
 | Cursor type / blink / color | Follow the inner app or force block/underline/bar; blink on/off; focused-pane tint |
 | Bottom controls | Hide the keybinding hints in the status bar |
+| Theme | `night` (navy + brass), `oled-orange`, or `oled-green` (true-black variants) |
 | Chat character | Who answers in the chat panel: a plain `assistant`, an ascii `oracle`, or `hal` |
-| Chat endpoint / model / ssh / service | Free-text fields (`Enter` to edit, `Enter` again to save, `Esc` to cancel) pointing the chat panel at your own OpenAI-compatible server instead of `bigbox` — see [LOCAL_MODEL.md](LOCAL_MODEL.md) |
+| Chat endpoint / model / ssh / service | Free-text fields (`Enter` to edit, `Enter` again to save, `Esc` to cancel) pointing the chat panel at your own OpenAI-compatible server — see [LOCAL_MODEL.md](LOCAL_MODEL.md) |
+| Monitor endpoint / model | Same free-text mechanics for the background summarizer/monitor; blank keeps it off, changes apply live |
 
 ## Mouse
 

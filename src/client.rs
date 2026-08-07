@@ -2053,11 +2053,12 @@ impl App {
                 // sleeping/away get a note, since those explain why a
                 // message didn't go out.
                 if old.is_some() && old != Some(s) {
+                    let who = self.chat_who();
                     let note = match s {
                         S::Awake => None,
-                        S::Waking => Some("the wizard stirs…"),
-                        S::Sleeping => Some("the wizard sleeps"),
-                        S::Away => Some("the wizard has gone away"),
+                        S::Waking => Some(format!("{who} stirs…")),
+                        S::Sleeping => Some(format!("{who} sleeps")),
+                        S::Away => Some(format!("{who} has gone away")),
                     };
                     if let Some(note) = note {
                         self.chat_note(CHAT_NOTE, note);
@@ -2278,7 +2279,7 @@ impl App {
         }
         self.chat_scroll = 0;
         let Some(tx) = self.chat_tx.clone() else {
-            self.chat_note(CHAT_ERROR, "the wizard is not configured");
+            self.chat_note(CHAT_ERROR, "the chat panel is not configured");
             return;
         };
         let lower = text.to_ascii_lowercase();
@@ -2338,12 +2339,23 @@ impl App {
                         });
                     }
                     Some(S::Waking) => {
-                        self.chat_note(CHAT_NOTE, "the wizard is still waking — a moment…")
+                        let who = self.chat_who();
+                        self.chat_note(CHAT_NOTE, format!("{who} is still waking — a moment…"))
                     }
-                    Some(S::Sleeping) => self
-                        .chat_note(CHAT_NOTE, "the wizard is sleeping — cast /wake to rouse him"),
-                    Some(S::Away) | None => self
-                        .chat_note(CHAT_NOTE, "the wizard is away — the tower does not answer"),
+                    Some(S::Sleeping) => {
+                        let who = self.chat_who();
+                        self.chat_note(
+                            CHAT_NOTE,
+                            format!("{who} is sleeping — cast /wake to rouse him"),
+                        )
+                    }
+                    Some(S::Away) | None => {
+                        let who = self.chat_who();
+                        self.chat_note(
+                            CHAT_NOTE,
+                            format!("{who} is away — the endpoint does not answer"),
+                        )
+                    }
                 }
             }
         }
@@ -2637,6 +2649,16 @@ impl App {
             return "assistant";
         }
         pick(CHAT_FACES, &self.settings.chat_face, "assistant")
+    }
+
+    /// How transcript notes name the configured chat persona — the docs
+    /// promise assistant/oracle/HAL, so no stray "wizard" strings.
+    fn chat_who(&self) -> &'static str {
+        match self.chat_face() {
+            "oracle" => "the oracle",
+            "hal" => "HAL",
+            _ => "the assistant",
+        }
     }
 
     /// The sidebar's Block per the frame/weight/color settings. Rounding
@@ -4780,7 +4802,7 @@ impl App {
                 let pondering = match face {
                     "oracle" => "✦ the oracle is divining…",
                     "hal" => "◉ HAL computes…",
-                    _ => "✦ the wizard ponders…",
+                    _ => "✦ the assistant ponders…",
                 };
                 lines.push(Line::from(Span::styled(
                     pondering,

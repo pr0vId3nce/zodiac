@@ -1,10 +1,10 @@
 # Pointing the chat panel at your own model
 
-zodiac's chat panel (`Alt+G`, three personas: `assistant`/`oracle`/`hal`)
-talks to any OpenAI-compatible completions endpoint. By default it's
-hardcoded to look for the author's own machine (`bigbox`, over their
-Tailscale tailnet) — that hostname won't resolve for anyone else. This doc
-covers pointing it at a model you run yourself, on your own network.
+zodiac's chat panel (`Alt+O`, three personas: `assistant`/`oracle`/`hal`;
+`Alt+G` is a legacy alias) talks to any OpenAI-compatible completions
+endpoint. Out of the box it's disabled — the panel says "not configured"
+and makes no network calls until you give it an endpoint. This doc covers
+pointing it at a model you run yourself, on your own network.
 
 ## What you need
 
@@ -54,10 +54,11 @@ to pick them up.
 
 ## Troubleshooting
 
-- The chat panel shows connection state in its header (e.g. "waking",
-  "unreachable"). If it says the host is unreachable, double check the URL
-  is exactly what your server listens on — no trailing slash, correct
-  scheme (`http://` unless you've put TLS in front of it).
+- The chat panel shows connection state in its header: "awake", "waking",
+  "sleeping" (the endpoint refused — server down but host up), or "away"
+  (nothing answered — DNS failure or timeout). If it says away, double
+  check the URL is exactly what your server listens on — no trailing
+  slash, correct scheme (`http://` unless you've put TLS in front of it).
 - "Host reachable but nothing listening" usually means the port is wrong,
   or the model server hasn't started yet.
 - These four fields also live directly in `~/.config/zodiac/config.json`

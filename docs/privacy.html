@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zodiac — privacy policy</title>
+<style>
+  :root {
+    --night: #0b1020; --deep: #050508; --raise: #12182e;
+    --edge: rgba(36, 46, 85, 0.55);
+    --brass: #d4af37; --brass-dim: rgba(212, 175, 55, 0.35);
+    --gold-soft: #f5e6b8; --phosphor: #23d18b;
+    --fg: #e6e8f0; --dim: #7f8ba3; --faint: #5a6478;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    background: radial-gradient(120% 80% at 50% 0%, var(--raise) 0%, var(--night) 55%, var(--deep) 100%) fixed var(--night);
+    color: var(--fg); font-family: var(--serif); font-size: 17px; line-height: 1.7;
+  }
+  a { color: var(--gold-soft); text-decoration-color: var(--brass-dim); text-underline-offset: 3px; }
+  :focus-visible { outline: 2px solid var(--brass); outline-offset: 3px; }
+  .plate { max-width: 680px; margin: 0 auto; padding: 26px 24px 80px; }
+  .mast { font-family: var(--mono); font-size: 18px; margin-bottom: 60px; }
+  .mast a { text-decoration: none; }
+  .mast .chev { color: var(--phosphor); font-weight: 700; }
+  .mast .word { color: var(--brass); font-weight: 700; }
+  .eyebrow {
+    font-family: var(--mono); font-size: 12px; letter-spacing: 0.34em;
+    color: var(--brass); text-transform: uppercase;
+  }
+  h1 { font-size: 32px; font-weight: 500; margin-top: 16px; letter-spacing: -0.01em; }
+  p, li { color: var(--dim); margin-top: 16px; max-width: 62ch; }
+  p strong { color: var(--fg); font-weight: 600; }
+  ul { margin-top: 8px; padding-left: 22px; }
+  li { margin-top: 8px; }
+  .updated { font-family: var(--mono); font-size: 12.5px; color: var(--faint); margin-top: 8px; }
+  hr { border: none; border-top: 1px solid var(--edge); margin: 36px 0 8px; }
+</style>
+</head>
+<body>
+<div class="plate">
+  <div class="mast"><a href="index.html" aria-label="zodiac home"><span class="chev">❯</span> <span class="word">zodiac</span></a></div>
+
+  <div class="eyebrow">Privacy Policy</div>
+  <h1>Nothing leaves your machines.</h1>
+  <p class="updated">applies to the zodiac iOS app and the zodiac/astrolabe software · august 2026</p>
+
+  <p>zodiac (the iOS app) is a remote control for software you run on your
+  own computers. It does not collect, store, or transmit any personal data
+  to us or to any third party. There are no accounts, no analytics, no
+  advertising, and no tracking of any kind.</p>
+
+  <hr>
+  <p><strong>What the app stores, and where:</strong></p>
+  <ul>
+    <li>The list of computers you pair — on your device, in the app's own
+    container (shared with its widgets).</li>
+    <li>Pairing tokens — in the iOS Keychain on your device.</li>
+    <li>Display preferences — on your device.</li>
+  </ul>
+
+  <p><strong>Where the app connects:</strong> exclusively to computers you
+  paired, over your own private network (designed around Tailscale). No
+  vendor servers exist. Terminal content you view travels directly from
+  your computer to your device and is not retained by the app beyond its
+  on-screen session.</p>
+
+  <p><strong>Push notifications</strong> are sent to Apple's push service
+  by the bridge software running on <em>your</em> computer. Their content
+  comes from — and refers to — your own terminal sessions. You can disable
+  them in iOS Settings at any time, or redact their contents with the
+  bridge's <span style="font-family:var(--mono);font-size:14px;">ASTROLABE_PUSH_REDACT</span> option.</p>
+
+  <p><strong>Camera</strong> access is used only to scan pairing QR codes,
+  when you open the scanner. No images are captured, stored, or
+  transmitted.</p>
+
+  <p><strong>Questions?</strong> The software is open source — the honest
+  answer to any privacy question is in the code itself:
+  <a href="https://github.com/pr0vId3nce/zodiac">github.com/pr0vId3nce/zodiac</a>.</p>
+</div>
+</body>
+</html>

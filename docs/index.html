@@ -1,0 +1,509 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>zodiac — a terminal multiplexer built around AI coding agents</title>
+<meta name="description" content="Herd your coding agents: a Rust terminal multiplexer with agent-aware status, a phone companion, and answer-from-the-lock-screen questions.">
+<style>
+  :root {
+    --night: #0b1020;
+    --deep: #050508;
+    --raise: #12182e;
+    --card: #0d1122;
+    --edge: rgba(36, 46, 85, 0.55);
+    --brass: #d4af37;
+    --brass-dim: rgba(212, 175, 55, 0.35);
+    --gold-soft: #f5e6b8;
+    --phosphor: #23d18b;
+    --fg: #e6e8f0;
+    --dim: #7f8ba3;
+    --faint: #5a6478;
+    --needs: #f87171;
+    --needs-text: #fca5a5;
+    --working: #fb923c;
+    --done: #34d399;
+    --serif: "Iowan Old Style", "Palatino Linotype", Palatino, Georgia, serif;
+    --mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  }
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  html { scroll-behavior: smooth; }
+  body {
+    background: radial-gradient(120% 80% at 50% 0%, var(--raise) 0%, var(--night) 55%, var(--deep) 100%) fixed var(--night);
+    color: var(--fg);
+    font-family: var(--serif);
+    font-size: 17px;
+    line-height: 1.65;
+  }
+  ::selection { background: var(--brass-dim); color: var(--gold-soft); }
+  a { color: var(--gold-soft); text-decoration-color: var(--brass-dim); text-underline-offset: 3px; }
+  a:hover { color: var(--brass); }
+  :focus-visible { outline: 2px solid var(--brass); outline-offset: 3px; border-radius: 2px; }
+
+  .plate {
+    max-width: 1080px;
+    margin: 0 auto;
+    padding: 0 24px 64px;
+  }
+
+  /* ------------------------------------------------------------- masthead */
+  header.mast {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 16px;
+    padding: 26px 4px 0;
+    font-family: var(--mono);
+  }
+  .prompt-line { font-size: 20px; white-space: nowrap; }
+  .prompt-line .chev { color: var(--phosphor); font-weight: 700; }
+  .prompt-line .word { color: var(--brass); font-weight: 700; letter-spacing: 0.02em; }
+  .cursor {
+    display: inline-block;
+    width: 3px;
+    height: 1.05em;
+    margin-left: 0.45em;
+    transform: translateY(0.18em);
+    background: var(--phosphor);
+    animation: blink 1.8s steps(1) infinite;
+  }
+  @keyframes blink { 0%, 49% { opacity: 0.95; } 50%, 100% { opacity: 0.12; } }
+  nav.mastlinks { display: flex; gap: 22px; font-size: 13px; }
+  nav.mastlinks a { color: var(--dim); text-decoration: none; letter-spacing: 0.06em; }
+  nav.mastlinks a:hover { color: var(--gold-soft); }
+
+  /* ----------------------------------------------------------------- hero */
+  .hero { padding: 72px 4px 30px; max-width: 720px; }
+  .hero h1 {
+    font-size: clamp(34px, 5.4vw, 54px);
+    font-weight: 500;
+    line-height: 1.12;
+    letter-spacing: -0.012em;
+    text-wrap: balance;
+  }
+  .hero h1 em { font-style: italic; color: var(--gold-soft); }
+  .hero p.sub {
+    margin-top: 20px;
+    font-size: 19px;
+    color: var(--dim);
+    max-width: 58ch;
+    text-wrap: pretty;
+  }
+  .hero .agents { color: var(--faint); font-family: var(--mono); font-size: 13.5px; }
+  .installline {
+    margin-top: 34px;
+    display: inline-flex;
+    align-items: center;
+    gap: 14px;
+    flex-wrap: wrap;
+  }
+  .cmd {
+    font-family: var(--mono);
+    font-size: 14.5px;
+    background: rgba(4, 6, 14, 0.72);
+    border: 1px solid var(--edge);
+    border-left: 2px solid var(--brass);
+    padding: 11px 16px;
+    color: var(--fg);
+    white-space: nowrap;
+    overflow-x: auto;
+    max-width: 100%;
+  }
+  .cmd .ph { color: var(--phosphor); }
+  .alt-install { font-size: 13.5px; color: var(--faint); font-family: var(--mono); }
+
+  /* -------------------------------------------- the observatory miniature */
+  .term {
+    margin: 44px 0 8px;
+    background: linear-gradient(180deg, #10162c 0%, #0a0e1d 100%);
+    border: 1px solid var(--edge);
+    border-radius: 8px;
+    box-shadow: 0 30px 80px rgba(0, 0, 0, 0.55), 0 0 0 1px rgba(212, 175, 55, 0.06);
+    overflow: hidden;
+    font-family: var(--mono);
+    font-size: 13px;
+    position: relative;
+  }
+  .term::before, .term::after,
+  .term .tick-a, .term .tick-b {
+    content: "";
+    position: absolute;
+    width: 14px; height: 14px;
+    border: 2px solid var(--brass-dim);
+    pointer-events: none;
+  }
+  .term::before { top: 7px; left: 7px; border-right: none; border-bottom: none; }
+  .term::after { top: 7px; right: 7px; border-left: none; border-bottom: none; }
+  .term .tick-a { bottom: 7px; left: 7px; border-right: none; border-top: none; }
+  .term .tick-b { bottom: 7px; right: 7px; border-left: none; border-top: none; }
+  .term-strip {
+    display: flex;
+    justify-content: space-between;
+    padding: 14px 22px 6px;
+    color: var(--faint);
+    font-size: 12px;
+  }
+  .term-strip .lead .chev { color: var(--phosphor); font-weight: 700; }
+  .term-strip .lead .word { color: var(--brass); font-weight: 700; }
+  .term-strip .lead .host { color: var(--dim); margin-left: 10px; }
+  .orrery { display: block; margin: 0 auto; width: min(520px, 86%); }
+  .orrery .arc { stroke: var(--brass); opacity: 0.32; fill: none; }
+  .orrery .arc-inner { stroke: var(--brass); opacity: 0.13; fill: none; stroke-dasharray: 5 7; }
+  .star-needs { animation: starpulse 1.8s ease-in-out infinite; transform-origin: center; }
+  @keyframes starpulse { 0%, 100% { opacity: 0.75; } 50% { opacity: 1; } }
+  .orrery-count { text-align: center; margin-top: -14px; }
+  .orrery-count .n { color: var(--fg); font-weight: 700; }
+  .orrery-count .breakdown { color: var(--faint); font-size: 12px; }
+  .orrery-count .breakdown b { font-weight: 400; }
+  .orrery-count .b-needs { color: var(--needs-text); }
+  .orrery-count .b-working { color: var(--working); }
+  .orrery-count .b-done { color: var(--done); }
+
+  .cardrow {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+    padding: 22px;
+  }
+  .pane-card {
+    background: var(--card);
+    border: 1px solid var(--edge);
+    border-left: 3px solid var(--faint);
+    padding: 12px 14px 10px;
+    min-height: 118px;
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+  }
+  .pane-card.needs { border-left-color: var(--needs); background: #14090e; }
+  .pane-card.working { border-left-color: var(--working); }
+  .pane-card .title { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; }
+  .pane-card .sigil { color: var(--brass); }
+  .pane-card .name { color: var(--fg); font-weight: 700; }
+  .pane-card .st { font-size: 11.5px; white-space: nowrap; }
+  .st-needs { color: var(--needs-text); } .st-working { color: var(--working); } .st-idle { color: var(--faint); }
+  .pane-card .meta { color: var(--faint); font-size: 11.5px; }
+  .pane-card .recap { color: var(--dim); font-size: 12px; font-style: italic; }
+  .pane-card .question { color: var(--gold-soft); font-size: 12px; }
+  .pane-card .opts { display: flex; gap: 6px; margin-top: auto; }
+  .pane-card .opts span {
+    border: 1px solid var(--brass-dim);
+    color: var(--gold-soft);
+    padding: 2px 8px;
+    font-size: 11px;
+    border-radius: 3px;
+  }
+  .caption { text-align: center; color: var(--faint); font-size: 13px; font-style: italic; margin-top: 14px; }
+
+  /* -------------------------------------------------------------- plates */
+  section.view { padding: 74px 4px 0; }
+  .eyebrow {
+    font-family: var(--mono);
+    font-size: 12px;
+    letter-spacing: 0.34em;
+    color: var(--brass);
+    text-transform: uppercase;
+    display: flex;
+    align-items: center;
+    gap: 16px;
+  }
+  .eyebrow::after { content: ""; height: 1px; flex: 1; background: linear-gradient(90deg, var(--brass-dim), transparent); }
+  section.view h2 {
+    margin-top: 18px;
+    font-size: clamp(24px, 3.4vw, 34px);
+    font-weight: 500;
+    letter-spacing: -0.01em;
+    text-wrap: balance;
+  }
+  section.view > p { margin-top: 14px; max-width: 62ch; color: var(--dim); text-wrap: pretty; }
+  section.view > p strong { color: var(--fg); font-weight: 600; }
+
+  .statusrows { margin-top: 28px; border-top: 1px solid var(--edge); }
+  .statusrow {
+    display: grid;
+    grid-template-columns: 200px 1fr;
+    gap: 18px;
+    padding: 16px 4px;
+    border-bottom: 1px solid var(--edge);
+    align-items: baseline;
+  }
+  .statusrow .tag { font-family: var(--mono); font-size: 14px; white-space: nowrap; }
+  .statusrow .tag::before { content: "▎"; margin-right: 8px; }
+  .statusrow.s-needs .tag { color: var(--needs-text); }
+  .statusrow.s-working .tag { color: var(--working); }
+  .statusrow.s-done .tag { color: var(--done); }
+  .statusrow p { color: var(--dim); font-size: 15.5px; }
+
+  .duo { display: grid; grid-template-columns: 1fr 1fr; gap: 40px; margin-top: 30px; align-items: start; }
+  .duo .col p { color: var(--dim); font-size: 15.5px; margin-top: 10px; max-width: 48ch; }
+  .duo .col h3 { font-weight: 600; font-size: 18px; }
+  .duo .col h3 .mono { font-family: var(--mono); font-size: 15px; color: var(--gold-soft); }
+
+  .lockcard {
+    font-family: var(--mono);
+    background: rgba(4, 6, 14, 0.8);
+    border: 1px solid var(--edge);
+    border-radius: 14px;
+    padding: 16px 18px;
+    max-width: 360px;
+    box-shadow: 0 18px 50px rgba(0, 0, 0, 0.5);
+  }
+  .lockcard .from { color: var(--faint); font-size: 11px; letter-spacing: 0.08em; }
+  .lockcard .q-title { color: var(--fg); font-weight: 700; font-size: 13.5px; margin-top: 6px; }
+  .lockcard .q-body { color: var(--dim); font-size: 12.5px; margin-top: 4px; }
+  .lockcard .q-body code { color: var(--gold-soft); }
+  .lockcard .answers { display: flex; gap: 8px; margin-top: 12px; }
+  .lockcard .answers span {
+    flex: 1;
+    text-align: center;
+    border: 1px solid var(--brass-dim);
+    color: var(--gold-soft);
+    padding: 6px 0;
+    font-size: 12px;
+    border-radius: 7px;
+  }
+  .lockcard .answers span.armed { background: var(--brass-dim); color: var(--night); font-weight: 700; }
+
+  pre.shell {
+    margin-top: 26px;
+    font-family: var(--mono);
+    font-size: 13.5px;
+    line-height: 1.75;
+    background: rgba(4, 6, 14, 0.72);
+    border: 1px solid var(--edge);
+    padding: 18px 22px;
+    overflow-x: auto;
+    color: var(--dim);
+  }
+  pre.shell .c { color: var(--faint); }
+  pre.shell .z { color: var(--phosphor); }
+  pre.shell .a { color: var(--fg); }
+
+  /* ------------------------------------------------------------- install */
+  .installgrid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin-top: 30px; }
+  .way {
+    background: var(--card);
+    border: 1px solid var(--edge);
+    padding: 18px;
+  }
+  .way h3 { font-size: 13px; font-family: var(--mono); letter-spacing: 0.14em; text-transform: uppercase; color: var(--brass); font-weight: 400; }
+  .way code {
+    display: block;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--fg);
+    margin-top: 12px;
+    line-height: 1.7;
+    overflow-x: auto;
+    white-space: pre;
+  }
+  .way p { color: var(--faint); font-size: 13px; margin-top: 10px; }
+
+  footer {
+    margin-top: 90px;
+    padding: 26px 4px 0;
+    border-top: 1px solid var(--edge);
+    display: flex;
+    justify-content: space-between;
+    gap: 18px;
+    flex-wrap: wrap;
+    font-family: var(--mono);
+    font-size: 12.5px;
+    color: var(--faint);
+  }
+  footer .links { display: flex; gap: 20px; }
+  footer a { color: var(--dim); text-decoration: none; }
+  footer a:hover { color: var(--gold-soft); }
+
+  @media (max-width: 860px) {
+    .cardrow { grid-template-columns: 1fr; }
+    .pane-card { min-height: 0; }
+    .duo { grid-template-columns: 1fr; }
+    .installgrid { grid-template-columns: 1fr; }
+    .statusrow { grid-template-columns: 1fr; gap: 4px; }
+    header.mast { flex-direction: column; gap: 10px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    .cursor, .star-needs { animation: none; }
+    html { scroll-behavior: auto; }
+  }
+</style>
+</head>
+<body>
+<div class="plate">
+
+  <header class="mast">
+    <div class="prompt-line" aria-label="zodiac">
+      <span class="chev">❯</span> <span class="word">zodiac</span><span class="cursor" aria-hidden="true"></span>
+    </div>
+    <nav class="mastlinks" aria-label="site">
+      <a href="#observatory">observatory</a>
+      <a href="#astrolabe">astrolabe</a>
+      <a href="#sanctum">sanctum</a>
+      <a href="#install">install</a>
+      <a href="https://github.com/pr0vId3nce/zodiac">github</a>
+    </nav>
+  </header>
+
+  <section class="hero">
+    <h1>A terminal multiplexer built around <em>AI&nbsp;coding&nbsp;agents</em>.</h1>
+    <p class="sub">Run a herd of agents in panes that know what an agent is —
+    which one is working, which one finished, and which one is sitting on a
+    question that only you can answer. Then answer it from your phone's lock
+    screen.</p>
+    <p class="sub agents">herds: claude · opencode · codex · aider · gemini · goose · any pty</p>
+    <div class="installline">
+      <span class="cmd"><span class="ph">❯</span> git clone https://github.com/pr0vId3nce/zodiac &amp;&amp; cd zodiac &amp;&amp; cargo build --release</span>
+      <span class="alt-install">or&nbsp; nix run github:pr0vId3nce/zodiac</span>
+    </div>
+  </section>
+
+  <div class="term" role="img" aria-label="The zodiac home page: an orrery arc of status stars above pane cards.">
+    <span class="tick-a"></span><span class="tick-b"></span>
+    <div class="term-strip">
+      <span class="lead"><span class="chev">❯</span> <span class="word">zodiac</span><span class="host">studio-mac</span></span>
+      <span>up 12d 4h · cpu 34% · mem 61%</span>
+    </div>
+    <svg class="orrery" viewBox="0 0 520 96" aria-hidden="true">
+      <path class="arc" d="M 40 92 A 220 150 0 0 1 480 92" stroke-width="1.5"></path>
+      <path class="arc-inner" d="M 78 92 A 182 118 0 0 1 442 92" stroke-width="1"></path>
+      <circle cx="87" cy="53" r="4.5" fill="#34d399"></circle>
+      <circle cx="182" cy="22" r="4.5" fill="#fb923c"></circle>
+      <circle class="star-needs" cx="260" cy="14" r="5.5" fill="#f87171"></circle>
+      <circle cx="338" cy="22" r="4.5" fill="#fb923c"></circle>
+      <circle cx="433" cy="53" r="4" fill="#52525b"></circle>
+    </svg>
+    <div class="orrery-count">
+      <div class="n">V panes</div>
+      <div class="breakdown"><b class="b-needs">1 needs you</b> · <b class="b-working">2 working</b> · <b class="b-done">1 finished</b> · 1 idle</div>
+    </div>
+    <div class="cardrow">
+      <div class="pane-card working">
+        <div class="title"><span><span class="sigil">♈︎</span> <span class="name">astro-web</span></span><span class="st st-working">● working</span></div>
+        <div class="meta">claude 2.0.31 · astrolabe/web</div>
+        <div class="recap">⏺ rewriting the pane list reducer</div>
+      </div>
+      <div class="pane-card needs">
+        <div class="title"><span><span class="sigil">♉︎</span> <span class="name">git and sync</span></span><span class="st st-needs">● needs you · 4m</span></div>
+        <div class="question">? Bash command: <b>git push --force-with-lease</b> — allow?</div>
+        <div class="opts"><span>1 Yes</span><span>2 Yes, always</span><span>3 No</span></div>
+      </div>
+      <div class="pane-card">
+        <div class="title"><span><span class="sigil">♊︎</span> <span class="name">nvim</span></span><span class="st st-idle">○ idle</span></div>
+        <div class="meta">shell · ~/programs/zodiac</div>
+      </div>
+    </div>
+  </div>
+  <p class="caption">The home page, as drawn in a kitty-graphics terminal: an orrery of status stars, one per pane, over the herd.</p>
+
+  <section class="view" id="observatory">
+    <div class="eyebrow">The Observatory</div>
+    <h2>Status that means something.</h2>
+    <p>Every multiplexer shows you panes. zodiac reads them: it watches
+    terminal titles, output rhythm, and screen contents to keep an honest
+    verdict per agent — with a painted status rail, a finish chime if you
+    want one, and desktop notifications when a pane rings its bell.</p>
+    <div class="statusrows">
+      <div class="statusrow s-needs">
+        <span class="tag">needs you</span>
+        <p>The agent stopped on a permission prompt or a question. zodiac
+        parses the numbered options off the screen so every surface — TUI,
+        phone, widget, notification — can offer real answer buttons.</p>
+      </div>
+      <div class="statusrow s-working">
+        <span class="tag">working</span>
+        <p>Genuinely working — not merely printing. A stuck "working" pane
+        with an unchanged screen for three minutes gets flagged, and an
+        optional watchdog auto-resumes Claude Code API stalls.</p>
+      </div>
+      <div class="statusrow s-done">
+        <span class="tag">finished</span>
+        <p>Done since you last looked. Finish states are sticky per pane, so
+        nothing completes silently while you're focused elsewhere.</p>
+      </div>
+    </div>
+  </section>
+
+  <section class="view" id="astrolabe">
+    <div class="eyebrow">The Astrolabe</div>
+    <h2>The herd, from your pocket.</h2>
+    <div class="duo">
+      <div class="col">
+        <p>Pair a phone by pointing it at a QR code (<span class="mono">Alt+P</span>).
+        From then on the native iOS app mirrors every pane live — full
+        terminal scrollback, a keys pad, voice-dictation replies — and a
+        push arrives the moment an agent needs an answer.</p>
+        <p>Home-screen and lock-screen widgets carry the question to you:
+        tap an option without unlocking. Multiple computers, one herd. All
+        of it rides a read-only observer mode in the server, so your
+        attached session is never disturbed.</p>
+      </div>
+      <div class="col">
+        <div class="lockcard" role="img" aria-label="A lock-screen widget showing an agent's question with three answer buttons.">
+          <div class="from">❯ ZODIAC · STUDIO-MAC</div>
+          <div class="q-title">git and sync needs you</div>
+          <div class="q-body">Bash command: <code>git push --force-with-lease</code> — allow?</div>
+          <div class="answers"><span class="armed">1</span><span>2</span><span>3</span></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="view" id="sanctum">
+    <div class="eyebrow">The Sanctum</div>
+    <h2>Your model, or none at all.</h2>
+    <p>An optional chat overlay (<strong>the oracle</strong>) answers questions
+    about the session — or anything else — against an OpenAI-compatible
+    endpoint <strong>you</strong> run: llama-server, Ollama, vLLM, on your own
+    tailnet. A second small model can write one-line summaries under each
+    pane and sanity-check stuck ones against your own written policy.</p>
+    <p>Both are <strong>off until configured</strong>. A fresh install of
+    zodiac makes no background network calls, phones no vendor, and has no
+    account to create. Pairing tokens live in your server's state dir and
+    your phone's keychain — nowhere else.</p>
+    <pre class="shell"><span class="c"># agents can drive agents — the CLI is the same protocol</span>
+<span class="z">❯</span> <span class="a">zodiac ls --json</span>
+<span class="z">❯</span> <span class="a">zodiac wait 3 --state needs_input,done</span>
+<span class="z">❯</span> <span class="a">zodiac prompt 3 "run the tests, then summarize the failures"</span>
+<span class="z">❯</span> <span class="a">zodiac read 3</span></pre>
+  </section>
+
+  <section class="view" id="install">
+    <div class="eyebrow">The Ledger</div>
+    <h2>Install it.</h2>
+    <div class="installgrid">
+      <div class="way">
+        <h3>from source</h3>
+        <code>git clone https://github.com/pr0vId3nce/zodiac
+cd zodiac
+cargo build --release</code>
+        <p>Rust stable. Linux is the primary target; macOS works.</p>
+      </div>
+      <div class="way">
+        <h3>nix</h3>
+        <code>nix run github:pr0vId3nce/zodiac</code>
+        <p>A flake ships in the repo; add it to your system packages if it earns its keep.</p>
+      </div>
+      <div class="way">
+        <h3>releases</h3>
+        <code>github.com/pr0vId3nce/zodiac/releases</code>
+        <p>Tagged builds for x86_64/aarch64 Linux and both macOS architectures.</p>
+      </div>
+    </div>
+    <p style="margin-top:26px;">The phone bridge installs with
+    <a href="https://github.com/pr0vId3nce/zodiac/tree/main/astrolabe"><code style="font-family:var(--mono);font-size:14px;">astrolabe/install.sh</code></a> —
+    it binds to your Tailscale address, so the herd never leaves your tailnet.</p>
+  </section>
+
+  <footer>
+    <span>zodiac · MIT · built for the agents' keeper</span>
+    <nav class="links" aria-label="footer">
+      <a href="https://github.com/pr0vId3nce/zodiac">source</a>
+      <a href="https://github.com/pr0vId3nce/zodiac/blob/main/LOCAL_MODEL.md">local models</a>
+      <a href="privacy.html">privacy</a>
+    </nav>
+  </footer>
+
+</div>
+</body>
+</html>

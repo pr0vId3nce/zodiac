@@ -62,7 +62,12 @@ export interface SessionState {
 const RING_CAP = 6 * 1024 * 1024;
 const RECONNECT_MS = 2000;
 const POLL_MS = 1000;
-const WATCH_PROBE_MS = 1500;
+/// Generous: the server's event loop can stall a couple of seconds (a
+/// blocking monitor probe, a busy pane), and a probe that expires during
+/// such a stall used to lock the bridge into poll mode — phones then only
+/// ever saw the current screen. A late replay also upgrades us back to
+/// watch mode (see the T_REPLAY case), so this window is belt, not roof.
+const WATCH_PROBE_MS = 6000;
 
 /**
  * Events:
@@ -323,7 +328,10 @@ export class ZodiacLink extends EventEmitter {
         break;
       }
       case T_REPLAY: {
-        if (this.watchSupported === null) {
+        // A replay is proof of watch support, even when it lands after
+        // the probe already gave up — upgrade out of poll mode instead of
+        // staying degraded until the next bridge restart.
+        if (this.watchSupported !== true) {
           this.watchSupported = true;
           if (this.probeTimer) clearTimeout(this.probeTimer);
           this.emit("watch", true);

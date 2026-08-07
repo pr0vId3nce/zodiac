@@ -11,10 +11,13 @@ use crate::query::QueryScanner;
 use crate::server::SrvEvent;
 
 /// Max raw output kept per pane, replayed to clients on attach and persisted
-/// across reboots as restored scrollback. 2 MiB ≈ 15–50k rendered lines of
-/// typical agent output — the phone's terminal engine renders history
-/// incrementally, so a bigger ring costs replay bandwidth, not frame time.
-pub const RING_CAP: usize = 2 * 1024 * 1024;
+/// across reboots as restored scrollback. Sized in raw pty bytes, and those
+/// are mostly churn for an agent pane: ~70% of a busy claude ring is
+/// repaint escapes (spinner/status frames), so scrollback depth is set by
+/// how many newline-scrolls fit the window — at 2 MiB that was roughly one
+/// long reply. 6 MiB reaches several replies back and still fits a single
+/// T_REPLAY under the protocol's 8 MiB frame cap with room to spare.
+pub const RING_CAP: usize = 6 * 1024 * 1024;
 
 pub struct SrvPane {
     pub id: u64,

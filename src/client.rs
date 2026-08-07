@@ -511,6 +511,12 @@ struct App {
     home_stars: Vec<(Rect, u64)>,
     /// Sparkline strips along card bottoms: (strip rect, pane id, accent).
     home_sparks: Vec<(Rect, u64, usize)>,
+    /// Witnessed status flips per pane id: (status, when, known). The
+    /// server doesn't timestamp transitions, so a card's "· 4m" duration
+    /// appears only after a flip happens on this client's watch — a
+    /// pane's first sighting (known=false) shows no duration (it may
+    /// have been waiting for hours already).
+    status_since: std::collections::HashMap<u64, (String, Instant, bool)>,
     /// Rows the sidebar header occupies above the pane rows (click math).
     sidebar_row_off: u16,
     /// The orrery's placement for kitty_overlay: its rect plus each dot's
@@ -692,6 +698,7 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         home_order: Vec::new(),
         home_stars: Vec::new(),
         home_sparks: Vec::new(),
+        status_since: std::collections::HashMap::new(),
         sidebar_row_off: 0,
         orrery: None,
         orrery_live: None,
@@ -1296,6 +1303,21 @@ impl App {
             T_STATE => {
                 if let Ok(s) = serde_json::from_slice::<SessionState>(&f.data) {
                     self.home_sel = self.home_sel.min(s.panes.len().saturating_sub(1));
+                    // Record witnessed status flips for the cards' "· 4m"
+                    // durations; closed panes drop out of the map here.
+                    let now = Instant::now();
+                    self.status_since
+                        .retain(|id, _| s.panes.iter().any(|p| p.id == *id));
+                    for p in &s.panes {
+                        match self.status_since.get_mut(&p.id) {
+                            Some(rec) if rec.0 == p.status => {}
+                            Some(rec) => *rec = (p.status.clone(), now, true),
+                            None => {
+                                self.status_since
+                                    .insert(p.id, (p.status.clone(), now, false));
+                            }
+                        }
+                    }
                     self.home_state = Some(s);
                 }
             }
@@ -3695,6 +3717,12 @@ impl App {
     /// with the arrow keys. Card data comes from the server's T_STATE
     /// snapshot (refreshed ~1/s while the page is open).
     fn draw_home(&mut self, f: &mut Frame, area: Rect) {
+        // Roll every pane's sparkline buckets forward so quiet stretches
+        // decay to zero even without fresh output (the kitty overlay ticks
+        // too, but only in kitty mode — the text bars need it here).
+        for p in &mut self.panes {
+            p.rate_tick();
+        }
         self.home_cards.clear();
         self.home_block_nav.clear();
         self.home_stars.clear();
@@ -4437,6 +4465,37 @@ impl App {
         );
     }
 
+    /// The card sparkline as text: the newest 50s output buckets as ▁–█
+    /// bars scaled to the loudest one, silent buckets left blank. None
+    /// when the pane has no recorded output yet (history starts fresh on
+    /// attach) — the row then keeps only its uptime.
+    fn text_spark(&self, id: u64, max: usize) -> Option<String> {
+        const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        if max == 0 {
+            return None;
+        }
+        let p = self.panes.iter().find(|p| p.id == id)?;
+        let peak = *p.rate.iter().max()?;
+        if peak == 0 {
+            return None;
+        }
+        Some(
+            p.rate
+                .iter()
+                .rev()
+                .take(max)
+                .rev()
+                .map(|&b| {
+                    if b == 0 {
+                        ' '
+                    } else {
+                        BARS[(((b as f32 / peak as f32) * 7.0).round() as usize).min(7)]
+                    }
+                })
+                .collect(),
+        )
+    }
+
     /// One observatory card, "brass instrument" style: sigil roundel +
     /// name with the status right-aligned, agent · cwd underneath, the
     /// recap in the middle, uptime pinned to the bottom. The painted layer
@@ -4524,10 +4583,18 @@ impl App {
 
         // Each stat on its own line under the title: status word, agent +
         // version, directory, ssh host — nothing truncates anything else.
-        let status = format!("{} {}", STATUS_GLYPH[accent], STATUS_WORD[accent]);
+        let mut status = format!("{} {}", STATUS_GLYPH[accent], STATUS_WORD[accent]);
+        if accent != 4 {
+            // "· 4m" since the flip this client witnessed (idle stays quiet).
+            if let Some((_, since, known)) = self.status_since.get(&p.id) {
+                if *known {
+                    status.push_str(&format!(" · {}", fmt_since(*since)));
+                }
+            }
+        }
         lines.push(Line::from(vec![
             Span::raw("    "),
-            Span::styled(status, Style::default().fg(stext)),
+            Span::styled(truncate(&status, iw.saturating_sub(4)), Style::default().fg(stext)),
         ]));
         let agent = match (&p.agent, &p.version) {
             (Some(a), Some(v)) => format!("{a} {}", version_token(v)),
@@ -4566,17 +4633,30 @@ impl App {
             }
         }
 
-        // Uptime pinned to the bottom-right (the sparkline's future row).
+        // Bottom row: output sparkline on the left (text bars here; kitty
+        // paints an image strip over the same cells — see kitty_overlay),
+        // uptime pinned to the right.
         if ih > lines.len() {
             let up = format!("↑{}", fmt_uptime(p.uptime_ms).trim_start_matches("up "));
-            let pad = iw.saturating_sub(up.chars().count() + 1);
             while lines.len() < ih - 1 {
                 lines.push(Line::default());
             }
-            lines.push(Line::from(vec![
-                Span::raw(" ".repeat(pad)),
-                Span::styled(up, faint),
-            ]));
+            let mut row: Vec<Span> = Vec::new();
+            let mut left = 0;
+            if !self.kitty_on {
+                if let Some(spark) = self.text_spark(p.id, (iw / 2).saturating_sub(2)) {
+                    left = 2 + spark.chars().count();
+                    row.push(Span::raw("  "));
+                    row.push(Span::styled(
+                        spark,
+                        Style::default().fg(tone(crate::theme::STATUS_RAIL[accent])),
+                    ));
+                }
+            }
+            let pad = iw.saturating_sub(left + up.chars().count() + 1);
+            row.push(Span::raw(" ".repeat(pad)));
+            row.push(Span::styled(up, faint));
+            lines.push(Line::from(row));
         }
         f.render_widget(Paragraph::new(lines), inner);
     }
@@ -6264,6 +6344,20 @@ fn fmt_uptime(ms: u64) -> String {
         format!("up {}h {}m", s / 3600, (s % 3600) / 60)
     } else {
         format!("up {}d {}h", s / 86400, (s % 86400) / 3600)
+    }
+}
+
+/// "now" / "4m" / "2h" / "3d" since a witnessed status flip.
+fn fmt_since(t: Instant) -> String {
+    let m = t.elapsed().as_secs() / 60;
+    if m < 1 {
+        "now".into()
+    } else if m < 60 {
+        format!("{m}m")
+    } else if m < 48 * 60 {
+        format!("{}h", m / 60)
+    } else {
+        format!("{}d", m / 60 / 24)
     }
 }
 

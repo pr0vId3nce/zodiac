@@ -1450,7 +1450,7 @@ mod tests {
     #[test]
     fn error_scrolled_above_watch_window_ignored() {
         let mut lines = vec!["\x1b[31mAPI Error: Response stalled mid-stream\x1b[m"];
-        lines.extend(std::iter::repeat("filler").take(20));
+        lines.extend(std::iter::repeat_n("filler", 20));
         let p = feed(&lines);
         assert_eq!(stall_match(p.screen(), true), None);
     }

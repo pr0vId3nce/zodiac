@@ -256,7 +256,7 @@ mod tests {
         let p = screen();
         let mut q = QueryScanner::new();
         let mut chunk = b"\x1b]0;".to_vec();
-        chunk.extend(std::iter::repeat(b'x').take(CARRY_MAX + 10));
+        chunk.extend(std::iter::repeat_n(b'x', CARRY_MAX + 10));
         assert!(q.scan(&chunk, p.screen(), (0, 0)).is_empty());
         // the dangling title set was dropped, not carried into the next chunk
         assert_eq!(q.scan(b"more\x07\x1b[c", p.screen(), (0, 0)), b"\x1b[?62;22c");

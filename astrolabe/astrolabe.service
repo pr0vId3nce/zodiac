@@ -1,5 +1,9 @@
-# astrolabe — phone web UI bridge for the zodiac agent multiplexer.
-# Install:  ./install.sh   (copies this to ~/.config/systemd/user/ and enables it)
+# astrolabe — phone bridge for the zodiac agent multiplexer.
+#
+# TEMPLATE ONLY — do not copy this file by hand: install.sh GENERATES the
+# real unit into ~/.config/systemd/user/ with ExecStart/WorkingDirectory
+# pointing at your actual checkout and node binary. The paths below are
+# examples (%h/zodiac = a checkout in your home directory).
 [Unit]
 Description=astrolabe — zodiac phone web UI bridge
 After=network-online.target
@@ -13,8 +17,8 @@ Environment=PATH=/etc/profiles/per-user/%u/bin:/run/current-system/sw/bin:/run/w
 # Environment=ASTROLABE_HOST=0.0.0.0   # override the tailscale-IP autodetect
 # APNs push credentials (ASTROLABE_APNS_*) live here, not in the unit:
 EnvironmentFile=-%h/.config/astrolabe/env
-ExecStart=/usr/bin/env node %h/claude/zodiac/astrolabe/bridge/main.ts
-WorkingDirectory=%h/claude/zodiac/astrolabe/bridge
+ExecStart=/usr/bin/env node %h/zodiac/astrolabe/bridge/main.ts
+WorkingDirectory=%h/zodiac/astrolabe/bridge
 Restart=on-failure
 RestartSec=3
 

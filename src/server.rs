@@ -1203,7 +1203,7 @@ fn host_uptime_ms() -> Option<u64> {
         .duration_since(std::time::UNIX_EPOCH)
         .ok()?
         .as_secs() as i64;
-    Some(((now - tv.tv_sec as i64).max(0) as u64) * 1000)
+    Some(((now - tv.tv_sec).max(0) as u64) * 1000)
 }
 
 /// 1-minute load average over the core count, as a percentage. A

@@ -244,7 +244,7 @@ impl Settings {
             return "off".into();
         }
         let files = list_ringtones();
-        if files.iter().any(|f| *f == self.finish_sound) {
+        if files.contains(&self.finish_sound) {
             self.finish_sound.clone()
         } else {
             files.into_iter().next().unwrap_or_else(|| "off".into())

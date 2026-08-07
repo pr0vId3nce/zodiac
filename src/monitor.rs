@@ -74,9 +74,11 @@ mod cfg_tests {
 
     #[test]
     fn endpoint_parses_scheme_host_port() {
-        let mut s = crate::settings::Settings::default();
-        s.monitor_endpoint = "http://mybox:8092".into();
-        s.monitor_model = "some-model".into();
+        let s = crate::settings::Settings {
+            monitor_endpoint: "http://mybox:8092".into(),
+            monitor_model: "some-model".into(),
+            ..Default::default()
+        };
         let cfg = cfg_from_settings(&s).unwrap();
         assert_eq!(cfg.host, "mybox");
         assert_eq!(cfg.port, 8092);

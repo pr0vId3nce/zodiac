@@ -103,6 +103,7 @@ pub struct FlatCard {
     pub brackets: Option<(u8, u8, u8)>,
     /// Sigil roundel ring: center px, radius, color. The glyph itself is
     /// text — only the ring is painted, so the sigil stays font-crisp.
+    #[allow(clippy::type_complexity)]
     pub roundel: Option<(f32, f32, f32, (u8, u8, u8))>,
 }
 
@@ -474,6 +475,7 @@ pub fn orb_rgba(w: u32, h: u32, col: (u8, u8, u8), shape: OrbShape, phase: f32) 
 /// painted cards (opaque night sky) and the standalone transparent sprite
 /// used by the blocks home view — every write also raises alpha so it
 /// composites cleanly over the terminal background.
+#[allow(clippy::too_many_arguments)]
 fn draw_clawd(px: &mut [u8], w: u32, h: u32, mx: f32, my: f32, s: f32, fh: f32, frame: u8, soft: bool) {
 
     // Clawd mid-bounce: coral rounded blob, dark eyes, ground

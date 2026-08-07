@@ -515,6 +515,7 @@ struct App {
     sidebar_row_off: u16,
     /// The orrery's placement for kitty_overlay: its rect plus each dot's
     /// pixel position and accent index within it. None when hidden.
+    #[allow(clippy::type_complexity)]
     orrery: Option<(Rect, Vec<(f32, f32, usize)>)>,
     /// The live orrery layout's image-id family (id with the two pulse-
     /// frame bits masked off) — a changed layout frees the old family's
@@ -539,8 +540,10 @@ struct App {
     /// Outer image ids whose data should be freed on the next overlay pass.
     outer_dead: Vec<u32>,
     /// Cursor (style param, tint) last applied to the outer terminal.
+    #[allow(clippy::type_complexity)]
     cursor_applied: Option<(u8, Option<(u8, u8, u8)>)>,
     /// Orb-cursor frames transmitted for (shape, rgb, cell w, cell h).
+    #[allow(clippy::type_complexity)]
     orb_cfg: Option<(crate::kitty::OrbShape, (u8, u8, u8), u16, u16)>,
     /// Orb placement currently on the terminal:
     /// (cell x, cell y, image id, col span, row span).
@@ -645,14 +648,11 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         (None, None)
     };
     let tx_app = tx.clone();
-    std::thread::spawn(move || loop {
-        match crossterm::event::read() {
-            Ok(ev) => {
-                if tx.send(AppEvent::Term(ev)).is_err() {
-                    break;
-                }
+    std::thread::spawn(move || {
+        while let Ok(ev) = crossterm::event::read() {
+            if tx.send(AppEvent::Term(ev)).is_err() {
+                break;
             }
-            Err(_) => break,
         }
     });
 
@@ -965,7 +965,7 @@ impl App {
             .enumerate()
             .filter_map(|(i, p)| fuzzy_score(&p.name, pattern).map(|s| (i, s)))
             .collect();
-        out.sort_by(|a, b| b.1.cmp(&a.1));
+        out.sort_by_key(|m| std::cmp::Reverse(m.1));
         out
     }
 
@@ -1195,8 +1195,8 @@ impl App {
     /// pane-relative (row, col) — dragging past an edge selects to that edge.
     fn main_cell(&self, col: u16, row: u16) -> (u16, u16) {
         let r = self.main_rect;
-        let x = col.clamp(r.x, r.x + r.width.saturating_sub(1).max(0)) - r.x;
-        let y = row.clamp(r.y, r.y + r.height.saturating_sub(1).max(0)) - r.y;
+        let x = col.clamp(r.x, r.x + r.width.saturating_sub(1)) - r.x;
+        let y = row.clamp(r.y, r.y + r.height.saturating_sub(1)) - r.y;
         (y, x)
     }
 
@@ -1475,11 +1475,10 @@ impl App {
                 KeyCode::Backspace => {
                     buf.pop();
                 }
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if buf.chars().count() < 40 {
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && buf.chars().count() < 40 => {
                         buf.push(c);
                     }
-                }
                 _ => {}
             }
             return;
@@ -1544,11 +1543,10 @@ impl App {
                 KeyCode::Backspace => {
                     buf.pop();
                 }
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
-                    if buf.chars().count() < 200 {
+                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && buf.chars().count() < 200 => {
                         buf.push(c);
                     }
-                }
                 _ => {}
             }
             return;
@@ -1672,11 +1670,10 @@ impl App {
                 KeyCode::Down => self.chat_scroll_by(-1),
                 KeyCode::PageUp => self.chat_scroll_by(10),
                 KeyCode::PageDown => self.chat_scroll_by(-10),
-                KeyCode::Char(c) if !ctrl => {
-                    if self.chat_input.chars().count() < 500 {
+                KeyCode::Char(c) if !ctrl
+                    && self.chat_input.chars().count() < 500 => {
                         self.chat_input.push(c);
                     }
-                }
                 _ => {}
             }
             return;
@@ -2184,7 +2181,7 @@ impl App {
             picks.push((i, want));
         }
         // Widest excerpt first, so the budget goes to the card that matters.
-        picks.sort_by(|a, b| b.1.cmp(&a.1));
+        picks.sort_by_key(|p| std::cmp::Reverse(p.1));
 
         let mut used = 0usize;
         for (slot, want) in picks {
@@ -3760,10 +3757,11 @@ impl App {
         // numeral labels, and the pane count under its mouth. Painted-layer
         // polish only — without kitty (or on short terminals) the cards
         // simply start higher.
-        let cell = crate::kitty::cell_size();
-        let area = if self.kitty_on && area.height >= 28 && cell.is_some() && area.width >= 40 {
+        let cell = (self.kitty_on && area.height >= 28 && area.width >= 40)
+            .then(crate::kitty::cell_size)
+            .flatten();
+        let area = if let Some((cw, ch)) = cell {
             let pal = self.palette();
-            let (cw, ch) = cell.unwrap();
             let orr = Rect { height: 6, ..area };
             let (pw, ph) = (orr.width as u32 * cw as u32, 6 * ch as u32);
             let (fcx, fcy) = (pw as f32 / 2.0, ph as f32 * 0.92);
@@ -3927,8 +3925,8 @@ impl App {
     /// image.
     fn draw_pair_overlay(&mut self, f: &mut Frame, area: Rect) {
         self.pair_rect = Rect::default();
-        let outer_w = area.width.min(area.height.saturating_mul(2)).min(70).max(30);
-        let outer_h = area.height.min(30).max(14);
+        let outer_w = area.width.min(area.height.saturating_mul(2)).clamp(30, 70);
+        let outer_h = area.height.clamp(14, 30);
         let outer = Rect {
             x: area.x + area.width.saturating_sub(outer_w) / 2,
             y: area.y + area.height.saturating_sub(outer_h) / 2,
@@ -5852,7 +5850,7 @@ impl App {
     /// app wears, shared by the home strip and the sidebar header.
     fn masthead_spans(&self) -> Vec<Span<'static>> {
         let pal = self.palette();
-        let blink = (self.anim_start.elapsed().as_millis() / 900) % 2 == 0;
+        let blink = (self.anim_start.elapsed().as_millis() / 900).is_multiple_of(2);
         vec![
             Span::styled(
                 " ❯ ",

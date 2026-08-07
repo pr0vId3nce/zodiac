@@ -182,10 +182,12 @@ mod cfg_from_settings_tests {
 
     #[test]
     fn explicit_endpoint_still_parses() {
-        let mut s = Settings::default();
-        s.chat_endpoint = "http://mybox:8091".into();
-        s.chat_ssh = "me@mybox".into();
-        s.chat_service = "llama-server".into();
+        let s = Settings {
+            chat_endpoint: "http://mybox:8091".into(),
+            chat_ssh: "me@mybox".into(),
+            chat_service: "llama-server".into(),
+            ..Settings::default()
+        };
         let cfg = ChatCfg::from_settings(&s);
         assert!(cfg.configured());
         assert!(cfg.can_wake());
@@ -746,6 +748,7 @@ const MAX_TOOL_ROUNDS: usize = 3;
 /// until it stops asking for them. Content deltas stream out as they arrive
 /// and also land in `acc`. Returns whether the model reached for the pane list
 /// itself — the caller uses that to carry momentum into the next turn.
+#[allow(clippy::too_many_arguments)]
 fn chat_stream(
     cfg: &ChatCfg,
     face: &str,

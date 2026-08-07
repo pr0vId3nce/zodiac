@@ -583,9 +583,9 @@ impl GfxEngine {
         // Placement rect intersects a cell / column / row (1-based args).
         let hits_cell = |p: &Placement, cx: i64, cy: i64| -> bool {
             let r = srow(p);
-            cy - 1 >= r
+            cy > r
                 && cy - 1 < r + p.rows as i64
-                && cx - 1 >= p.col as i64
+                && cx > p.col as i64
                 && cx - 1 < (p.col + p.cols) as i64
         };
         let on_screen = |p: &Placement| -> bool {
@@ -607,11 +607,11 @@ impl GfxEngine {
             b'p' => Box::new(move |p| hits_cell(p, x, y)),
             b'q' => Box::new(move |p| hits_cell(p, x, y) && p.z == z),
             b'x' => Box::new(move |p| {
-                x - 1 >= p.col as i64 && x - 1 < (p.col + p.cols) as i64
+                x > p.col as i64 && x - 1 < (p.col + p.cols) as i64
             }),
             b'y' => Box::new(move |p| {
                 let r = srow(p);
-                y - 1 >= r && y - 1 < r + p.rows as i64
+                y > r && y - 1 < r + p.rows as i64
             }),
             b'z' => Box::new(move |p| p.z == z),
             b'r' => Box::new(move |p| (p.img as i64) >= x && (p.img as i64) <= y),

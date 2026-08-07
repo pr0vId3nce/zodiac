@@ -76,7 +76,20 @@ export class ZodiacLink extends EventEmitter {
   up = false;
   watchSupported: boolean | null = null; // null = still probing
   state: SessionState | null = null;
-  rings = new Map<number, Buffer>();
+  /** Per-pane scrollback as a chunk list: appending an output frame is a
+      push, not a full-ring Buffer.concat (which cost a memcpy of up to
+      2 MiB per pty frame on busy panes). Compacted lazily in ringOf(). */
+  private rings = new Map<number, { chunks: Buffer[]; len: number }>();
+
+  /** The pane's ring as one buffer — for the replay a `view` sends. */
+  ringOf(pane: number): Buffer {
+    const r = this.rings.get(pane);
+    if (!r || r.chunks.length === 0) return Buffer.alloc(0);
+    if (r.chunks.length > 1) {
+      r.chunks = [Buffer.concat(r.chunks)];
+    }
+    return r.chunks[0];
+  }
 
   private sock: net.Socket | null = null;
   private buf: Buffer = Buffer.alloc(0);
@@ -191,6 +204,11 @@ export class ZodiacLink extends EventEmitter {
     this.probeTimer = null;
     this.lastStateJson = "";
     this.lastScreens.clear();
+    // The next connection may be a different zodiac process whose pane ids
+    // collide with these; watch-mode replays repopulate on reconnect, and
+    // rings for panes that died while the link was down would otherwise
+    // leak up to 2 MiB each forever.
+    this.rings.clear();
     if (this.sock) {
       this.sock.removeAllListeners("close");
       this.sock.destroy();
@@ -221,12 +239,22 @@ export class ZodiacLink extends EventEmitter {
     this.sock.write(Buffer.concat([hdr, data]));
   }
 
+  /** Mirrors the Rust side's MAX_FRAME: a corrupt/desynced length would
+      otherwise buffer forever waiting for a frame that never completes,
+      with the link still looking "up". */
+  private static readonly MAX_FRAME = 8 * 1024 * 1024;
+
   private onData(chunk: Buffer) {
     this.buf = this.buf.length ? Buffer.concat([this.buf, chunk]) : chunk;
     while (this.buf.length >= 13) {
       const typ = this.buf.readUInt8(0);
       const pane = Number(this.buf.readBigUInt64LE(1));
       const len = this.buf.readUInt32LE(9);
+      if (len > ZodiacLink.MAX_FRAME) {
+        // Desynced or corrupt — drop the socket; reconnect resyncs.
+        this.sock?.destroy();
+        return;
+      }
       if (this.buf.length < 13 + len) break;
       const data = this.buf.subarray(13, 13 + len);
       this.buf = this.buf.subarray(13 + len);
@@ -240,9 +268,21 @@ export class ZodiacLink extends EventEmitter {
         try {
           const state = JSON.parse(data.toString("utf8")) as SessionState;
           this.state = state;
-          const json = JSON.stringify(state);
-          if (json !== this.lastStateJson) {
-            this.lastStateJson = json;
+          // Dedup on a normalized copy: uptime_ms ticks every second and
+          // host vitals jitter, so comparing the raw JSON made "only when
+          // changed" always fire — a full-state broadcast to every phone
+          // at 1 Hz. Uptime still busts the dedup once a minute, keeping
+          // the displayed values honest.
+          const norm = JSON.stringify({
+            ...state,
+            host: undefined,
+            panes: state.panes.map((p) => ({
+              ...p,
+              uptime_ms: Math.floor((p.uptime_ms ?? 0) / 60_000),
+            })),
+          });
+          if (norm !== this.lastStateJson) {
+            this.lastStateJson = norm;
             this.emit("state", state);
           }
         } catch {
@@ -256,15 +296,22 @@ export class ZodiacLink extends EventEmitter {
           if (this.probeTimer) clearTimeout(this.probeTimer);
           this.emit("watch", true);
         }
-        this.rings.set(pane, data);
+        this.rings.set(pane, { chunks: [data], len: data.length });
         this.emit("replay", pane, data);
         break;
       }
       case T_OUTPUT: {
-        const ring = this.rings.get(pane);
-        let next = ring ? Buffer.concat([ring, data]) : data;
-        if (next.length > RING_CAP) next = next.subarray(next.length - RING_CAP);
-        this.rings.set(pane, next);
+        const r = this.rings.get(pane) ?? { chunks: [], len: 0 };
+        r.chunks.push(data);
+        r.len += data.length;
+        // Trim whole head chunks once the tail alone still covers the cap
+        // — O(1) amortized, and consumers only ever want "about the last
+        // RING_CAP bytes".
+        while (r.chunks.length > 1 && r.len - r.chunks[0].length >= RING_CAP) {
+          r.len -= r.chunks[0].length;
+          r.chunks.shift();
+        }
+        this.rings.set(pane, r);
         this.emit("output", pane, data);
         break;
       }

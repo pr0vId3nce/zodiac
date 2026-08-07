@@ -71,13 +71,25 @@ export function parseQuestion(screen: string): PaneQuestion | null {
     for (let j = end + 1; j <= lastContent; j++) if (lines[j].trim()) below++;
     if (below > BOTTOM_WINDOW) continue;
 
-    // Option text: the numbered line plus indented continuation rows.
+    // Option text: the numbered line plus indented continuation rows. The
+    // LAST option's wrapped lines sit below `end` (the bottom-up scan
+    // stopped at the last *numbered* line) — walk indented rows down until
+    // a blank, rule, or unindented line, so "3. No, and tell Claude what
+    // to do differently…" keeps its tail at narrow widths.
+    let lastEnd = end + 1;
+    while (
+      lastEnd <= lastContent &&
+      /^\s{2,}\S/.test(lines[lastEnd]) &&
+      !RULE_RE.test(lines[lastEnd])
+    ) {
+      lastEnd++;
+    }
     const startIdx = numbered.get(1)!;
     const options: string[] = [];
     for (let n = 1; n <= count; n++) {
       const idx = numbered.get(n)!;
       let text = lines[idx].match(OPTION_RE)![2].trim();
-      const next = n < count ? numbered.get(n + 1)! : end + 1;
+      const next = n < count ? numbered.get(n + 1)! : lastEnd;
       for (let j = idx + 1; j < next; j++) {
         const cont = lines[j].trim();
         if (cont) text += ` ${cont}`;

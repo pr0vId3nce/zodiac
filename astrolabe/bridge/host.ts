@@ -119,12 +119,17 @@ function batteryLinux(): HostStats["battery"] {
 async function batteryMac(): Promise<HostStats["battery"]> {
   const out = await run("/usr/bin/pmset", ["-g", "batt"]);
   if (!out) return null;
-  const m = out.match(/(\d+)%;\s*([a-z ]+);/);
+  // Case-insensitive class: pmset says "AC attached; not charging" when
+  // plugged in but holding — the old [a-z ] class couldn't match it, so
+  // battery read null whenever a MacBook was on power.
+  const m = out.match(/(\d+)%;\s*([A-Za-z ]+);/);
   if (!m) return null;
-  const state = m[2].trim();
+  const state = m[2].trim().toLowerCase();
   return {
     pct: Number(m[1]),
-    charging: state === "charging" || state === "charged" || state === "AC attached",
+    charging:
+      state === "charging" || state === "charged" || state === "finishing charge"
+      || state === "ac attached",
   };
 }
 

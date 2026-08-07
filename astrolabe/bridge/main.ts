@@ -27,7 +27,7 @@ import { WebSocketServer, WebSocket } from "ws";
 import { ZodiacLink, type SessionState } from "./zodiac.ts";
 import { parseQuestion, type PaneQuestion } from "./question.ts";
 import { scanCommands } from "./commands.ts";
-import { Apns } from "./apns.ts";
+import { Apns, stateDir } from "./apns.ts";
 import { publishEndpoint } from "./identity.ts";
 import { hostStats } from "./host.ts";
 
@@ -64,19 +64,38 @@ const PUSH_REDACT = !!process.env.ASTROLABE_PUSH_REDACT;
 const MAX_CLIENTS = 20;
 
 /** The connected zodiac server's pairing token (see src/server.rs's
-    load_or_mint_pairing_token / Alt+P in the TUI). Persisted server-side,
-    so it survives restarts — a phone paired once stays paired until the
-    token file is deleted. `null` before the first state arrives or against
-    an old server that predates this field — updated by the
-    `link.on("state", ...)` handler below. */
-let sessionToken: string | null = null;
+    load_or_mint_pairing_token / Alt+P in the TUI). Mirrored to disk so a
+    bridge restart enforces the last-known token from its very first
+    request — without that, the stretch between bridge start and the first
+    T_STATE (indefinite if zodiac happens to be down) served the whole API
+    unauthenticated on the tailnet even though phones were paired. */
+const SESSION_TOKEN_FILE = path.join(stateDir(), `session-token-${SESSION}`);
+let sessionToken: string | null = (() => {
+  try {
+    const t = fs.readFileSync(SESSION_TOKEN_FILE, "utf8").trim();
+    return /^[0-9a-f]{32,}$/i.test(t) ? t : null;
+  } catch {
+    return null;
+  }
+})();
 
-if (!TOKEN) {
+function rememberSessionToken(tok: string) {
+  if (tok === sessionToken) return;
+  sessionToken = tok;
+  try {
+    fs.mkdirSync(stateDir(), { recursive: true });
+    fs.writeFileSync(SESSION_TOKEN_FILE, tok, { mode: 0o600 });
+  } catch {
+    /* still enforced in memory for this process's lifetime */
+  }
+}
+
+if (!TOKEN && !sessionToken) {
   console.error(
-    "astrolabe: ASTROLABE_TOKEN is not set — until a phone scans a pairing QR " +
-      "(zodiac's Alt+P), or you set one yourself, the bridge is running with NO " +
-      "authentication. Anyone who can reach this tailnet IP can read and control " +
-      "every pane."
+    "astrolabe: ASTROLABE_TOKEN is not set and no pairing token is known yet — " +
+      "until zodiac connects once (or a phone scans a pairing QR, zodiac's " +
+      "Alt+P), the bridge is running with NO authentication. Anyone who can " +
+      "reach this tailnet IP can read and control every pane."
   );
 }
 
@@ -256,11 +275,20 @@ function answerPane(paneId: number, option: number, note: string) {
 }
 
 link.on("state", (state: SessionState) => {
-  sessionToken = state.pairing_token || null;
+  // Keep the persisted token when talking to an old server that predates
+  // the field — nulling it here would reopen the unauthenticated window.
+  if (state.pairing_token) rememberSessionToken(state.pairing_token);
   const badge = state.panes.filter((p) => p.status === "needs_input").length;
+  const live = new Set(state.panes.map((p) => p.id));
   for (const p of state.panes) {
     const prev = prevStatus.get(p.id);
-    if (prev === "needs_input" && p.status !== "needs_input") questions.delete(p.id);
+    if (prev === "needs_input" && p.status !== "needs_input") {
+      questions.delete(p.id);
+      // The cooldown exists to stop repeat pushes about ONE dialog; a pane
+      // that was answered and asks something new deserves a fresh push
+      // even inside the window.
+      lastPush.delete(`${p.id}:needs_input`);
+    }
     if (!prev || prev === p.status) continue;
     if (p.status === "needs_input") {
       captureQuestion(p, badge).catch(() => {});
@@ -272,6 +300,25 @@ link.on("state", (state: SessionState) => {
     }
   }
   prevStatus = new Map(state.panes.map((p) => [p.id, p.status]));
+  // Prune bookkeeping for panes that no longer exist, so weeks of uptime
+  // don't accumulate ghosts.
+  for (const id of [...questions.keys()]) if (!live.has(id)) questions.delete(id);
+  for (const key of [...lastPush.keys()]) {
+    const id = Number(key.split(":")[0]);
+    if (!live.has(id)) lastPush.delete(key);
+  }
+});
+
+// A dropped link means the next state can be a different zodiac process
+// whose pane ids collide with the old ones — stale transition records
+// would fire pushes for flips that never happened, and stale questions
+// would dress a new pane in another pane's dialog. Start clean.
+link.on("link", (up: boolean) => {
+  if (!up) {
+    prevStatus = new Map();
+    questions.clear();
+    lastPush.clear();
+  }
 });
 
 link.on("pane_closed", (pane: number) => questions.delete(pane));
@@ -291,16 +338,40 @@ function refreshViewed() {
   link.setViewed(viewed);
 }
 
+/** A slow-but-alive phone (backgrounded browser, weak link) answers pings
+    but stops draining its socket — ws buffers every send in memory with no
+    limit, the one unbounded-memory path in the process. Past this cap the
+    client is terminated; its reconnect gets a clean hello + replay. */
+const MAX_WS_BUFFERED = 4 * 1024 * 1024;
+
+function wsWritable(c: Client): boolean {
+  if (c.ws.readyState !== WebSocket.OPEN) return false;
+  if (c.ws.bufferedAmount > MAX_WS_BUFFERED) {
+    c.ws.terminate();
+    clients.delete(c);
+    refreshViewed();
+    return false;
+  }
+  return true;
+}
+
 function sendJson(c: Client, msg: unknown) {
-  if (c.ws.readyState === WebSocket.OPEN) c.ws.send(JSON.stringify(msg));
+  if (wsWritable(c)) c.ws.send(JSON.stringify(msg));
 }
 
 function broadcast(msg: unknown, pane?: number) {
   const json = JSON.stringify(msg);
-  for (const c of clients) {
+  for (const c of [...clients]) {
     if (pane !== undefined && c.viewing !== pane) continue;
-    if (c.ws.readyState === WebSocket.OPEN) c.ws.send(json);
+    if (wsWritable(c)) c.ws.send(json);
   }
+}
+
+/** Whether anyone is looking at this pane — checked BEFORE base64+JSON
+    encoding a pty frame, so busy background panes cost nothing here. */
+function paneViewed(pane: number): boolean {
+  for (const c of clients) if (c.viewing === pane) return true;
+  return false;
 }
 
 /** Strips `pairing_token` before anything touches a web client — the token
@@ -328,15 +399,18 @@ link.on("link", (up: boolean) => broadcast({ t: "link", up }));
 link.on("state", (state) => broadcast({ t: "state", state: publicState(state) }));
 link.on("watch", (supported: boolean) => broadcast({ t: "watch", supported }));
 link.on("pane_closed", (pane: number) => broadcast({ t: "pane_closed", pane }));
-link.on("output", (pane: number, data: Buffer) =>
-  broadcast({ t: "output", pane, data: data.toString("base64") }, pane)
-);
-link.on("replay", (pane: number, data: Buffer) =>
-  broadcast({ t: "replay", pane, data: data.toString("base64") }, pane)
-);
-link.on("screen", (pane: number, text: string) =>
-  broadcast({ t: "screen", pane, text }, pane)
-);
+link.on("output", (pane: number, data: Buffer) => {
+  if (!paneViewed(pane)) return;
+  broadcast({ t: "output", pane, data: data.toString("base64") }, pane);
+});
+link.on("replay", (pane: number, data: Buffer) => {
+  if (!paneViewed(pane)) return;
+  broadcast({ t: "replay", pane, data: data.toString("base64") }, pane);
+});
+link.on("screen", (pane: number, text: string) => {
+  if (!paneViewed(pane)) return;
+  broadcast({ t: "screen", pane, text }, pane);
+});
 
 /** A pane id that's actually an integer and actually exists right now —
     the same existence check `/api/prompt` already does, applied here too
@@ -363,11 +437,10 @@ function onClientMessage(c: Client, raw: string) {
         refreshViewed();
         if (c.viewing !== null) {
           if (link.watchSupported) {
-            const ring = link.rings.get(c.viewing);
             sendJson(c, {
               t: "replay",
               pane: c.viewing,
-              data: (ring ?? Buffer.alloc(0)).toString("base64"),
+              data: link.ringOf(c.viewing).toString("base64"),
             });
           } else if (link.up) {
             link.readScreen(c.viewing); // poll-mode: fetch a screen right away
@@ -486,6 +559,9 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
         status: p.status,
         agent: p.agent ?? null,
         question: (p as any).question ?? null,
+        // The widget's answer buttons submit a 1-based index into these;
+        // without them it could only answer blind.
+        options: (p as any).options ?? null,
       })),
     });
     return true;
@@ -614,7 +690,15 @@ const server = http.createServer(async (req, res) => {
     res.writeHead(403).end();
     return;
   }
-  if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) {
+  // One stat, no exists/stat race — a file deleted between the two calls
+  // (mid web rebuild) threw in an async handler and killed the process.
+  let stat: fs.Stats | undefined;
+  try {
+    stat = fs.statSync(file);
+  } catch {
+    /* missing — SPA fallback below */
+  }
+  if (!stat || stat.isDirectory()) {
     file = path.join(DIST, "index.html"); // SPA fallback
   }
   try {
@@ -643,8 +727,12 @@ wss.on("connection", (ws, req) => {
   // one regardless of which site served it. The Origin header is
   // supplementary, not the real defense (a non-browser client can send
   // any Origin it likes) — tokenOk() below is what actually gates this.
+  // Compared against the bridge's own bound address, not the client's Host
+  // header — the old `http://${req.headers.host}` check was satisfied by
+  // any DNS-rebinding page (attacker controls both headers), i.e. no check
+  // at all.
   const origin = req.headers.origin;
-  if (origin && origin !== `http://${req.headers.host}`) {
+  if (origin && origin !== endpointURL) {
     ws.close(4003, "origin not allowed");
     return;
   }
@@ -713,7 +801,13 @@ const identity = publishEndpoint(endpointURL);
 // started last, even after that one exits. Re-claim it periodically: the
 // bridge still running wins, within a minute, without any cleanup on exit
 // (which a killed process can't do anyway).
-setInterval(() => publishEndpoint(endpointURL), 60_000).unref();
+setInterval(() => {
+  try {
+    publishEndpoint(endpointURL);
+  } catch {
+    /* full disk etc. — a bare throw in an interval kills the process */
+  }
+}, 60_000).unref();
 link.start();
 server.listen(PORT, host, () => {
   console.log(`astrolabe: serving http://${host}:${PORT} → zodiac session '${SESSION}'`);

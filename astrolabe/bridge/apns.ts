@@ -122,19 +122,28 @@ export class Apns {
     if (opts.collapseId) headers["apns-collapse-id"] = opts.collapseId;
 
     let sent = 0;
+    const total = this.devices.length;
     const dead: string[] = [];
     for (const d of [...this.devices]) {
       try {
         const status = await this.send(d.token, body, headers);
         if (status === 200) sent++;
         else if (status === 410 || status === 400) dead.push(d.token);
+        else if (status === 403) {
+          // ExpiredProviderToken etc. — force a fresh JWT for the next
+          // attempt instead of retrying the rejected one for 45 minutes.
+          this.jwtCache = "";
+          this.jwtBorn = 0;
+        }
       } catch (e) {
         console.error("astrolabe: APNs send failed:", e);
       }
     }
     for (const t of dead) this.unregister(t);
     if (dead.length) console.log(`astrolabe: pruned ${dead.length} dead APNs token(s)`);
-    return { sent, failed: this.devices.length - sent };
+    // Against the count we actually attempted — unregister() above already
+    // shrank `devices`, which double-counted pruned tokens as failures.
+    return { sent, failed: total - sent };
   }
 
   // ------------------------------------------------------------- internals
@@ -185,9 +194,18 @@ export class Apns {
       return this.session;
     }
     const s = http2.connect(`https://${this.hostname}:443`);
-    s.on("error", () => (this.session = null));
-    s.on("close", () => (this.session = null));
-    s.on("goaway", () => (this.session = null));
+    // Guarded: an OLD session's late close event must not null out a NEWER
+    // session's slot — that orphaned live connections to Apple, which
+    // accumulated over days of flaky connectivity.
+    s.on("error", () => {
+      if (this.session === s) this.session = null;
+    });
+    s.on("close", () => {
+      if (this.session === s) this.session = null;
+    });
+    s.on("goaway", () => {
+      if (this.session === s) this.session = null;
+    });
     this.session = s;
     return s;
   }

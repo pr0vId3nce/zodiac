@@ -15,6 +15,7 @@ export const T_RENAME = 5;
 export const T_QUERY = 11;
 export const T_READ_SCREEN = 12;
 export const T_WATCH = 14;
+export const T_SEEN = 17;
 // server -> client
 export const T_REPLAY = 21;
 export const T_OUTPUT = 22;
@@ -140,6 +141,12 @@ export class ZodiacLink extends EventEmitter {
 
   readScreen(pane: number) {
     this.send(T_READ_SCREEN, pane, Buffer.alloc(0));
+  }
+
+  /** A phone opened this pane — acknowledge its sticky "finished" flag,
+      the way focusing it in the TUI would. Old servers ignore the frame. */
+  seen(pane: number) {
+    this.send(T_SEEN, pane, Buffer.alloc(0));
   }
 
   private pendingReads = new Map<number, ((text: string | null) => void)[]>();

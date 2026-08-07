@@ -568,6 +568,15 @@ impl Server {
                     p.clear_flags();
                 }
             }
+            T_SEEN => {
+                // A phone opened this pane: its sticky "finished" is
+                // acknowledged. Only the activity flag — attention stays
+                // until the question is actually answered or the pane is
+                // focused for real.
+                if let Some(p) = self.pane_mut(f.id) {
+                    p.activity = false;
+                }
+            }
             T_AUTORESUME => {
                 if let Some(on) = f.data.first().map(|b| *b != 0) {
                     if let Some(p) = self.pane_mut(f.id) {

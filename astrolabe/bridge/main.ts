@@ -436,6 +436,10 @@ function onClientMessage(c: Client, raw: string) {
         c.viewing = paneExists(msg.pane) ? msg.pane : null;
         refreshViewed();
         if (c.viewing !== null) {
+          // Seen on the phone counts as seen: a finished (green) pane the
+          // user opened flips to idle instead of staying green until it's
+          // focused on the desktop someday.
+          if (link.up) link.seen(c.viewing);
           if (link.watchSupported) {
             sendJson(c, {
               t: "replay",

@@ -23,6 +23,11 @@ pub const T_RESTORE: u8 = 15; // re-launch the agents from the last snapshot (se
 /// can drop it when no application owns the pane's pty — see the gate in
 /// `Server::handle` and `Pane::app_foreground`.
 pub const T_MOUSE: u8 = 16;
+/// An observer viewed pane f.id: clear its sticky "finished" flag, the
+/// same acknowledgement focusing it in the TUI performs — a green pane
+/// seen on the phone shouldn't stay green forever. Leaves the
+/// needs-input flag alone: peeking at a question isn't answering it.
+pub const T_SEEN: u8 = 17;
 
 // server -> client
 pub const T_HELLO: u8 = 20; // payload: Hello JSON
@@ -340,7 +345,7 @@ mod tests {
         let types = [
             T_INPUT, T_RESIZE, T_NEW_PANE, T_CLOSE_PANE, T_RENAME, T_MOVE, T_FOCUS, T_DETACH,
             T_SHUTDOWN, T_ATTACH, T_QUERY, T_READ_SCREEN, T_AUTORESUME, T_WATCH, T_RESTORE,
-            T_MOUSE,
+            T_MOUSE, T_SEEN,
         ];
         let mut seen = types.to_vec();
         seen.sort_unstable();

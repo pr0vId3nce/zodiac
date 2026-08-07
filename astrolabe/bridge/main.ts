@@ -570,6 +570,31 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
     });
     return true;
   }
+  // The pane's conversation from the agent's session transcript — read
+  // mode's history. The pty ring can't provide this (agent TUIs repaint
+  // in place, so replay reconstructs barely a screenful); the server
+  // parses the transcript file into entries on request.
+  if (url.startsWith("/api/transcript") && req.method === "GET") {
+    const pane = Number(new URL(url, "http://x").searchParams.get("pane"));
+    if (!Number.isInteger(pane) || pane < 0) {
+      json(res, 400, { error: "need ?pane=<id>" });
+      return true;
+    }
+    if (!link.up) {
+      json(res, 503, { error: "zodiac link down" });
+      return true;
+    }
+    const raw = await link.transcriptOnce(pane);
+    if (raw === null) {
+      // Link dropped mid-request, or the zodiac server predates
+      // T_TRANSCRIPT_REQ (it silently ignores unknown frames).
+      json(res, 503, { error: "no transcript answer from zodiac" });
+      return true;
+    }
+    res.writeHead(200, { "content-type": "application/json" });
+    res.end(raw === "" ? "[]" : raw);
+    return true;
+  }
   if (req.method !== "POST") {
     json(res, 405, { error: "POST only" });
     return true;

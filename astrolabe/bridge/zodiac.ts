@@ -16,6 +16,7 @@ export const T_QUERY = 11;
 export const T_READ_SCREEN = 12;
 export const T_WATCH = 14;
 export const T_SEEN = 17;
+export const T_TRANSCRIPT_REQ = 18;
 // server -> client
 export const T_REPLAY = 21;
 export const T_OUTPUT = 22;
@@ -24,6 +25,7 @@ export const T_PANE_CLOSED = 24;
 export const T_SERVER_EXIT = 25;
 export const T_STATE = 26;
 export const T_SCREEN = 27;
+export const T_TRANSCRIPT = 31;
 
 export interface PaneState {
   index: number;
@@ -165,6 +167,29 @@ export class ZodiacLink extends EventEmitter {
         const cur = this.pendingReads.get(pane) ?? [];
         if (cur.includes(resolve)) {
           this.pendingReads.set(pane, cur.filter((f) => f !== resolve));
+          resolve(null);
+        }
+      }, timeoutMs);
+    });
+  }
+
+  private pendingTranscripts = new Map<number, ((json: string | null) => void)[]>();
+
+  /** One-shot transcript fetch: the pane's conversation as rendered
+      entries, parsed server-side from the agent's session transcript (see
+      the Rust side's `SrvPane::transcript_json`). Resolves with the raw
+      JSON array string ("" when the pane has no transcript), or null after
+      `timeoutMs` when the link is down or the server predates the frame. */
+  transcriptOnce(pane: number, timeoutMs = 3000): Promise<string | null> {
+    return new Promise((resolve) => {
+      const list = this.pendingTranscripts.get(pane) ?? [];
+      list.push(resolve);
+      this.pendingTranscripts.set(pane, list);
+      this.send(T_TRANSCRIPT_REQ, pane, Buffer.alloc(0));
+      setTimeout(() => {
+        const cur = this.pendingTranscripts.get(pane) ?? [];
+        if (cur.includes(resolve)) {
+          this.pendingTranscripts.set(pane, cur.filter((f) => f !== resolve));
           resolve(null);
         }
       }, timeoutMs);
@@ -332,6 +357,15 @@ export class ZodiacLink extends EventEmitter {
         if (this.lastScreens.get(pane) !== text) {
           this.lastScreens.set(pane, text);
           this.emit("screen", pane, text);
+        }
+        break;
+      }
+      case T_TRANSCRIPT: {
+        const waiters = this.pendingTranscripts.get(pane);
+        if (waiters?.length) {
+          this.pendingTranscripts.set(pane, []);
+          const json = data.toString("utf8");
+          for (const w of waiters) w(json);
         }
         break;
       }

@@ -28,6 +28,12 @@ pub const T_MOUSE: u8 = 16;
 /// seen on the phone shouldn't stay green forever. Leaves the
 /// needs-input flag alone: peeking at a question isn't answering it.
 pub const T_SEEN: u8 = 17;
+/// Request the agent-transcript entries for pane f.id (see
+/// `SrvPane::transcript_json`) — answered with a `T_TRANSCRIPT` to the
+/// requesting connection only. The pty ring can't serve read mode's
+/// history (agent TUIs repaint in place, so scrollback never forms);
+/// the session transcript on disk is the real record.
+pub const T_TRANSCRIPT_REQ: u8 = 18;
 
 // server -> client
 pub const T_HELLO: u8 = 20; // payload: Hello JSON
@@ -41,6 +47,7 @@ pub const T_SCREEN: u8 = 27; // payload: utf8 screen text
 pub const T_GFX_STATE: u8 = 28; // payload: GfxSnapshot JSON for pane f.id
 pub const T_GFX_IMG: u8 = 29; // payload: image data chunk, see gfx_img_*
 pub const T_PANE_RENAMED: u8 = 30; // payload: utf8 name (auto-naming, see pane.rs)
+pub const T_TRANSCRIPT: u8 = 31; // payload: transcript entries JSON (empty when unavailable)
 
 /// T_GFX_IMG payload: 26-byte header + data chunk. Images larger than
 /// GFX_CHUNK arrive as several frames distinguished by `off`; the client

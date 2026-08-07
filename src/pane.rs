@@ -502,6 +502,29 @@ impl SrvPane {
         Some(path.file_stem()?.to_str()?.to_string())
     }
 
+    /// The pane's claude conversation as rendered entries, JSON-encoded
+    /// for `T_TRANSCRIPT` — the phone's read-mode history. The pty ring
+    /// can't provide this (Claude Code repaints its viewport in place, so
+    /// almost nothing ever scrolls into replayable history); the session
+    /// transcript on disk holds the whole conversation. Reads the file's
+    /// last `TRANSCRIPT_TAIL` bytes and renders user text, assistant text,
+    /// and tool calls as one-liners. Empty when the pane isn't claude or
+    /// has no transcript yet.
+    pub fn transcript_json(&self) -> Vec<u8> {
+        if self.agent().as_deref() != Some("claude") {
+            return Vec::new();
+        }
+        let Some(cwd) = self.cwd() else {
+            return Vec::new();
+        };
+        let Some((path, _)) = self.claude_transcript(&cwd) else {
+            return Vec::new();
+        };
+        transcript_entries(&path)
+            .map(|e| serde_json::to_vec(&e).unwrap_or_default())
+            .unwrap_or_default()
+    }
+
     /// The short model name for whatever agent is running here, if any.
     pub fn model(&mut self) -> Option<String> {
         let agent = self.agent()?;
@@ -922,6 +945,122 @@ fn process_start_time(pid: u32) -> Option<std::time::SystemTime> {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn process_start_time(_pid: u32) -> Option<std::time::SystemTime> {
     None
+}
+
+/// One rendered conversation entry for the phone's read mode.
+#[derive(serde::Serialize)]
+pub struct TranscriptEntry {
+    pub role: &'static str, // "user" | "assistant" | "tool"
+    pub text: String,
+}
+
+/// Transcript tail parsed per `T_TRANSCRIPT_REQ`. A 1 MiB tail of JSONL
+/// renders to a few hundred KB of entries at most — well under the 8 MiB
+/// frame cap, and hours of conversation on a phone screen.
+const TRANSCRIPT_TAIL: u64 = 1024 * 1024;
+const TRANSCRIPT_MAX_ENTRIES: usize = 500;
+
+/// Parse a Claude Code session transcript's tail into readable entries:
+/// user text, assistant text blocks, and tool calls as one-liners.
+/// Sidechain (subagent) and meta lines are skipped, as is harness markup
+/// riding the user channel (`<command-…>`, `<system-reminder>`, caveats).
+fn transcript_entries(path: &std::path::Path) -> Option<Vec<TranscriptEntry>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(TRANSCRIPT_TAIL)))
+        .ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if i == 0 && len > TRANSCRIPT_TAIL {
+            continue; // the seek almost certainly landed mid-line
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        let typ = v.get("type").and_then(|t| t.as_str()).unwrap_or("");
+        if typ != "user" && typ != "assistant" {
+            continue;
+        }
+        if v.get("isSidechain").and_then(|b| b.as_bool()) == Some(true)
+            || v.get("isMeta").and_then(|b| b.as_bool()) == Some(true)
+        {
+            continue;
+        }
+        let role: &'static str = if typ == "user" { "user" } else { "assistant" };
+        match v.get("message").and_then(|m| m.get("content")) {
+            Some(serde_json::Value::String(s)) => push_entry(&mut out, role, s),
+            Some(serde_json::Value::Array(blocks)) => {
+                for b in blocks {
+                    match b.get("type").and_then(|t| t.as_str()) {
+                        Some("text") => {
+                            if let Some(s) = b.get("text").and_then(|t| t.as_str()) {
+                                push_entry(&mut out, role, s);
+                            }
+                        }
+                        Some("tool_use") => {
+                            let name =
+                                b.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
+                            out.push(TranscriptEntry {
+                                role: "tool",
+                                text: tool_line(name, b.get("input")),
+                            });
+                        }
+                        // thinking and tool_result aren't part of the
+                        // readable conversation flow.
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if out.len() > TRANSCRIPT_MAX_ENTRIES {
+        out.drain(..out.len() - TRANSCRIPT_MAX_ENTRIES);
+    }
+    Some(out)
+}
+
+fn push_entry(out: &mut Vec<TranscriptEntry>, role: &'static str, s: &str) {
+    let t = s.trim();
+    if t.is_empty() {
+        return;
+    }
+    if role == "user" && (t.starts_with('<') || t.starts_with("Caveat:")) {
+        return;
+    }
+    out.push(TranscriptEntry {
+        role,
+        text: t.to_string(),
+    });
+}
+
+/// `Bash(cargo build --release)` — the tool call as the one-liner Claude
+/// Code itself prints, using the most informative input field.
+fn tool_line(name: &str, input: Option<&serde_json::Value>) -> String {
+    let arg = input
+        .and_then(|i| {
+            [
+                "command", "file_path", "path", "pattern", "url", "query", "prompt",
+                "description", "skill", "subject",
+            ]
+            .iter()
+            .find_map(|k| i.get(k).and_then(|v| v.as_str()))
+        })
+        .unwrap_or("");
+    let one = arg.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut short: String = one.chars().take(120).collect();
+    if one.chars().count() > 120 {
+        short.push('…');
+    }
+    if short.is_empty() {
+        name.to_string()
+    } else {
+        format!("{name}({short})")
+    }
 }
 
 /// The last `"model": "..."` value in the tail of a session transcript —
@@ -1479,6 +1618,44 @@ mod model_name_tests {
 {"message":{"model":"claude-fable-5"}}"#;
         assert_eq!(last_model_in(t), Some("fable 5".to_string()));
         assert_eq!(last_model_in("no model here"), None);
+    }
+}
+
+#[cfg(test)]
+mod transcript_entry_tests {
+    use super::transcript_entries;
+
+    #[test]
+    fn renders_conversation_and_skips_noise() {
+        let dir = std::env::temp_dir().join("zodiac-transcript-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"user","message":{"role":"user","content":"fix the bug"}}"#, "\n",
+                r#"{"type":"user","message":{"role":"user","content":"<system-reminder>noise</system-reminder>"}}"#, "\n",
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"On it."},{"type":"tool_use","name":"Bash","input":{"command":"cargo   build\n--release"}}]}}"#, "\n",
+                r#"{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"ok"}]}}"#, "\n",
+                r#"{"type":"assistant","isSidechain":true,"message":{"role":"assistant","content":[{"type":"text","text":"subagent chatter"}]}}"#, "\n",
+                r#"{"type":"ai-title","aiTitle":"whatever"}"#, "\n",
+                r#"{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Fixed."}]}}"#, "\n",
+            ),
+        )
+        .unwrap();
+        let e = transcript_entries(&path).unwrap();
+        let flat: Vec<(&str, &str)> =
+            e.iter().map(|x| (x.role, x.text.as_str())).collect();
+        assert_eq!(
+            flat,
+            vec![
+                ("user", "fix the bug"),
+                ("assistant", "On it."),
+                ("tool", "Bash(cargo build --release)"),
+                ("assistant", "Fixed."),
+            ]
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }
 

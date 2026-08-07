@@ -475,6 +475,17 @@ impl Server {
                     .unwrap_or_default();
                 self.reply(gen, T_SCREEN, f.id, text.as_bytes());
             }
+            T_TRANSCRIPT_REQ => {
+                // Read mode's conversation history, from the agent's session
+                // transcript on disk — empty payload when there isn't one.
+                let data = self
+                    .panes
+                    .iter()
+                    .find(|p| p.id == f.id)
+                    .map(|p| p.transcript_json())
+                    .unwrap_or_default();
+                self.reply(gen, T_TRANSCRIPT, f.id, &data);
+            }
             T_INPUT => {
                 if let Some(p) = self.pane_mut(f.id) {
                     p.write_input(&f.data);

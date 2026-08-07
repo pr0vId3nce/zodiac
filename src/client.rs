@@ -3679,7 +3679,7 @@ impl App {
                 "endpoint's default",
             ),
             Line::from(Span::styled(
-                "  restart zodiac to apply chat changes · monitor applies live",
+                "  restart to apply chat · monitor applies live",
                 Style::default().fg(Color::DarkGray),
             )),
             Line::default(),

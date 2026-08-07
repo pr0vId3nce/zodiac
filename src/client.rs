@@ -4498,14 +4498,11 @@ impl App {
         }
 
         // Row 1: roundel badge (ring painted for sigil styles, the glyph
-        // or numeral is text) · name · right-aligned status word.
+        // or numeral is text) · name — the title owns the whole row now,
+        // no right-aligned status stealing its width.
         let (badge, badge_w) = self.pane_badge(num);
-        let status = format!("{} {}", STATUS_GLYPH[accent], STATUS_WORD[accent]);
-        let status_cells = status.chars().count();
-        let name_max = iw.saturating_sub(3 + badge_w + status_cells + 2);
+        let name_max = iw.saturating_sub(3 + badge_w + 1);
         let name = truncate(&p.name, name_max);
-        let left_cells = 3 + badge_w + name.chars().count();
-        let pad = iw.saturating_sub(left_cells + status_cells);
         let title_style = Style::default().fg(fg).add_modifier(Modifier::BOLD);
         let mut row1: Vec<Span> = vec![
             if self.kitty_on {
@@ -4523,33 +4520,41 @@ impl App {
         } else {
             row1.push(Span::styled(name, title_style));
         }
-        row1.push(Span::raw(" ".repeat(pad)));
-        row1.push(Span::styled(status, Style::default().fg(stext)));
         let mut lines: Vec<Line> = vec![Line::from(row1)];
 
-        // Row 2: agent + version · cwd (· ssh), indented past the roundel.
+        // Each stat on its own line under the title: status word, agent +
+        // version, directory, ssh host — nothing truncates anything else.
+        let status = format!("{} {}", STATUS_GLYPH[accent], STATUS_WORD[accent]);
+        lines.push(Line::from(vec![
+            Span::raw("    "),
+            Span::styled(status, Style::default().fg(stext)),
+        ]));
         let agent = match (&p.agent, &p.version) {
             (Some(a), Some(v)) => format!("{a} {}", version_token(v)),
             (Some(a), None) => a.clone(),
             (None, _) => "shell".into(),
         };
-        let mut meta = agent;
-        if let Some(d) = p.cwd.as_deref() {
-            meta.push_str(" · ");
-            meta.push_str(&short_dir(d, iw.saturating_sub(meta.chars().count() + 6)));
-        }
-        if let Some(h) = p.ssh.as_deref() {
-            meta.push_str(" · ssh ");
-            meta.push_str(h);
-        }
         lines.push(Line::from(vec![
             Span::raw("    "),
-            Span::styled(truncate(&meta, iw.saturating_sub(4)), dim),
+            Span::styled(truncate(&agent, iw.saturating_sub(4)), dim),
         ]));
+        if let Some(d) = p.cwd.as_deref() {
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(short_dir(d, iw.saturating_sub(4)), dim),
+            ]));
+        }
+        if let Some(h) = p.ssh.as_deref() {
+            lines.push(Line::from(vec![
+                Span::raw("    "),
+                Span::styled(truncate(&format!("ssh {h}"), iw.saturating_sub(4)), dim),
+            ]));
+        }
 
-        // Recap (or nothing) in the card's middle.
+        // Recap (or nothing) in the card's middle, when it still fits
+        // above the uptime row.
         if let Some(sub) = &p.subtitle {
-            if ih >= 5 && !idle_shell {
+            if ih >= lines.len() + 3 && !idle_shell {
                 lines.push(Line::default());
                 lines.push(Line::from(vec![
                     Span::raw(" "),

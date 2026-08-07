@@ -626,9 +626,15 @@ impl Server {
     /// never writes to a pane, only logs and notifies. Re-read from settings
     /// every tick so the on/off toggle applies live.
     fn monitor_tick(&mut self) {
-        if !crate::settings::Settings::cached().pane_monitor {
+        let settings = crate::settings::Settings::cached();
+        if !settings.pane_monitor {
             return;
         }
+        // Blank endpoint = monitor disabled entirely — a fresh install must
+        // never phone anyone's private model box.
+        let Some(cfg) = crate::monitor::cfg_from_settings(&settings) else {
+            return;
+        };
         let now = Instant::now();
         let policy = crate::monitor::policy_text();
         let session = self.session.clone();
@@ -657,6 +663,7 @@ impl Server {
             let Some(screen) = p.tail_text(20) else { continue };
             p.monitor_checked_at = Some(now);
             crate::monitor::classify_async(
+                cfg.clone(),
                 tx.clone(),
                 session.clone(),
                 p.id,
@@ -725,9 +732,13 @@ impl Server {
     }
 
     fn subtitle_tick(&mut self) {
-        if !crate::settings::Settings::cached().pane_monitor {
+        let settings = crate::settings::Settings::cached();
+        if !settings.pane_monitor {
             return;
         }
+        let Some(cfg) = crate::monitor::cfg_from_settings(&settings) else {
+            return;
+        };
         let now = Instant::now();
         let tx = self.tx.clone();
         for p in &mut self.panes {
@@ -746,7 +757,7 @@ impl Server {
             }
             p.subtitle_hash = Some(hash);
             let Some(screen) = p.tail_text(20) else { continue };
-            crate::monitor::summarize_async(tx.clone(), p.id, screen);
+            crate::monitor::summarize_async(cfg.clone(), tx.clone(), p.id, screen);
         }
     }
 

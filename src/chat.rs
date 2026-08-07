@@ -120,18 +120,23 @@ pub struct ChatCfg {
 
 impl ChatCfg {
     pub fn from_settings(s: &Settings) -> Self {
-        let ep = if s.chat_endpoint.is_empty() {
-            "http://bigbox:8091"
-        } else {
-            &s.chat_endpoint
-        };
-        let ep = ep
+        // Blank endpoint = unconfigured (empty host): the worker then never
+        // polls or resolves anything — a fresh install must not look up
+        // anyone's private hostname. Same for ssh/service: blank means
+        // wake/sleep-over-ssh is simply not offered, rather than falling
+        // back to the author's own box.
+        let ep = s
+            .chat_endpoint
             .trim_start_matches("http://")
             .trim_start_matches("https://")
             .trim_end_matches('/');
-        let (host, port) = match ep.rsplit_once(':') {
-            Some((h, p)) => (h.to_string(), p.parse().unwrap_or(80)),
-            None => (ep.to_string(), 80),
+        let (host, port) = if ep.is_empty() {
+            (String::new(), 0)
+        } else {
+            match ep.rsplit_once(':') {
+                Some((h, p)) => (h.to_string(), p.parse().unwrap_or(80)),
+                None => (ep.to_string(), 80),
+            }
         };
         let or = |v: &str, d: &str| {
             if v.is_empty() {
@@ -144,12 +149,48 @@ impl ChatCfg {
             host,
             port,
             model: or(&s.chat_model, "qwen3.6-35b-a3b"),
-            ssh: or(&s.chat_ssh, "des@bigbox"),
-            service: or(&s.chat_service, "llama-server"),
+            ssh: s.chat_ssh.trim().to_string(),
+            service: s.chat_service.trim().to_string(),
             search_url: s.chat_search_url.trim_end_matches('/').to_string(),
             search_key: s.chat_search_key.clone(),
             act: s.chat_act,
         }
+    }
+
+    /// An endpoint has been set — the worker may poll and chat.
+    pub fn configured(&self) -> bool {
+        !self.host.is_empty()
+    }
+
+    /// Wake/sleep-over-ssh is available (both halves configured).
+    pub fn can_wake(&self) -> bool {
+        !self.ssh.is_empty() && !self.service.is_empty()
+    }
+}
+
+#[cfg(test)]
+mod cfg_from_settings_tests {
+    use super::*;
+
+    #[test]
+    fn fresh_settings_configure_nothing_and_ssh_nowhere() {
+        let cfg = ChatCfg::from_settings(&Settings::default());
+        assert!(!cfg.configured(), "blank endpoint must mean no polling");
+        assert!(!cfg.can_wake(), "blank ssh must never fall back to a host");
+        assert!(cfg.ssh.is_empty());
+    }
+
+    #[test]
+    fn explicit_endpoint_still_parses() {
+        let mut s = Settings::default();
+        s.chat_endpoint = "http://mybox:8091".into();
+        s.chat_ssh = "me@mybox".into();
+        s.chat_service = "llama-server".into();
+        let cfg = ChatCfg::from_settings(&s);
+        assert!(cfg.configured());
+        assert!(cfg.can_wake());
+        assert_eq!(cfg.host, "mybox");
+        assert_eq!(cfg.port, 8091);
     }
 }
 
@@ -333,7 +374,7 @@ fn worker(
             Some(ChatStatus::Waking) => Duration::from_secs(2),
             _ => Duration::from_secs(8),
         };
-        if last_poll.is_none_or(|t| t.elapsed() >= due) {
+        if last_poll.is_none_or(|t| t.elapsed() >= due) && cfg.configured() {
             let mut new = health(&cfg);
             // A freshly-started unit's socket can lag behind systemctl —
             // don't announce "sleeping" mid-wake.
@@ -361,6 +402,13 @@ fn worker(
         };
         match cmd {
             ChatCmd::Wake => {
+                if !cfg.can_wake() {
+                    notify(ChatEvent::Error(
+                        "no wake host configured — set Chat ssh and Chat service in Ctrl+S"
+                            .into(),
+                    ));
+                    continue;
+                }
                 notify(ChatEvent::Note("waking the model…".into()));
                 match ssh_service(&cfg, "start") {
                     Ok(()) => {
@@ -373,6 +421,13 @@ fn worker(
                 }
             }
             ChatCmd::Sleep => {
+                if !cfg.can_wake() {
+                    notify(ChatEvent::Error(
+                        "no wake host configured — set Chat ssh and Chat service in Ctrl+S"
+                            .into(),
+                    ));
+                    continue;
+                }
                 notify(ChatEvent::Note("stopping the model…".into()));
                 match ssh_service(&cfg, "stop") {
                     Ok(()) => {
@@ -390,6 +445,13 @@ fn worker(
                 force_panes,
                 face,
             } => {
+                if !cfg.configured() {
+                    notify(ChatEvent::Error(
+                        "no chat endpoint configured — set one in Ctrl+S (see LOCAL_MODEL.md)"
+                            .into(),
+                    ));
+                    continue;
+                }
                 // A cancel left set from a stream that was already cut short
                 // shouldn't poison the next one.
                 cancel.store(false, std::sync::atomic::Ordering::Relaxed);

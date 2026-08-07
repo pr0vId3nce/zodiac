@@ -123,9 +123,19 @@ pub struct Settings {
     /// Background pane monitor: classifies stuck/needs-input panes
     /// against a local policy file and notifies with the reason. Advisory
     /// only — it never touches a pane. Runs server-side against a separate
-    /// CPU-only model, independent of the chat panel above.
+    /// CPU-only model, independent of the chat panel above. Does nothing
+    /// until `monitor_endpoint` is set.
     #[serde(default = "default_true", alias = "wizard_watch")]
     pub pane_monitor: bool,
+    /// OpenAI-compatible endpoint the pane monitor and card-subtitle
+    /// summarizer talk to, e.g. "http://mybox:8092". Blank (the default)
+    /// disables both — no background network traffic at all.
+    #[serde(default)]
+    pub monitor_endpoint: String,
+    /// Model name sent in monitor/summarizer requests ("" = whatever
+    /// single model the endpoint serves; llama-server ignores it).
+    #[serde(default)]
+    pub monitor_model: String,
     /// Lets the chat panel offer `prompt_pane`/
     /// `send_keys` — the only way it can ever touch a pane. Off by
     /// default: even enabled, every use still shows a consent chip in the

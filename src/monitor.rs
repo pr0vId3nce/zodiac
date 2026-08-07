@@ -19,12 +19,70 @@ use serde::{Deserialize, Serialize};
 
 use crate::server::SrvEvent;
 
-/// CPU-only classifier model set up alongside the interactive one (see
-/// llama-cpu.service on bigbox) — small and fast enough for a background
-/// tick to never compete with the chat panel's GPU model.
-const HOST: &str = "100.88.193.78";
-const PORT: u16 = 8092;
-const MODEL: &str = "qwen3-4b-cpu";
+/// Where the monitor's model lives, resolved from Settings each tick — a
+/// small CPU-class model is plenty (classification + 6-word subtitles),
+/// and keeping it separate from the chat panel's endpoint means the two
+/// never contend for the same backend.
+#[derive(Clone)]
+pub struct MonitorCfg {
+    pub host: String,
+    pub port: u16,
+    pub model: String,
+}
+
+/// `None` when `monitor_endpoint` is blank — the monitor and summarizer
+/// are then fully disabled: no background network traffic of any kind.
+/// (First-run installs must never call out to anyone's private box.)
+pub fn cfg_from_settings(s: &crate::settings::Settings) -> Option<MonitorCfg> {
+    let ep = s.monitor_endpoint.trim();
+    if ep.is_empty() {
+        return None;
+    }
+    let rest = ep
+        .strip_prefix("http://")
+        .or_else(|| ep.strip_prefix("https://"))
+        .unwrap_or(ep);
+    let hostport = rest.split('/').next().unwrap_or(rest);
+    let (host, port) = match hostport.rsplit_once(':') {
+        Some((h, p)) => (h.to_string(), p.parse().unwrap_or(80)),
+        None => (hostport.to_string(), 80),
+    };
+    if host.is_empty() {
+        return None;
+    }
+    Some(MonitorCfg {
+        host,
+        port,
+        model: if s.monitor_model.trim().is_empty() {
+            "default".into()
+        } else {
+            s.monitor_model.trim().to_string()
+        },
+    })
+}
+
+#[cfg(test)]
+mod cfg_tests {
+    use super::cfg_from_settings;
+
+    #[test]
+    fn blank_endpoint_disables_the_monitor() {
+        let s = crate::settings::Settings::default();
+        assert!(s.monitor_endpoint.is_empty(), "fresh settings start blank");
+        assert!(cfg_from_settings(&s).is_none(), "blank must mean no network");
+    }
+
+    #[test]
+    fn endpoint_parses_scheme_host_port() {
+        let mut s = crate::settings::Settings::default();
+        s.monitor_endpoint = "http://mybox:8092".into();
+        s.monitor_model = "some-model".into();
+        let cfg = cfg_from_settings(&s).unwrap();
+        assert_eq!(cfg.host, "mybox");
+        assert_eq!(cfg.port, 8092);
+        assert_eq!(cfg.model, "some-model");
+    }
+}
 
 /// A pane "working" with an unchanged screen this long is suspicious enough
 /// (stalled or looping) to be worth a classification.
@@ -59,6 +117,7 @@ so via low confidence rather than guessing.\n\nPolicy:\n";
 /// MonitorVerdict` on success. Silent no-op on any network/parse failure —
 /// the next tick simply tries again.
 pub fn classify_async(
+    cfg: MonitorCfg,
     tx: Sender<SrvEvent>,
     session: String,
     pane_id: u64,
@@ -67,7 +126,7 @@ pub fn classify_async(
     policy: String,
 ) {
     std::thread::spawn(move || {
-        let Some(v) = classify(&screen, &policy) else {
+        let Some(v) = classify(&cfg, &screen, &policy) else {
             return;
         };
         log_decision(&session, &pane_name, &v);
@@ -75,10 +134,10 @@ pub fn classify_async(
     });
 }
 
-fn classify(screen: &str, policy: &str) -> Option<Verdict> {
+fn classify(cfg: &MonitorCfg, screen: &str, policy: &str) -> Option<Verdict> {
     let system = format!("{SYSTEM_PREFIX}{policy}");
     let body = serde_json::json!({
-        "model": MODEL,
+        "model": cfg.model,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": format!("Screen tail:\n{screen}")},
@@ -114,18 +173,19 @@ fn classify(screen: &str, policy: &str) -> Option<Verdict> {
     })
     .to_string();
 
-    let content = post(&body)?;
+    let content = post(cfg, &body)?;
     serde_json::from_str::<Verdict>(&content).ok()
 }
 
-fn post(body: &str) -> Option<String> {
-    let addr = (HOST, PORT).to_socket_addrs().ok()?.next()?;
+fn post(cfg: &MonitorCfg, body: &str) -> Option<String> {
+    let addr = (cfg.host.as_str(), cfg.port).to_socket_addrs().ok()?.next()?;
     let mut sock = TcpStream::connect_timeout(&addr, Duration::from_secs(4)).ok()?;
     let _ = sock.set_read_timeout(Some(Duration::from_secs(60)));
     let _ = sock.set_write_timeout(Some(Duration::from_secs(6)));
     let req = format!(
-        "POST /v1/chat/completions HTTP/1.1\r\nHost: {HOST}\r\nConnection: close\r\n\
+        "POST /v1/chat/completions HTTP/1.1\r\nHost: {}\r\nConnection: close\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+        cfg.host,
         body.len()
     );
     sock.write_all(req.as_bytes()).ok()?;
@@ -158,18 +218,18 @@ struct Subtitle {
 /// Summarize a pane's screen tail into a ≤6-word subtitle on a background
 /// thread, sending the result back as `SrvEvent::MonitorSubtitle` on success.
 /// Silent no-op on any network/parse failure — the next tick tries again.
-pub fn summarize_async(tx: Sender<SrvEvent>, pane_id: u64, screen: String) {
+pub fn summarize_async(cfg: MonitorCfg, tx: Sender<SrvEvent>, pane_id: u64, screen: String) {
     std::thread::spawn(move || {
-        let Some(subtitle) = summarize(&screen) else {
+        let Some(subtitle) = summarize(&cfg, &screen) else {
             return;
         };
         let _ = tx.send(SrvEvent::MonitorSubtitle(pane_id, subtitle));
     });
 }
 
-fn summarize(screen: &str) -> Option<String> {
+fn summarize(cfg: &MonitorCfg, screen: &str) -> Option<String> {
     let body = serde_json::json!({
-        "model": MODEL,
+        "model": cfg.model,
         "messages": [
             {"role": "system", "content": SUBTITLE_SYSTEM},
             {"role": "user", "content": format!("Screen tail:\n{screen}")},
@@ -193,7 +253,7 @@ fn summarize(screen: &str) -> Option<String> {
     })
     .to_string();
 
-    let content = post(&body)?;
+    let content = post(cfg, &body)?;
     let s: Subtitle = serde_json::from_str(&content).ok()?;
     let trimmed = s.subtitle.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())

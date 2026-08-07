@@ -49,7 +49,7 @@ const RESIZE_SQUELCH: Duration = Duration::from_millis(1200);
 /// blinks (closes briefly) once per period.
 const EYE_PERIOD_MS: u64 = 4000;
 const EYE_BLINK_MS: u64 = 160;
-const SETTINGS_ROWS: usize = 31;
+const SETTINGS_ROWS: usize = 33;
 
 /// Settings rows at and beyond this index are free-text fields (edited via
 /// `Mode::SettingsEdit`) rather than cyclable presets.
@@ -2788,14 +2788,17 @@ impl App {
     }
 
     /// Enter free-text edit mode for the settings row under the cursor
-    /// (rows 27-30: chat endpoint/model/ssh/service), seeded with the
-    /// field's current value. No-op on cyclable rows.
+    /// (rows 27-30: chat endpoint/model/ssh/service; 31-32: monitor
+    /// endpoint/model), seeded with the field's current value. No-op on
+    /// cyclable rows.
     fn start_settings_edit(&mut self) {
         let buf = match self.settings_row {
             27 => self.settings.chat_endpoint.clone(),
             28 => self.settings.chat_model.clone(),
             29 => self.settings.chat_ssh.clone(),
             30 => self.settings.chat_service.clone(),
+            31 => self.settings.monitor_endpoint.clone(),
+            32 => self.settings.monitor_model.clone(),
             _ => return,
         };
         self.mode = Mode::SettingsEdit {
@@ -2813,6 +2816,8 @@ impl App {
             28 => self.settings.chat_model = val,
             29 => self.settings.chat_ssh = val,
             30 => self.settings.chat_service = val,
+            31 => self.settings.monitor_endpoint = val,
+            32 => self.settings.monitor_model = val,
             _ => {}
         }
         self.settings.save();
@@ -3205,7 +3210,7 @@ impl App {
         // always visible here even when the bottom-bar hints are hidden.
         let two_col = area.width >= 92;
         let w = if two_col { 90 } else { 60.min(area.width) };
-        let h = 37.min(area.height);
+        let h = 39.min(area.height);
         let rect = Rect {
             x: (area.width - w) / 2,
             y: (area.height - h) / 2,
@@ -3642,8 +3647,20 @@ impl App {
                 &self.settings.chat_service,
                 "llama-server",
             ),
+            text_row(
+                31,
+                "Monitor endpoint",
+                &self.settings.monitor_endpoint,
+                "blank = monitor off",
+            ),
+            text_row(
+                32,
+                "Monitor model",
+                &self.settings.monitor_model,
+                "endpoint's default",
+            ),
             Line::from(Span::styled(
-                "  restart zodiac to apply chat connection changes",
+                "  restart zodiac to apply chat changes · monitor applies live",
                 Style::default().fg(Color::DarkGray),
             )),
             Line::default(),
@@ -4649,22 +4666,31 @@ impl App {
             None => (format!("seeking {who}…"), Color::DarkGray),
         };
         // Status + which mind on which machine, from the chat settings.
-        let model = if self.settings.chat_model.is_empty() {
-            "qwen3.6-35b-a3b"
+        // No endpoint set = say so plainly instead of pretending a default
+        // host exists (fresh installs have nothing configured).
+        let (stxt, scol, mline) = if self.settings.chat_endpoint.is_empty() {
+            (
+                "not configured".to_string(),
+                crate::theme::color(pal.dim),
+                " · set Chat endpoint in Ctrl+S".to_string(),
+            )
         } else {
-            &self.settings.chat_model
-        };
-        let host = {
-            let e = &self.settings.chat_endpoint;
-            let e = if e.is_empty() { "http://bigbox:8091" } else { e };
-            e.trim_start_matches("http://")
+            let model = if self.settings.chat_model.is_empty() {
+                "qwen3.6-35b-a3b"
+            } else {
+                &self.settings.chat_model
+            };
+            let host = self
+                .settings
+                .chat_endpoint
+                .trim_start_matches("http://")
                 .trim_start_matches("https://")
                 .split([':', '/'])
                 .next()
-                .unwrap_or("bigbox")
-                .to_string()
+                .unwrap_or("?")
+                .to_string();
+            (stxt, scol, format!(" · {} · {}", truncate(model, 18), host))
         };
-        let mline = format!(" · {} · {}", truncate(model, 18), host);
         f.render_widget(
             Paragraph::new(Line::from(vec![
                 Span::styled(stxt, Style::default().fg(scol).italic()),

@@ -903,6 +903,7 @@ dependencies = [
  "anyhow",
  "crossterm",
  "libc",
+ "log",
  "portable-pty",
  "qrcode",
  "ratatui",

@@ -673,6 +673,14 @@ impl Grid {
         self.col_clamp();
     }
 
+    /// DECAWM reset: instead of wrapping at the right margin, pin the
+    /// cursor so the final cell is overwritten in place.
+    pub fn col_no_wrap(&mut self, width: u16) {
+        if self.pos.col > self.size.cols - width {
+            self.pos.col = self.size.cols - width;
+        }
+    }
+
     pub fn col_wrap(&mut self, width: u16, wrap: bool) -> u16 {
         if self.pos.col > self.size.cols - width {
             let mut prev_pos = self.pos;

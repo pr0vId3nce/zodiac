@@ -4,7 +4,7 @@
 /// [`Parser::drain_events`](crate::Parser::drain_events); recording is off
 /// until [`Parser::enable_events`](crate::Parser::enable_events) so parsers
 /// that never drain don't accumulate.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TermEvent {
     /// Rows top..=bottom moved up by `n`: linefeed at the bottom, wrap,
     /// CSI S, or DL. Whether the departing rows entered scrollback follows
@@ -22,4 +22,8 @@ pub enum TermEvent {
     Resize { rows: u16, cols: u16 },
     /// RIS — full reset.
     Reset,
+    /// OSC 52 write: the application asked the terminal to set a clipboard
+    /// (`c`/`p`/... selection, base64 payload — passed through unparsed for
+    /// the embedder to gate and decode).
+    Clipboard { selection: Vec<u8>, payload: Vec<u8> },
 }

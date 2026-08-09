@@ -195,6 +195,11 @@ fn respond_dcs(body: &[u8], out: &mut Vec<u8>) {
     if body.starts_with(b"+q") {
         out.extend_from_slice(b"\x1bP0+r\x1b\\");
     }
+    // DECRQSS: same reasoning — report "invalid request" rather than let
+    // the app (vim's startup probes) wait out a timeout.
+    if body.starts_with(b"$q") {
+        out.extend_from_slice(b"\x1bP0$r\x1b\\");
+    }
 }
 
 #[cfg(test)]
@@ -297,6 +302,7 @@ mod tests {
             ("OSC 10 fg",           b"\x1b]10;?\x07", (0, 0),   b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\"),
             ("OSC 11 bg",           b"\x1b]11;?\x07", (0, 0),   b"\x1b]11;rgb:0000/0000/0000\x1b\\"),
             ("XTGETTCAP",           b"\x1bP+q544e\x1b\\", (0, 0), b"\x1bP0+r\x1b\\"),
+            ("DECRQSS invalid",     b"\x1bP$qm\x1b\\",    (0, 0), b"\x1bP0$r\x1b\\"),
             ("kitty kbd probe",     b"\x1b[?u",       (0, 0),   b""),
             ("DSR bare",            b"\x1b[n",        (0, 0),   b""),
         ];

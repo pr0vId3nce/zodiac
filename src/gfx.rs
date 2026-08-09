@@ -787,6 +787,10 @@ impl GfxEngine {
                 self.cols = cols;
                 self.bump();
             }
+            // Not a graphics event: OSC 52 rides the same ordered event
+            // stream but is consumed by the server's clipboard gate
+            // (Phase 2 permission inbox); the placement engine ignores it.
+            TermEvent::Clipboard { .. } => {}
             TermEvent::Reset => {
                 self.placements.clear();
                 self.alt_placements.clear();

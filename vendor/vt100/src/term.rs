@@ -110,6 +110,7 @@ pub struct Attrs {
     fgcolor: Option<crate::attrs::Color>,
     bgcolor: Option<crate::attrs::Color>,
     bold: Option<bool>,
+    dim: Option<bool>,
     italic: Option<bool>,
     underline: Option<bool>,
     inverse: Option<bool>,
@@ -128,6 +129,11 @@ impl Attrs {
 
     pub fn bold(mut self, bold: bool) -> Self {
         self.bold = Some(bold);
+        self
+    }
+
+    pub fn dim(mut self, dim: bool) -> Self {
+        self.dim = Some(dim);
         self
     }
 
@@ -154,6 +160,7 @@ impl BufWrite for Attrs {
         if self.fgcolor.is_none()
             && self.bgcolor.is_none()
             && self.bold.is_none()
+            && self.dim.is_none()
             && self.italic.is_none()
             && self.underline.is_none()
             && self.inverse.is_none()
@@ -231,6 +238,16 @@ impl BufWrite for Attrs {
             if bold {
                 write_param!(1);
             } else {
+                write_param!(22);
+            }
+        }
+
+        // SGR 22 clears both intensities, so dim-off only needs writing
+        // when bold didn't already emit it.
+        if let Some(dim) = self.dim {
+            if dim {
+                write_param!(2);
+            } else if self.bold != Some(false) {
                 write_param!(22);
             }
         }

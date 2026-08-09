@@ -7,6 +7,7 @@ const MODE_HIDE_CURSOR: u8 = 0b0000_0100;
 const MODE_ALTERNATE_SCREEN: u8 = 0b0000_1000;
 const MODE_BRACKETED_PASTE: u8 = 0b0001_0000;
 const MODE_SYNCHRONIZED_UPDATE: u8 = 0b0010_0000;
+const MODE_NO_AUTOWRAP: u8 = 0b0100_0000;
 
 /// The xterm mouse handling mode currently in use.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -912,7 +913,13 @@ impl Screen {
                 wrap = true;
             }
         }
-        let scrolled = self.grid_mut().col_wrap(width, wrap);
+        let scrolled = if self.mode(MODE_NO_AUTOWRAP) {
+            // DECAWM reset: pin to the right margin and overwrite.
+            self.grid_mut().col_no_wrap(width);
+            0
+        } else {
+            self.grid_mut().col_wrap(width, wrap)
+        };
         let (top, bottom) =
             (self.grid().scroll_top(), self.grid().scroll_bottom());
         self.ev_scroll(true, top, bottom, scrolled);
@@ -1373,6 +1380,11 @@ impl Screen {
                 }
                 &[2004] => self.set_mode(MODE_BRACKETED_PASTE),
                 &[2026] => self.set_mode(MODE_SYNCHRONIZED_UPDATE),
+                &[7] => self.clear_mode(MODE_NO_AUTOWRAP),
+                // Recognized, deliberately unimplemented: cursor blink,
+                // focus reporting, color-scheme notification. Consumed so
+                // corpus runs stay free of unhandled-mode noise.
+                &[12] | &[1004] | &[2031] => {}
                 ns => {
                     if log::log_enabled!(log::Level::Debug) {
                         let n = if ns.len() == 1 {
@@ -1395,9 +1407,18 @@ impl Screen {
     // CSI l
     #[allow(clippy::unused_self)]
     fn rm(&mut self, params: &vte::Params) {
-        // nothing, i think?
-        if log::log_enabled!(log::Level::Debug) {
-            log::debug!("unhandled RM mode: {}", param_str(params));
+        for param in params {
+            match param {
+                // IRM reset: replace mode is the only mode we implement,
+                // so resetting to it is a no-op. (Setting insert mode
+                // still logs — that one would corrupt rendering.)
+                &[4] => {}
+                ns => {
+                    if log::log_enabled!(log::Level::Debug) {
+                        log::debug!("unhandled RM mode: {ns:?}");
+                    }
+                }
+            }
         }
     }
 
@@ -1433,6 +1454,8 @@ impl Screen {
                 }
                 &[2004] => self.clear_mode(MODE_BRACKETED_PASTE),
                 &[2026] => self.clear_mode(MODE_SYNCHRONIZED_UPDATE),
+                &[7] => self.set_mode(MODE_NO_AUTOWRAP),
+                &[12] | &[1004] | &[2031] => {}
                 ns => {
                     if log::log_enabled!(log::Level::Debug) {
                         let n = if ns.len() == 1 {
@@ -1497,10 +1520,19 @@ impl Screen {
             match next_param!() {
                 &[0] => self.attrs = crate::attrs::Attrs::default(),
                 &[1] => self.attrs.set_bold(true),
+                &[2] => self.attrs.set_dim(true),
                 &[3] => self.attrs.set_italic(true),
                 &[4] => self.attrs.set_underline(true),
+                // 4:x underline styles (kitty/xterm subparams): 0 = off,
+                // any style renders as our single underline for now.
+                &[4, 0] => self.attrs.set_underline(false),
+                &[4, _] => self.attrs.set_underline(true),
                 &[7] => self.attrs.set_inverse(true),
-                &[22] => self.attrs.set_bold(false),
+                // 22 = normal intensity: clears bold AND dim.
+                &[22] => {
+                    self.attrs.set_bold(false);
+                    self.attrs.set_dim(false);
+                }
                 &[23] => self.attrs.set_italic(false),
                 &[24] => self.attrs.set_underline(false),
                 &[27] => self.attrs.set_inverse(false),
@@ -1596,6 +1628,22 @@ impl Screen {
                 &[49] => {
                     self.attrs.bgcolor = crate::attrs::Color::Default;
                 }
+                // 58/59 underline color: consumed without storage —
+                // nothing server-side renders it yet (GUI revisits).
+                // Bare 58 (params form `58;2;r;g;b` / `58;5;i`) must also
+                // swallow its arguments so they don't reparse as SGR codes.
+                &[58] => match next_param!() {
+                    &[2] => {
+                        let _ = next_param_u8!();
+                        let _ = next_param_u8!();
+                        let _ = next_param_u8!();
+                    }
+                    &[5] => {
+                        let _ = next_param_u8!();
+                    }
+                    _ => return,
+                },
+                &[58, ..] | &[59] => {}
                 &[n] if (90..=97).contains(&n) => {
                     self.attrs.fgcolor =
                         crate::attrs::Color::Idx(to_u8!(n) - 82);
@@ -1685,12 +1733,21 @@ impl vte::Perform for Screen {
                 b'M' => self.ri(),
                 b'c' => self.ris(),
                 b'g' => self.vb(),
+                // Stray ST (ESC \) — terminator of a string sequence the
+                // parser already left; nothing to do.
+                b'\\' => {}
                 _ => {
                     log::debug!("unhandled escape code: ESC {b}");
                 }
             },
-            |i| {
-                log::debug!("unhandled escape code: ESC {i} {b}");
+            |i| match i {
+                // Charset designation (ESC ( B etc.): G0-G3 selection.
+                // We render UTF-8 only, so designators are consumed.
+                b'(' | b')' | b'*' | b'+' => {}
+                // ESC # 8 (DECALN) and friends: unimplemented, rare.
+                _ => {
+                    log::debug!("unhandled escape code: ESC {i} {b}");
+                }
             },
         );
     }
@@ -1727,6 +1784,13 @@ impl vte::Perform for Screen {
                     params,
                     self.grid().size(),
                 )),
+                // Queries answered upstream by zodiac's QueryScanner (DA,
+                // DSR) and window ops / title-stack ops we don't model:
+                // consumed so they never reach the fallthrough log.
+                'c' | 'n' | 't' => {}
+                // Kitty keyboard protocol (CSI = flags u): recognized,
+                // not yet implemented (Phase 4 flag stack).
+                'u' => {}
                 _ => {
                     if log::log_enabled!(log::Level::Debug) {
                         log::debug!(
@@ -1742,6 +1806,9 @@ impl vte::Perform for Screen {
                 'K' => self.decsel(canonicalize_params_1(params, 0)),
                 'h' => self.decset(params),
                 'l' => self.decrst(params),
+                // DECRQM (CSI ? Ps $p) and the kitty keyboard query
+                // (CSI ? u) are answered upstream by QueryScanner.
+                'p' | 'u' => {}
                 _ => {
                     if log::log_enabled!(log::Level::Debug) {
                         log::debug!(
@@ -1759,6 +1826,9 @@ impl vte::Perform for Screen {
                     .try_into()
                     .unwrap_or(0);
             }
+            // '>' / '<' prefixed: XTVERSION + XTMODKEYS queries
+            // (answered upstream) and kitty keyboard push/pop (Phase 4).
+            Some(b'>') | Some(b'<') if matches!(c, 'u' | 'q' | 'm' | 'c') => {}
             Some(i) => {
                 if log::log_enabled!(log::Level::Debug) {
                     log::debug!(
@@ -1777,6 +1847,35 @@ impl vte::Perform for Screen {
             (Some(&b"0"), Some(s)) => self.osc0(s),
             (Some(&b"1"), Some(s)) => self.osc1(s),
             (Some(&b"2"), Some(s)) => self.osc2(s),
+            // OSC 8 hyperlinks: parse+drop (no per-cell storage; the ADR
+            // notes GUI-era storage as the revisit trigger).
+            (Some(&b"8"), _) => {}
+            // OSC 133 semantic prompt marks (A/B/C/D): consumed.
+            (Some(&b"133"), _) => {}
+            // OSC 52 clipboard write: surfaced as an event for the server
+            // to gate (permission inbox); queries handled upstream.
+            (Some(&b"52"), Some(sel)) => {
+                if let Some(payload) = params.get(2) {
+                    if *payload != b"?" {
+                        let ev = crate::event::TermEvent::Clipboard {
+                            selection: sel.to_vec(),
+                            payload: payload.to_vec(),
+                        };
+                        self.ev(ev);
+                    }
+                }
+            }
+            // Color set/query (10/11/12) and resets (104/110/111/112):
+            // queries are answered upstream by QueryScanner; palette
+            // changes aren't modeled.
+            (Some(&b"10"), _)
+            | (Some(&b"11"), _)
+            | (Some(&b"12"), _)
+            | (Some(&b"4"), _)
+            | (Some(&b"104"), _)
+            | (Some(&b"110"), _)
+            | (Some(&b"111"), _)
+            | (Some(&b"112"), _) => {}
             _ => {
                 if log::log_enabled!(log::Level::Debug) {
                     log::debug!(
@@ -1795,6 +1894,11 @@ impl vte::Perform for Screen {
         _ignore: bool,
         action: char,
     ) {
+        // DECRQSS (DCS $ q) and XTGETTCAP (DCS + q) are answered
+        // upstream by QueryScanner; the body is consumed by vte either way.
+        if matches!(intermediates.first(), Some(b'$') | Some(b'+')) && action == 'q' {
+            return;
+        }
         if log::log_enabled!(log::Level::Debug) {
             intermediates.first().map_or_else(
                 || {

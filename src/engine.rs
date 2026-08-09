@@ -29,6 +29,7 @@ pub struct CellView {
     pub fg: Color,
     pub bg: Color,
     pub bold: bool,
+    pub dim: bool,
     pub italic: bool,
     pub underline: bool,
     pub inverse: bool,
@@ -127,6 +128,7 @@ impl TermScreen for vt100::Screen {
             fg: c.fgcolor(),
             bg: c.bgcolor(),
             bold: c.bold(),
+            dim: c.dim(),
             italic: c.italic(),
             underline: c.underline(),
             inverse: c.inverse(),
@@ -162,3 +164,75 @@ impl TermScreen for vt100::Screen {
 /// pointing this alias at the new adapter behind a cargo feature and
 /// holding the corpus goldens byte-identical.
 pub type ActiveEngine = Vt100Engine;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn fed(bytes: &[u8]) -> Vt100Engine {
+        let mut e = Vt100Engine::new(6, 10, 0);
+        e.process(bytes);
+        e
+    }
+
+    /// OSC 52 write surfaces a Clipboard event for the server to gate;
+    /// the query form (payload "?") must not.
+    #[test]
+    fn osc52_surfaces_clipboard_event() {
+        let mut e = fed(b"\x1b]52;c;aGVsbG8=\x07");
+        let evs = e.drain_events();
+        assert!(evs.iter().any(|ev| matches!(
+            ev,
+            TermEvent::Clipboard { selection, payload }
+                if selection == b"c" && payload == b"aGVsbG8="
+        )));
+        let mut e = fed(b"\x1b]52;c;?\x07");
+        assert!(e
+            .drain_events()
+            .iter()
+            .all(|ev| !matches!(ev, TermEvent::Clipboard { .. })));
+    }
+
+    /// OSC 8 hyperlinks are parse+drop: no event, no residue on screen.
+    #[test]
+    fn osc8_hyperlink_consumed() {
+        let mut e = fed(b"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\");
+        assert_eq!(e.screen().rows_text()[0].trim_end(), "link");
+        assert!(e
+            .drain_events()
+            .iter()
+            .all(|ev| !matches!(ev, TermEvent::Clipboard { .. })));
+    }
+
+    /// SGR 2 sets dim; SGR 22 clears both intensities; SGR 58 in params
+    /// form swallows its color arguments instead of reparsing them.
+    #[test]
+    fn sgr_dim_and_underline_color_args() {
+        let e = fed(b"\x1b[2mdim\x1b[22m \x1b[1mB\x1b[22m \x1b[58;2;255;0;0mx");
+        let c = e.screen().cell(0, 0).unwrap();
+        assert!(c.dim && !c.bold);
+        let x = e.screen().cell(0, 6).unwrap();
+        assert!(!x.dim && !x.bold, "58's args must not reparse as SGR 2");
+        assert_eq!(x.contents, "x");
+    }
+
+    /// 4:x underline-style subparams: any style is our underline, 4:0 off.
+    #[test]
+    fn sgr_underline_subparam_styles() {
+        let e = fed(b"\x1b[4:3mcurly\x1b[4:0m off");
+        assert!(e.screen().cell(0, 0).unwrap().underline);
+        assert!(!e.screen().cell(0, 7).unwrap().underline);
+    }
+
+    /// DECAWM reset (?7l): the cursor pins at the right margin and
+    /// overwrites; set (?7h) restores wrapping.
+    #[test]
+    fn decawm_off_overwrites_at_margin() {
+        let e = fed(b"\x1b[?7labcdefghijKLM");
+        assert_eq!(e.screen().rows_text()[0], "abcdefghiM");
+        assert_eq!(e.screen().rows_text()[1].trim_end(), "");
+        let e = fed(b"\x1b[?7habcdefghijKLM");
+        assert_eq!(e.screen().rows_text()[0], "abcdefghij");
+        assert_eq!(e.screen().rows_text()[1].trim_end(), "KLM");
+    }
+}

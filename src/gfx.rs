@@ -13,6 +13,12 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use vt100::TermEvent;
 
+// Corpus recording reader (shared with the ptyrec bin and tests/golden.rs),
+// used by the gfx corpus golden below.
+#[cfg(test)]
+#[path = "corpus.rs"]
+mod corpus;
+
 /// Placements whose anchor line falls more than this many lines above the
 /// live screen are dropped — matches the client's scrollback depth.
 pub const SCROLLBACK_KEEP: i64 = 10_000;
@@ -981,6 +987,58 @@ pub fn b64_decode(s: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
+/// One splitter → vt100 → engine pass over a chunk of pty output — the
+/// single composition shared by SrvPane::process_output and the gfx tests
+/// so the two can't silently diverge. `on_text` runs after each text
+/// segment reaches the parser (SrvPane hooks its QueryScanner there) and
+/// may append protocol replies. Returns the stripped stream to forward to
+/// the UI (graphics removed, cursor advances synthesized) and the replies
+/// owed to the child.
+pub fn process_chunk(
+    splitter: &mut GfxSplitter,
+    parser: &mut vt100::Parser,
+    engine: &mut GfxEngine,
+    bytes: &[u8],
+    mut on_text: impl FnMut(&[u8], &vt100::Screen, &mut Vec<u8>),
+) -> (Vec<u8>, Vec<u8>) {
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut replies: Vec<u8> = Vec::new();
+    for seg in splitter.split(bytes) {
+        match seg {
+            Seg::Text(t) => {
+                parser.process(&t);
+                on_text(&t, parser.screen(), &mut replies);
+                for ev in parser.drain_events() {
+                    engine.apply_event(ev);
+                }
+                out.extend_from_slice(&t);
+            }
+            Seg::Cmd(cmd) => {
+                let cursor = parser.screen().cursor_position();
+                let res = engine.handle(cmd, cursor);
+                replies.extend(res.reply);
+                if let Some((dr, dc)) = res.advance {
+                    // Synthesize the cursor move a real kitty terminal
+                    // performs after a placement, so every emulator of
+                    // this stream agrees on the cursor.
+                    let mut mv = String::new();
+                    if dr > 0 {
+                        mv.push_str(&format!("\x1b[{dr}B"));
+                    }
+                    if dc > 0 {
+                        mv.push_str(&format!("\x1b[{dc}C"));
+                    }
+                    if !mv.is_empty() {
+                        parser.process(mv.as_bytes());
+                        out.extend_from_slice(mv.as_bytes());
+                    }
+                }
+            }
+        }
+    }
+    (out, replies)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1197,7 +1255,8 @@ mod tests {
     }
 
     /// The same composition SrvPane::process_output runs: splitter →
-    /// vt100 (events) → engine, producing the stripped stream.
+    /// vt100 (events) → engine, producing the stripped stream. Delegates
+    /// to the shared process_chunk so it cannot diverge from the real path.
     struct PaneSim {
         splitter: GfxSplitter,
         parser: vt100::Parser,
@@ -1219,37 +1278,54 @@ mod tests {
         }
 
         fn feed(&mut self, bytes: &[u8]) -> (Vec<u8>, Vec<u8>) {
-            let mut out = Vec::new();
-            let mut replies = Vec::new();
-            for seg in self.splitter.split(bytes) {
-                match seg {
-                    Seg::Text(t) => {
-                        self.parser.process(&t);
-                        for ev in self.parser.drain_events() {
-                            self.engine.apply_event(ev);
-                        }
-                        out.extend_from_slice(&t);
-                    }
-                    Seg::Cmd(cmd) => {
-                        let cursor = self.parser.screen().cursor_position();
-                        let res = self.engine.handle(cmd, cursor);
-                        replies.extend(res.reply);
-                        if let Some((dr, dc)) = res.advance {
-                            let mut mv = String::new();
-                            if dr > 0 {
-                                mv.push_str(&format!("\x1b[{dr}B"));
-                            }
-                            if dc > 0 {
-                                mv.push_str(&format!("\x1b[{dc}C"));
-                            }
-                            self.parser.process(mv.as_bytes());
-                            out.extend_from_slice(mv.as_bytes());
-                        }
-                    }
-                }
-            }
-            (out, replies)
+            process_chunk(
+                &mut self.splitter,
+                &mut self.parser,
+                &mut self.engine,
+                bytes,
+                |_, _, _| {},
+            )
         }
+    }
+
+    /// Corpus replay: the real timg kitty-graphics recording through the
+    /// shared pipeline, engine state snapshotted against a JSON golden.
+    /// UPDATE_GOLDEN=1 re-baselines (REBASELINE: note required).
+    #[test]
+    fn corpus_timg_kitty_gfx_golden() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let file = root.join("tests/corpus/timg-kitty.ptyrec");
+        let rec = corpus::read(std::fs::File::open(file).unwrap()).unwrap();
+        let mut sim = PaneSim::new(rec.rows, rec.cols);
+        let mut stripped = 0usize;
+        for chunk in &rec.chunks {
+            if chunk.kind == corpus::ChunkKind::Output {
+                let (out, _) = sim.feed(&chunk.payload);
+                assert!(
+                    !out.windows(2).any(|w| w == b"\x1b_"),
+                    "graphics APC leaked into the forwarded stream"
+                );
+                stripped += chunk.payload.len().saturating_sub(out.len());
+            }
+        }
+        assert!(stripped > 0, "recording contained no graphics to strip");
+        let json = serde_json::to_string_pretty(&sim.engine.snapshot()).unwrap();
+        let path = root.join("tests/golden/timg-kitty.gfx.json");
+        if std::env::var_os("UPDATE_GOLDEN").is_some() || !path.exists() {
+            let update = std::env::var_os("UPDATE_GOLDEN").is_some();
+            std::fs::write(&path, &json).unwrap();
+            assert!(
+                update,
+                "golden {} did not exist; wrote it — review and commit, then re-run",
+                path.display()
+            );
+            return;
+        }
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            json,
+            "gfx snapshot drifted from golden (UPDATE_GOLDEN=1 re-baselines)"
+        );
     }
 
     #[test]

@@ -34,7 +34,7 @@ fn dump_screen(screen: &vt100::Screen) -> String {
         let mut attrs = String::new();
         let mut run_start = 0u16;
         let mut run_desc = String::new();
-        let mut flush = |from: u16, to: u16, desc: &str, attrs: &mut String| {
+        let flush = |from: u16, to: u16, desc: &str, attrs: &mut String| {
             if !desc.is_empty() {
                 let _ = write!(attrs, " [{from}-{to} {desc}]");
             }

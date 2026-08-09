@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 
-use crate::gfx::{GfxEngine, GfxSplitter, Seg};
+use crate::gfx::{GfxEngine, GfxSplitter};
 use crate::query::QueryScanner;
 use crate::server::SrvEvent;
 
@@ -231,41 +231,15 @@ impl SrvPane {
     /// stream to forward to the UI (graphics stripped, cursor advances
     /// synthesized) and whether the bell rang in this chunk.
     pub fn process_output(&mut self, bytes: &[u8]) -> (Vec<u8>, bool) {
-        let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-        let mut replies: Vec<u8> = Vec::new();
-        for seg in self.splitter.split(bytes) {
-            match seg {
-                Seg::Text(t) => {
-                    self.parser.process(&t);
-                    replies.extend(self.queries.scan(&t, self.parser.screen(), self.cell));
-                    for ev in self.parser.drain_events() {
-                        self.gfx.apply_event(ev);
-                    }
-                    out.extend_from_slice(&t);
-                }
-                Seg::Cmd(cmd) => {
-                    let cursor = self.parser.screen().cursor_position();
-                    let res = self.gfx.handle(cmd, cursor);
-                    replies.extend(res.reply);
-                    if let Some((dr, dc)) = res.advance {
-                        // Synthesize the cursor move a real kitty terminal
-                        // performs after a placement, so every emulator of
-                        // this stream agrees on the cursor.
-                        let mut mv = String::new();
-                        if dr > 0 {
-                            mv.push_str(&format!("\x1b[{dr}B"));
-                        }
-                        if dc > 0 {
-                            mv.push_str(&format!("\x1b[{dc}C"));
-                        }
-                        if !mv.is_empty() {
-                            self.parser.process(mv.as_bytes());
-                            out.extend_from_slice(mv.as_bytes());
-                        }
-                    }
-                }
-            }
-        }
+        let queries = &mut self.queries;
+        let cell = self.cell;
+        let (out, replies) = crate::gfx::process_chunk(
+            &mut self.splitter,
+            &mut self.parser,
+            &mut self.gfx,
+            bytes,
+            |t, screen, replies| replies.extend(queries.scan(t, screen, cell)),
+        );
         self.ring.extend_from_slice(&out);
         // Trim with hysteresis: draining to CAP on every 8 KiB read is a
         // ~2 MiB memmove per chunk once full (~250× write amplification

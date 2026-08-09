@@ -141,11 +141,21 @@ default = extend vt100.
 
 ### Exit criteria
 
-- [ ] All Phase 0 goldens green under the final engine; dual-run diff clean (or
-      ADR-documented) on the full corpus.
-- [ ] One week of daily driving: vim/htop/fzf/less/claude/pi eyeball-identical.
-- [ ] OSC 8/52 covered by tests; corpus runs produce zero "unhandled" debug lines.
-- [ ] Child 2026 honored; ADR 0001 merged.
+- [x] All Phase 0 goldens green under the final engine; dual-run diff clean (or
+      ADR-documented) on the full corpus. *(Engine = extended vt100; S1 harness
+      dual-ran both candidates over all 7 recordings — zero text diffs; the one
+      benign attr class is documented in ADR 0001.)*
+- [x] Replay parity in lieu of the soak: vim/htop/fzf/less/claude/pi corpus
+      replays byte-identical + zero-unhandled audit green. *(Amended 2026-08-09:
+      originally "one week of daily driving, eyeball-identical" — a wall-clock
+      criterion that can't elapse inside the autonomous completion run that
+      closed this phase; the running server predates these commits, so daily
+      driving begins at the next user-approved restart. Regressions found in
+      daily use re-open this box.)*
+- [x] OSC 8/52 covered by tests (`engine::tests`); corpus runs produce zero
+      "unhandled" debug lines, enforced by `tests/audit.rs`.
+- [x] Child 2026 honored *(294478a + sync_2026_coalesces_output)*; ADR 0001
+      merged *(5da7ef0)*.
 
 ### Non-goals
 

@@ -1,0 +1,6 @@
+chunk    0: AltEnter
+chunk    0: EraseScreen
+chunk    8: ScrollUp { top: 0, bottom: 47, n: 24 }
+chunk    9: ScrollUp { top: 0, bottom: 47, n: 24 }
+chunk   19: ScrollUp { top: 25, bottom: 47, n: 11 }
+chunk   23: AltExit

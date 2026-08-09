@@ -1,0 +1,3 @@
+chunk    1: AltEnter
+chunk    4: EraseScreen
+chunk   45: AltExit

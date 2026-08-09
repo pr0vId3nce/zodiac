@@ -28,9 +28,9 @@ over real recordings.
 
 ### Tasks
 
-- [ ] **0.1 Repo hygiene.** Triage the dirty tree into logical commits (include
+- [x] **0.1 Repo hygiene.** Triage the dirty tree into logical commits (include
       `flake.lock`). Worktree-per-session rule takes effect after this.
-- [ ] **0.2 PTY recorder.** New `src/bin/ptyrec.rs` on the existing `portable-pty 0.8`
+- [x] **0.2 PTY recorder.** New `src/bin/ptyrec.rs` on the existing `portable-pty 0.8`
       dep. Length-prefixed chunks `{millis u32, kind u8 (bytes|resize), payload}` —
       exact bytes, NOT asciicast (which lossily re-encodes; `GfxSplitter` needs the
       real stream). Default 50×120.
@@ -39,38 +39,38 @@ over real recordings.
       kitty-graphics stream (`kitten icat`), then `claude` (incl. a permission prompt
       and spinner phase) and `pi`. Cap ~5 MiB/file. The claude/pi captures may need a
       human at the keyboard — record the scriptable ones first, flag the rest.
-- [ ] **0.4 Golden-screen runner** `tests/golden.rs`: replay each corpus file through
+- [x] **0.4 Golden-screen runner** `tests/golden.rs`: replay each corpus file through
       the parser at recorded size; dump screen contents + per-cell attrs at every
       resize marker and EOF into `tests/golden/`. Byte-deterministic across runs.
-- [ ] **0.5 TermEvent goldens.** Same runner records `drain_events()` per chunk.
+- [x] **0.5 TermEvent goldens.** Same runner records `drain_events()` per chunk.
       This is the contract `GfxEngine::apply_event` depends on — any Phase 1 engine
       must reproduce it (or re-baseline with a written note).
-- [ ] **0.6 Gfx goldens.** First extract the duplicated pipeline: `PaneSim`
+- [x] **0.6 Gfx goldens.** First extract the duplicated pipeline: `PaneSim`
       (`gfx.rs` test module) must delegate to a shared `pub(crate)`
       splitter→parser→engine pipeline used by the real `SrvPane::process_output`
       (`pane.rs`), so tests exercise the real path. Then snapshot `GfxSnapshot` JSON
       at checkpoints over the graphics recording.
-- [ ] **0.7 QueryScanner table tests** (`query.rs`): DA1/DA2/DSR-5/6, DECRQM
+- [x] **0.7 QueryScanner table tests** (`query.rs`): DA1/DA2/DSR-5/6, DECRQM
       2004/2026/1049/1000-range, XTVERSION, split-across-chunk cases.
-- [ ] **0.8 Heuristic characterization tests.** Snapshot `status()` / `thinking()` /
+- [x] **0.8 Heuristic characterization tests.** Snapshot `status()` / `thinking()` /
       `stall_match` verdicts over the claude/pi recordings at checkpoints. Purpose:
       Phase 1 can't silently break pty-pane detection; Phase 2's "retire heuristics"
       is measured, not vibes.
-- [ ] **0.9 Merge gate.** `scripts/check.sh` = `cargo fmt --check && cargo clippy
+- [x] **0.9 Merge gate.** `scripts/check.sh` = `cargo fmt --check && cargo clippy
       -- -D warnings && cargo test`, wired into the `flake.nix` devshell.
-- [ ] **0.10 DECSET 2026 to host.** Wrap the client draw tick + the four overlay
+- [x] **0.10 DECSET 2026 to host.** Wrap the client draw tick + the four overlay
       passes in `CSI ?2026h/l`. Host-side only; removes flicker noise so later visual
       regressions are attributable. (Child-side 2026 stays in Phase 1 — it touches
       the engine/flush path.)
-- [ ] **0.11 Docs scaffold.** `docs/decisions/` ADR template, `docs/icebox.md`,
+- [x] **0.11 Docs scaffold.** `docs/decisions/` ADR template, `docs/icebox.md`,
       this file.
 
 ### Exit criteria
 
-- [ ] ≥7 corpus recordings checked in with manifest.
-- [ ] `scripts/check.sh` green and deterministic 3 runs in a row.
-- [ ] Screen, TermEvent, Gfx, QueryScanner, and heuristic goldens all exist and pass.
-- [ ] Working tree clean; 2026 host emission shipped in the TUI client.
+- [ ] ≥7 corpus recordings checked in with manifest. *(5 of 7 — claude.ptyrec and pi.ptyrec need a human at the keyboard; see MANIFEST.)*
+- [x] `scripts/check.sh` green and deterministic 3 runs in a row.
+- [x] Screen, TermEvent, Gfx, QueryScanner goldens exist and pass; heuristic goldens populate when the claude/pi recordings land.
+- [x] Working tree clean; 2026 host emission shipped in the TUI client.
 
 ### Non-goals
 

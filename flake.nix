@@ -40,6 +40,9 @@
             # astrolabe bridge/web
             nodejs_24
           ];
+          shellHook = ''
+            echo "zodiac devshell — merge gate: ./scripts/check.sh"
+          '';
         };
       });
 }

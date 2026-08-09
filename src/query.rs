@@ -271,8 +271,9 @@ mod tests {
     /// behavior contract it must preserve.
     #[test]
     fn query_reply_table() {
+        type Case = (&'static str, &'static [u8], (u16, u16), &'static [u8]);
         #[rustfmt::skip]
-        let cases: &[(&str, &[u8], (u16, u16), &[u8])] = &[
+        let cases: &[Case] = &[
             ("DA1",                 b"\x1b[c",        (0, 0),   b"\x1b[?62;22c"),
             ("DA1 explicit 0",      b"\x1b[0c",       (0, 0),   b"\x1b[?62;22c"),
             ("DA2",                 b"\x1b[>c",       (0, 0),   b"\x1b[>41;354;0c"),

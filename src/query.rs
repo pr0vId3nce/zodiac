@@ -1,4 +1,4 @@
-use vt100::Screen;
+use crate::engine::TermScreen;
 
 /// Answers the terminal queries applications send to their terminal.
 ///
@@ -32,7 +32,7 @@ impl QueryScanner {
     /// Scan one pty output chunk; returns reply bytes to feed back as input.
     /// `cell` is the outer terminal's cell size in px (0,0 = unknown) for
     /// the pixel-size window ops.
-    pub fn scan(&mut self, chunk: &[u8], screen: &Screen, cell: (u16, u16)) -> Vec<u8> {
+    pub fn scan(&mut self, chunk: &[u8], screen: &dyn TermScreen, cell: (u16, u16)) -> Vec<u8> {
         let owned;
         let buf: &[u8] = if self.carry.is_empty() {
             chunk
@@ -64,7 +64,7 @@ impl QueryScanner {
     }
 }
 
-fn parse_seq(s: &[u8], screen: &Screen, cell: (u16, u16), out: &mut Vec<u8>) -> Parsed {
+fn parse_seq(s: &[u8], screen: &dyn TermScreen, cell: (u16, u16), out: &mut Vec<u8>) -> Parsed {
     match s.get(1) {
         None => Parsed::Incomplete,
         Some(b'[') => parse_csi(s, screen, cell, out),
@@ -74,7 +74,7 @@ fn parse_seq(s: &[u8], screen: &Screen, cell: (u16, u16), out: &mut Vec<u8>) -> 
     }
 }
 
-fn parse_csi(s: &[u8], screen: &Screen, cell: (u16, u16), out: &mut Vec<u8>) -> Parsed {
+fn parse_csi(s: &[u8], screen: &dyn TermScreen, cell: (u16, u16), out: &mut Vec<u8>) -> Parsed {
     let mut j = 2;
     // parameter bytes (0x30–0x3f) and intermediates (0x20–0x2f)
     while j < s.len() && (0x20..=0x3f).contains(&s[j]) {
@@ -114,7 +114,7 @@ fn parse_string(s: &[u8], out: &mut Vec<u8>, respond: fn(&[u8], &mut Vec<u8>)) -
     }
 }
 
-fn respond_csi(body: &[u8], fin: u8, screen: &Screen, cell: (u16, u16), out: &mut Vec<u8>) {
+fn respond_csi(body: &[u8], fin: u8, screen: &dyn TermScreen, cell: (u16, u16), out: &mut Vec<u8>) {
     match fin {
         // DA1: VT220 with ANSI color. Also what resolves crossterm's
         // keyboard-enhancement probe (kitty query + DA1; a DA1 reply with
@@ -163,7 +163,7 @@ fn respond_csi(body: &[u8], fin: u8, screen: &Screen, cell: (u16, u16), out: &mu
     }
 }
 
-fn decrqm_value(mode: u32, screen: &Screen) -> u8 {
+fn decrqm_value(mode: u32, screen: &dyn TermScreen) -> u8 {
     // 1 = set, 2 = reset, 0 = not recognized
     let on = match mode {
         1 => screen.application_cursor(),

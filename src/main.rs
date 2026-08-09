@@ -3,6 +3,7 @@ mod cli;
 mod client;
 #[cfg(test)]
 mod corpus;
+mod engine;
 mod gfx;
 mod kitty;
 mod monitor;

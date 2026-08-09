@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::Result;
 use portable_pty::{native_pty_system, ChildKiller, CommandBuilder, MasterPty, PtySize};
 
+use crate::engine::TermEngine;
 use crate::gfx::{GfxEngine, GfxSplitter};
 use crate::query::QueryScanner;
 use crate::server::SrvEvent;
@@ -30,7 +31,7 @@ pub struct SrvPane {
     model_mtime: Option<std::time::SystemTime>,
     model_name: Option<String>,
     pub ring: Vec<u8>,
-    parser: vt100::Parser, // bell/status tracking + graphics event source
+    term: crate::engine::ActiveEngine, // bell/status tracking + graphics event source
     splitter: GfxSplitter,
     /// Kitty-graphics state for this pane (images + placements).
     pub gfx: GfxEngine,
@@ -182,8 +183,7 @@ impl SrvPane {
         });
 
         let writer = pair.master.take_writer()?;
-        let mut parser = vt100::Parser::new(rows, cols, 0);
-        parser.enable_events();
+        let term = crate::engine::ActiveEngine::new(rows, cols, 0);
         Ok(Self {
             id,
             name,
@@ -191,7 +191,7 @@ impl SrvPane {
             model_mtime: None,
             model_name: None,
             ring: preload,
-            parser,
+            term,
             splitter: GfxSplitter::new(),
             gfx: GfxEngine::new(rows, cols),
             gfx_pushed: 0,
@@ -238,7 +238,7 @@ impl SrvPane {
         let cell = self.cell;
         let (out, replies) = crate::gfx::process_chunk(
             &mut self.splitter,
-            &mut self.parser,
+            &mut self.term,
             &mut self.gfx,
             bytes,
             |t, screen, replies| replies.extend(queries.scan(t, screen, cell)),
@@ -271,7 +271,7 @@ impl SrvPane {
         if crate::protocol::title_state(&self.title()) == crate::protocol::TitleState::Working {
             self.last_title_working = Some(Instant::now());
         }
-        let count = self.parser.screen().audible_bell_count();
+        let count = self.term.screen().audible_bell_count();
         let new = count > self.bell_count;
         self.bell_count = count;
         (out, new)
@@ -299,11 +299,11 @@ impl SrvPane {
     }
 
     pub fn title(&self) -> String {
-        self.parser.screen().title().to_string()
+        self.term.screen().title()
     }
 
     pub fn screen_text(&self) -> String {
-        self.parser.screen().contents()
+        self.term.screen().contents()
     }
 
     /// The tail of the current screen as plain text, trailing blank rows
@@ -311,10 +311,11 @@ impl SrvPane {
     /// the tail is blank. The server-side parser keeps no scrollback, so
     /// this only ever sees what's currently visible.
     pub fn tail_text(&self, want: usize) -> Option<String> {
-        let screen = self.parser.screen();
-        let (_, cols) = screen.size();
-        let rows: Vec<String> = screen
-            .rows(0, cols)
+        let rows: Vec<String> = self
+            .term
+            .screen()
+            .rows_text()
+            .iter()
             .map(|r| r.trim_end().to_string())
             .collect();
         let end = rows
@@ -377,7 +378,7 @@ impl SrvPane {
     }
 
     fn stall_match(&self, conn_watch: bool) -> Option<Duration> {
-        stall_match(self.parser.screen(), conn_watch)
+        stall_match(self.term.screen(), conn_watch)
     }
 
     /// Which agent runs in this pane: title patterns first (cheap, always
@@ -837,7 +838,7 @@ impl SrvPane {
             Some("pi") => None,
             _ => Some(&["esctointerrupt"]),
         };
-        spinner_row(self.parser.screen(), hint)
+        spinner_row(self.term.screen(), hint)
     }
 
     /// Is pi mid-turn? Its terminal title carries no state (`π - <dir>`), so
@@ -874,8 +875,8 @@ impl SrvPane {
             pixel_width: cols.saturating_mul(self.cell.0),
             pixel_height: rows.saturating_mul(self.cell.1),
         });
-        self.parser.set_size(rows, cols);
-        for ev in self.parser.drain_events() {
+        self.term.resize(rows, cols);
+        for ev in self.term.drain_events() {
             self.gfx.apply_event(ev);
         }
     }
@@ -916,7 +917,7 @@ const STALL_CONN_DWELL: Duration = Duration::ZERO;
 /// be painted in an error color; the waiting phrase must sit on a spinner
 /// status line — leading spinner glyph and the live "esc to interrupt"
 /// suffix in the same row.
-fn stall_match(screen: &vt100::Screen, conn_watch: bool) -> Option<Duration> {
+fn stall_match(screen: &dyn crate::engine::TermScreen, conn_watch: bool) -> Option<Duration> {
     let (rows, cols) = screen.size();
     for r in rows.saturating_sub(STALL_ROWS)..rows {
         let mut text = String::new();
@@ -925,7 +926,7 @@ fn stall_match(screen: &vt100::Screen, conn_watch: bool) -> Option<Duration> {
             let Some(cell) = screen.cell(r, c) else {
                 continue;
             };
-            for ch in cell.contents().chars() {
+            for ch in cell.contents.chars() {
                 if !ch.is_whitespace() {
                     text.push(ch);
                     col_of.push(c);
@@ -941,7 +942,7 @@ fn stall_match(screen: &vt100::Screen, conn_watch: bool) -> Option<Duration> {
             pos <= 4
                 && screen
                     .cell(r, col_of[pos])
-                    .is_some_and(|cell| is_error_color(cell.fgcolor()))
+                    .is_some_and(|cell| is_error_color(cell.fg))
         };
         if err_at(STALL_ERR) {
             return Some(STALL_ERR_DWELL);
@@ -961,13 +962,14 @@ fn stall_match(screen: &vt100::Screen, conn_watch: bool) -> Option<Duration> {
 
 /// Red-ish foreground — Claude Code paints its API error lines in an error
 /// color, while conversation text (even inline code) is not red.
-fn is_error_color(c: vt100::Color) -> bool {
+fn is_error_color(c: crate::engine::Color) -> bool {
+    use crate::engine::Color;
     match c {
-        vt100::Color::Idx(i) => matches!(i, 1 | 9) || (160..=203).contains(&i),
-        vt100::Color::Rgb(r, g, b) => {
+        Color::Idx(i) => matches!(i, 1 | 9) || (160..=203).contains(&i),
+        Color::Rgb(r, g, b) => {
             r > 120 && i32::from(r) - i32::from(g) > 50 && i32::from(r) - i32::from(b) > 50
         }
-        vt100::Color::Default => false,
+        Color::Default => false,
     }
 }
 
@@ -981,13 +983,13 @@ fn is_spinner_char(c: char) -> bool {
 /// given, is a set of whitespace-stripped lowercase phrases of which the
 /// row must carry one — the "this is a live status line, not quoted text"
 /// evidence.
-fn spinner_row(screen: &vt100::Screen, hint: Option<&[&str]>) -> bool {
+fn spinner_row(screen: &dyn crate::engine::TermScreen, hint: Option<&[&str]>) -> bool {
     let (rows, cols) = screen.size();
     for r in rows.saturating_sub(STALL_ROWS)..rows {
         let mut text = String::new();
         for c in 0..cols {
             if let Some(cell) = screen.cell(r, c) {
-                for ch in cell.contents().chars() {
+                for ch in cell.contents.chars() {
                     if !ch.is_whitespace() {
                         text.push(ch);
                     }

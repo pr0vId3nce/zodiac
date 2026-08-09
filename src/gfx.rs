@@ -10,8 +10,8 @@
 
 use std::collections::HashMap;
 
+use crate::engine::TermEvent;
 use serde::{Deserialize, Serialize};
-use vt100::TermEvent;
 
 /// Placements whose anchor line falls more than this many lines above the
 /// live screen are dropped — matches the client's scrollback depth.
@@ -974,34 +974,34 @@ pub fn b64_decode(s: &[u8]) -> Option<Vec<u8>> {
     Some(out)
 }
 
-/// One splitter → vt100 → engine pass over a chunk of pty output — the
+/// One splitter → term-engine → gfx pass over a chunk of pty output — the
 /// single composition shared by SrvPane::process_output and the gfx tests
 /// so the two can't silently diverge. `on_text` runs after each text
-/// segment reaches the parser (SrvPane hooks its QueryScanner there) and
+/// segment reaches the engine (SrvPane hooks its QueryScanner there) and
 /// may append protocol replies. Returns the stripped stream to forward to
 /// the UI (graphics removed, cursor advances synthesized) and the replies
 /// owed to the child.
 pub fn process_chunk(
     splitter: &mut GfxSplitter,
-    parser: &mut vt100::Parser,
+    term: &mut dyn crate::engine::TermEngine,
     engine: &mut GfxEngine,
     bytes: &[u8],
-    mut on_text: impl FnMut(&[u8], &vt100::Screen, &mut Vec<u8>),
+    mut on_text: impl FnMut(&[u8], &dyn crate::engine::TermScreen, &mut Vec<u8>),
 ) -> (Vec<u8>, Vec<u8>) {
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
     let mut replies: Vec<u8> = Vec::new();
     for seg in splitter.split(bytes) {
         match seg {
             Seg::Text(t) => {
-                parser.process(&t);
-                on_text(&t, parser.screen(), &mut replies);
-                for ev in parser.drain_events() {
+                term.process(&t);
+                on_text(&t, term.screen(), &mut replies);
+                for ev in term.drain_events() {
                     engine.apply_event(ev);
                 }
                 out.extend_from_slice(&t);
             }
             Seg::Cmd(cmd) => {
-                let cursor = parser.screen().cursor_position();
+                let cursor = term.screen().cursor_position();
                 let res = engine.handle(cmd, cursor);
                 replies.extend(res.reply);
                 if let Some((dr, dc)) = res.advance {
@@ -1016,7 +1016,7 @@ pub fn process_chunk(
                         mv.push_str(&format!("\x1b[{dc}C"));
                     }
                     if !mv.is_empty() {
-                        parser.process(mv.as_bytes());
+                        term.process(mv.as_bytes());
                         out.extend_from_slice(mv.as_bytes());
                     }
                 }
@@ -1269,20 +1269,18 @@ mod tests {
     /// to the shared process_chunk so it cannot diverge from the real path.
     struct PaneSim {
         splitter: GfxSplitter,
-        parser: vt100::Parser,
+        term: crate::engine::Vt100Engine,
         engine: GfxEngine,
     }
 
     impl PaneSim {
         fn new(rows: u16, cols: u16) -> Self {
-            let mut parser = vt100::Parser::new(rows, cols, 100);
-            parser.enable_events();
             let mut engine = GfxEngine::new(rows, cols);
             engine.active = true;
             engine.cell = (10, 20);
             Self {
                 splitter: GfxSplitter::new(),
-                parser,
+                term: crate::engine::Vt100Engine::new(rows, cols, 100),
                 engine,
             }
         }
@@ -1290,7 +1288,7 @@ mod tests {
         fn feed(&mut self, bytes: &[u8]) -> (Vec<u8>, Vec<u8>) {
             process_chunk(
                 &mut self.splitter,
-                &mut self.parser,
+                &mut self.term,
                 &mut self.engine,
                 bytes,
                 |_, _, _| {},
@@ -1358,7 +1356,9 @@ mod tests {
         let snap = sim.engine.snapshot();
         assert_eq!((snap.placements[0].row, snap.placements[0].col), (1, 4));
         // "done" landed after the synthesized advance (row 2, col 6+)
-        assert!(sim.parser.screen().contents().contains("done"));
+        assert!(crate::engine::TermEngine::screen(&sim.term)
+            .contents()
+            .contains("done"));
         // stream 5 more lines: the image scrolls into scrollback with text
         sim.feed(b"a\r\nb\r\nc\r\nd\r\ne\r\nf");
         let snap = sim.engine.snapshot();

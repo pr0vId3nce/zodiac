@@ -11,6 +11,10 @@
 
 #[path = "../src/corpus.rs"]
 mod corpus;
+#[path = "../src/engine.rs"]
+mod engine;
+
+use engine::{TermEngine as _, TermScreen};
 
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
@@ -26,7 +30,7 @@ fn golden_dir() -> PathBuf {
 /// Screen dump: one text line per row (trailing blanks trimmed), then for
 /// rows with any non-default attrs a run-length attr line. Stable and
 /// readable so golden diffs point at the cell that changed.
-fn dump_screen(screen: &vt100::Screen) -> String {
+fn dump_screen(screen: &dyn TermScreen) -> String {
     let (rows, cols) = screen.size();
     let mut out = String::new();
     for r in 0..rows {
@@ -43,29 +47,29 @@ fn dump_screen(screen: &vt100::Screen) -> String {
             let (chars, desc) = match screen.cell(r, c) {
                 Some(cell) => {
                     let mut d = String::new();
-                    match cell.fgcolor() {
-                        vt100::Color::Default => {}
+                    match cell.fg {
+                        engine::Color::Default => {}
                         fg => {
                             let _ = write!(d, "fg={fg:?}");
                         }
                     }
-                    match cell.bgcolor() {
-                        vt100::Color::Default => {}
+                    match cell.bg {
+                        engine::Color::Default => {}
                         bg => {
                             let _ = write!(d, "{}bg={bg:?}", if d.is_empty() { "" } else { "," });
                         }
                     }
                     for (on, tag) in [
-                        (cell.bold(), "B"),
-                        (cell.italic(), "I"),
-                        (cell.underline(), "U"),
-                        (cell.inverse(), "R"),
+                        (cell.bold, "B"),
+                        (cell.italic, "I"),
+                        (cell.underline, "U"),
+                        (cell.inverse, "R"),
                     ] {
                         if on {
                             d.push_str(tag);
                         }
                     }
-                    let ch = cell.contents();
+                    let ch = cell.contents;
                     (if ch.is_empty() { " ".to_string() } else { ch }, d)
                 }
                 None => (" ".to_string(), String::new()),
@@ -124,8 +128,7 @@ fn compare(name: &str, kind: &str, actual: &str) {
 fn replay(name: &str) {
     let file = corpus_dir().join(format!("{name}.ptyrec"));
     let rec = corpus::read(std::fs::File::open(&file).unwrap()).unwrap();
-    let mut parser = vt100::Parser::new(rec.rows, rec.cols, 0);
-    parser.enable_events();
+    let mut term = engine::Vt100Engine::new(rec.rows, rec.cols, 0);
     let mut events = String::new();
     let mut screens = String::new();
     // Full-screen apps restore a blank primary screen on exit, so an
@@ -135,26 +138,26 @@ fn replay(name: &str) {
         (1..8).map(|k| k * rec.chunks.len() / 8).collect();
     for (i, chunk) in rec.chunks.iter().enumerate() {
         match chunk.kind {
-            corpus::ChunkKind::Output => parser.process(&chunk.payload),
+            corpus::ChunkKind::Output => term.process(&chunk.payload),
             corpus::ChunkKind::Resize => {
                 if let Some((rows, cols)) = chunk.resize() {
                     // Checkpoint the screen as it stood before the resize.
                     let _ = writeln!(screens, "=== before resize @chunk {i} ===");
-                    screens.push_str(&dump_screen(parser.screen()));
-                    parser.set_size(rows, cols);
+                    screens.push_str(&dump_screen(term.screen()));
+                    term.resize(rows, cols);
                 }
             }
         }
-        for ev in parser.drain_events() {
+        for ev in term.drain_events() {
             let _ = writeln!(events, "chunk {i:4}: {ev:?}");
         }
         if marks.contains(&i) {
             let _ = writeln!(screens, "=== @chunk {i} ===");
-            screens.push_str(&dump_screen(parser.screen()));
+            screens.push_str(&dump_screen(term.screen()));
         }
     }
     let _ = writeln!(screens, "=== final ===");
-    screens.push_str(&dump_screen(parser.screen()));
+    screens.push_str(&dump_screen(term.screen()));
     compare(name, "screen", &screens);
     compare(name, "events", &events);
 }

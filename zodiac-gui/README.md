@@ -72,3 +72,10 @@ delay (used by unattended smoke tests).
 - Shaped-line (per-BufferLine) caching: damage granularity is per-screen,
   which already holds 60 fps at the S3 pathological load.
 - Proportional fonts for agent transcripts (Phase 4).
+
+## Fonts
+
+- `ZODIAC_GUI_FONT` — monospace family for grid panes (else `fc-match monospace`).
+- `ZODIAC_GUI_UI_FONT` — proportional family for agent transcripts (roadmap 4.5;
+  else `fc-match sans-serif`, else the monospace family). Grid panes are always
+  monospace.

@@ -14,13 +14,23 @@ pub const LINE_FACTOR: f32 = 1.30;
 pub struct Fonts {
     pub system: FontSystem,
     pub family: String,
+    /// Proportional (sans-serif) family for agent transcripts (roadmap
+    /// 4.5): prose reads better proportionally, while grid panes stay
+    /// monospace. `ZODIAC_GUI_UI_FONT` overrides; else `fc-match
+    /// sans-serif`; else the monospace family (always a safe fallback).
+    pub ui_family: String,
 }
 
 impl Fonts {
     pub fn load() -> Self {
         let system = FontSystem::new();
         let family = pick_family(&system);
-        Self { system, family }
+        let ui_family = pick_ui_family(&system, &family);
+        Self {
+            system,
+            family,
+            ui_family,
+        }
     }
 
     /// (cell_w, cell_h) in physical px for `FONT_PX * scale`.
@@ -76,9 +86,33 @@ fn pick_family(fs: &FontSystem) -> String {
         .unwrap_or_else(|| "monospace".into())
 }
 
+fn pick_ui_family(fs: &FontSystem, mono_fallback: &str) -> String {
+    let db = fs.db();
+    let exists = |name: &str| {
+        db.faces()
+            .any(|f| f.families.iter().any(|(fam, _)| fam == name))
+    };
+    if let Ok(name) = std::env::var("ZODIAC_GUI_UI_FONT") {
+        if exists(&name) {
+            return name;
+        }
+    }
+    if let Some(name) = fc_match("sans-serif") {
+        if exists(&name) {
+            return name;
+        }
+    }
+    // No proportional face found — monospace still renders correctly.
+    mono_fallback.to_string()
+}
+
 fn fc_match_mono() -> Option<String> {
+    fc_match("monospace")
+}
+
+fn fc_match(pattern: &str) -> Option<String> {
     let out = std::process::Command::new("fc-match")
-        .args(["monospace", "--format", "%{family}"])
+        .args([pattern, "--format", "%{family}"])
         .output()
         .ok()?;
     if !out.status.success() {

@@ -1422,10 +1422,12 @@ impl Renderer {
             }
             self.grid_buf.set_wrap(Wrap::Word);
             self.grid_buf.set_size(Some(w - cw), None);
+            // Proportional shaping for transcript prose (roadmap 4.5):
+            // grid panes stay monospace; agent transcripts read as text.
             apply_rich(
                 &mut self.grid_buf,
                 &mut self.fonts.system,
-                &self.fonts.family,
+                &self.fonts.ui_family,
                 &rt,
             );
         }

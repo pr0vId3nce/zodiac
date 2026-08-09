@@ -86,6 +86,12 @@ pub struct Settings {
     /// Default off — flip it once the GUI is the daily driver.
     #[serde(default)]
     pub kitty_keyboard: bool,
+    /// Honor children's OSC 52 clipboard writes (roadmap 4.7): when on,
+    /// an allowed write reaches the system clipboard via the GUI. Default
+    /// off — a terminal writing your clipboard silently is a footgun, so
+    /// it is opt-in, the gate ADR 0005 / Phase 2 inbox anticipates.
+    #[serde(default)]
+    pub clipboard_write: bool,
     /// Cursor shape in panes: "auto" (follow the inner app's DECSCUSR),
     /// "block", "underline", or "bar".
     #[serde(default)]

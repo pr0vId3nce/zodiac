@@ -119,6 +119,10 @@ const MAX_FRAME: usize = 8 * 1024 * 1024;
 /// One animation-frame data chunk for pane f.id (roadmap 4.2): 34-byte
 /// GfxFrameHdr + payload, chunked like T_GFX_IMG. Old clients skip it.
 pub const T_GFX_FRAME: u8 = 35;
+/// An OSC 52 clipboard write from pane f.id: ClipboardWrite JSON (roadmap
+/// 4.7). Sent to clients behind the permission inbox — the GUI writes the
+/// system clipboard (`arboard`); old clients skip it.
+pub const T_CLIPBOARD: u8 = 36;
 
 /// T_GFX_FRAME payload header (34 bytes; layout mirrors GfxImgHdr with the
 /// frame index + display gap added).
@@ -190,6 +194,16 @@ pub struct PermRequest {
     /// Milliseconds this request has been pending (for UI countdowns).
     #[serde(default)]
     pub age_ms: u64,
+}
+
+/// T_CLIPBOARD payload: a decoded OSC 52 clipboard write the user allowed.
+#[allow(dead_code)] // consumed by the GUI client (arboard)
+#[derive(Serialize, Deserialize, Clone)]
+pub struct ClipboardWrite {
+    /// The selection char(s) the app targeted ("c", "p", ...).
+    pub selection: String,
+    /// The clipboard text (already base64-decoded).
+    pub text: String,
 }
 
 /// T_PERM_RESP payload.

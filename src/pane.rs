@@ -103,6 +103,8 @@ pub struct SrvPane {
     /// update open, flushed as one T_OUTPUT at ?2026l or the deadline.
     sync_buf: Vec<u8>,
     sync_since: Option<Instant>,
+    /// OSC 52 clipboard writes awaiting the server's gate (roadmap 4.7).
+    pub pending_clipboard: Vec<(Vec<u8>, Vec<u8>)>,
     pub monitor_screen_hash: Option<u64>,
     pub monitor_screen_since: Option<Instant>,
     pub monitor_checked_at: Option<Instant>,
@@ -234,6 +236,7 @@ impl SrvPane {
             stall_latched: false,
             sync_buf: Vec::new(),
             sync_since: None,
+            pending_clipboard: Vec::new(),
             monitor_screen_hash: None,
             monitor_screen_since: None,
             monitor_checked_at: None,
@@ -302,6 +305,7 @@ impl SrvPane {
             stall_latched: false,
             sync_buf: Vec::new(),
             sync_since: None,
+            pending_clipboard: Vec::new(),
             monitor_screen_hash: None,
             monitor_screen_since: None,
             monitor_checked_at: None,
@@ -329,6 +333,10 @@ impl SrvPane {
             bytes,
             |t, screen, replies| replies.extend(queries.scan(t, screen, cell)),
         );
+        // OSC 52 (roadmap 4.7): collect any clipboard writes for the
+        // server to gate; the placement engine stashed them during the
+        // event drain above.
+        self.pending_clipboard.extend(self.gfx.drain_clipboard());
         // Child-side DECSET 2026 (roadmap 1.6): while the child holds a
         // synchronized update open, hold its output back so every attached
         // client repaints once, at the closing ?2026l (or the deadline /
@@ -2167,6 +2175,23 @@ mod tests {
 
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
+    }
+
+    /// OSC 52 (roadmap 4.7): a child's clipboard write surfaces as a
+    /// pending entry for the server to gate; the query form does not.
+    #[test]
+    fn osc52_write_surfaces_pending() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut p = SrvPane::spawn(9998, None, 24, 80, None, Vec::new(), tx).unwrap();
+        p.process_output(b"\x1b]52;c;aGVsbG8=\x07");
+        assert_eq!(p.pending_clipboard.len(), 1);
+        assert_eq!(p.pending_clipboard[0].0, b"c");
+        assert_eq!(p.pending_clipboard[0].1, b"aGVsbG8=");
+        p.pending_clipboard.clear();
+        // Query form (payload "?") must not surface.
+        p.process_output(b"\x1b]52;c;?\x07");
+        assert!(p.pending_clipboard.is_empty());
+        p.kill();
     }
 
     /// Child-side DECSET 2026 (roadmap 1.6): output inside ?2026h..?2026l

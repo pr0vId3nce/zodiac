@@ -432,6 +432,7 @@ impl Server {
                     self.send_ui(T_OUTPUT, id, &stream);
                     self.send_watchers(T_OUTPUT, id, &stream);
                 }
+                self.push_clipboard(id);
                 self.push_gfx(id);
             }
             SrvEvent::Deliver(id, bytes) => {
@@ -1291,6 +1292,33 @@ impl Server {
         let active = self.active;
         if let Some(p) = self.pane_mut(active) {
             p.clear_flags();
+        }
+    }
+
+    /// OSC 52 write-through (roadmap 4.7): forward a pane's pending
+    /// clipboard writes to the UI only when the setting allows it (the
+    /// gate); otherwise drop them. base64-decoded here so clients need no
+    /// codec. Query forms never reach this (the engine excludes them).
+    fn push_clipboard(&mut self, id: u64) {
+        let writes = match self.pane_mut(id) {
+            Some(p) if !p.pending_clipboard.is_empty() => std::mem::take(&mut p.pending_clipboard),
+            _ => return,
+        };
+        if !crate::settings::Settings::cached().clipboard_write {
+            return; // gated off — the secure default
+        }
+        for (sel, payload) in writes {
+            let Some(text) =
+                crate::gfx::b64_decode(&payload).and_then(|b| String::from_utf8(b).ok())
+            else {
+                continue;
+            };
+            let msg = crate::protocol::ClipboardWrite {
+                selection: String::from_utf8_lossy(&sel).into_owned(),
+                text,
+            };
+            let data = serde_json::to_vec(&msg).unwrap_or_default();
+            self.send_ui(T_CLIPBOARD, id, &data);
         }
     }
 

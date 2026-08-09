@@ -306,6 +306,10 @@ pub struct GfxEngine {
     /// Whether the capability floor advertises animation (ADR 0005):
     /// gates a=f / a=a acceptance.
     pub anim: bool,
+    /// OSC 52 clipboard writes seen since the last drain (roadmap 4.7):
+    /// (selection, base64 payload). Surfaced by process_output for the
+    /// server to gate behind the permission inbox.
+    clipboard: Vec<(Vec<u8>, Vec<u8>)>,
     /// Bumped on every visible change; the server pushes a snapshot when it
     /// differs from the last pushed value.
     pub version: u64,
@@ -338,6 +342,7 @@ impl GfxEngine {
             lru_tick: 0,
             active: false,
             anim: false,
+            clipboard: Vec::new(),
             version: 0,
         }
     }
@@ -908,10 +913,12 @@ impl GfxEngine {
                 self.cols = cols;
                 self.bump();
             }
-            // Not a graphics event: OSC 52 rides the same ordered event
-            // stream but is consumed by the server's clipboard gate
-            // (Phase 2 permission inbox); the placement engine ignores it.
-            TermEvent::Clipboard { .. } => {}
+            // OSC 52 (roadmap 4.7): stash for the server to gate behind
+            // the permission inbox — the placement engine ignores it, but
+            // it must not be dropped.
+            TermEvent::Clipboard { selection, payload } => {
+                self.clipboard.push((selection, payload));
+            }
             TermEvent::Reset => {
                 self.placements.clear();
                 self.alt_placements.clear();
@@ -971,6 +978,11 @@ impl GfxEngine {
     }
 
     // -- snapshot ------------------------------------------------------------
+
+    /// Take the OSC 52 clipboard writes seen since the last call (4.7).
+    pub fn drain_clipboard(&mut self) -> Vec<(Vec<u8>, Vec<u8>)> {
+        std::mem::take(&mut self.clipboard)
+    }
 
     pub fn snapshot(&self) -> GfxSnapshot {
         let layer = if self.in_alt {

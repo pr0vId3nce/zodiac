@@ -3,7 +3,7 @@
 // data lives here.
 
 import { useEffect, useSyncExternalStore } from "react";
-import type { ServerMsg, SessionState, SlashCommand } from "./types";
+import type { CommandSets, ServerMsg, SessionState } from "./types";
 import { getToken } from "./auth";
 
 export interface AstrolabeState {
@@ -12,7 +12,7 @@ export interface AstrolabeState {
   watch: boolean | null; // live mirror vs poll fallback
   session: string;
   state: SessionState | null;
-  commands: SlashCommand[];
+  commands: CommandSets;
   /** The bridge closed the connection specifically for a missing/wrong
       token (close code 4001) — worth telling apart from "still trying to
       reconnect," since retrying with the same bad token forever looks
@@ -30,7 +30,7 @@ class AstrolabeClient {
     watch: null,
     session: "main",
     state: null,
-    commands: [],
+    commands: {},
     unauthorized: false,
   };
   private listeners = new Set<() => void>();

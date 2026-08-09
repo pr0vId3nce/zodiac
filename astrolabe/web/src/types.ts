@@ -33,8 +33,11 @@ export interface SlashCommand {
   custom?: boolean;
 }
 
+/** Slash palettes keyed by agent name — each agent has its own commands. */
+export type CommandSets = Record<string, SlashCommand[]>;
+
 export type ServerMsg =
-  | { t: "hello"; session: string; state: SessionState | null; link: boolean; watch: boolean | null; commands: SlashCommand[] }
+  | { t: "hello"; session: string; state: SessionState | null; link: boolean; watch: boolean | null; commands: CommandSets }
   | { t: "state"; state: SessionState }
   | { t: "link"; up: boolean }
   | { t: "watch"; supported: boolean }

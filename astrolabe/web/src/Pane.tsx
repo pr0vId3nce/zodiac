@@ -13,7 +13,7 @@ import {
   WrapText,
   X,
 } from "lucide-react";
-import type { PaneState, SessionState, SlashCommand } from "./types";
+import type { CommandSets, PaneState, SessionState } from "./types";
 import { client } from "./ws";
 import { Term, type TermHandle, type ViewMode } from "./Term";
 import { KeyPad } from "./KeyPad";
@@ -93,7 +93,7 @@ export function Pane({
   pane: PaneState;
   state: SessionState;
   watch: boolean | null;
-  commands: SlashCommand[];
+  commands: CommandSets;
   onBack: () => void;
   /** Fires once a swipe-back's own release animation finishes, instead of
       `onBack` — the swipe already revealed `backdrop` live, so the caller
@@ -110,6 +110,9 @@ export function Pane({
   const [text, setText] = useState("");
   const [pad, setPad] = useState(false);
   const [palette, setPalette] = useState(false);
+  // Each agent has its own slash commands; a pane running neither claude
+  // nor pi gets an empty palette rather than another agent's menu.
+  const paneCommands = (pane.agent && commands[pane.agent]) || [];
   const [searching, setSearching] = useState(false);
   const [query, setQuery] = useState("");
   const [moreOpen, setMoreOpen] = useState(false);
@@ -161,12 +164,14 @@ export function Pane({
     (factor) => term.current?.previewScale(factor)
   );
 
-  // Claude Code inserts a newline on `\` + Enter — keep multi-line dictation
-  // intact for agent panes instead of submitting at the first newline.
+  // Keep multi-line dictation intact instead of submitting at the first
+  // newline: Claude Code inserts one on `\` + Enter, while pi binds Ctrl+J
+  // (a plain newline byte) to it and would show claude's backslash as text.
   const sendText = (submit: boolean) => {
     const t = text.replace(/\s+$/, "");
     if (!t) return;
-    const wired = pane.agent ? t.replaceAll("\n", "\\\r") : t;
+    const wired =
+      !pane.agent || pane.agent === "pi" ? t : t.replaceAll("\n", "\\\r");
     if (submit) {
       client.promptPane(pane.id, wired);
       hapticTap("success", sendBtn.current);
@@ -399,13 +404,15 @@ export function Pane({
               </span>
             )}
           </div>
-          <button
-            onClick={() => setPalette(true)}
-            aria-label="slash commands"
-            className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[10px] border border-card-edge font-mono text-subhead text-dim active:scale-95"
-          >
-            /
-          </button>
+          {paneCommands.length > 0 && (
+            <button
+              onClick={() => setPalette(true)}
+              aria-label="slash commands"
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-[10px] border border-card-edge font-mono text-subhead text-dim active:scale-95"
+            >
+              /
+            </button>
+          )}
           <button
             ref={sendBtn}
             onClick={() => sendText(true)}
@@ -421,7 +428,7 @@ export function Pane({
       <SlashPalette
         open={palette}
         onClose={() => setPalette(false)}
-        commands={commands}
+        commands={paneCommands}
         onPick={insertCommand}
       />
 

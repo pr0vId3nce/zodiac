@@ -259,6 +259,16 @@ async function captureQuestion(p: { id: number; name: string; subtitle?: string;
   );
 }
 
+/** Multi-line text as a pane's editor wants it. Claude Code reads `\` +
+    Enter as "insert a newline", so a bare newline there would submit at the
+    first line break. pi binds Ctrl+J — a plain \n byte — to the same job
+    and would render claude's backslash literally. A pane with no agent is
+    a shell, which wants exactly the bytes it was given. */
+function wireNewlines(agent: string | null | undefined, text: string): string {
+  if (!agent || agent === "pi") return text;
+  return text.replaceAll("\n", "\\\r");
+}
+
 /** Answer a question dialog: the digit picks the option in Claude Code's
     pickers (the trailing Enter commits it where the digit only moved the
     selection, and lands on an empty input box — a no-op — where it
@@ -621,7 +631,7 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
       return true;
     }
     // Inline reply from a notification. Same wiring the web client does:
-    // agent panes get newlines as `\` + Enter so Claude Code keeps them.
+    // newlines are encoded the way the pane's agent expects.
     case "/api/prompt": {
       if (typeof body.pane !== "number" || typeof body.text !== "string" || !body.text.trim()) {
         json(res, 400, { error: "need { pane, text }" });
@@ -637,7 +647,7 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
         return true;
       }
       const text = body.text.replace(/\s+$/, "");
-      link.prompt(pane.id, pane.agent ? text.replaceAll("\n", "\\\r") : text);
+      link.prompt(pane.id, wireNewlines(pane.agent, text));
       json(res, 200, { ok: true });
       return true;
     }

@@ -49,6 +49,7 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
 - **Alt+←/→** (top tabs) or **Alt+↑/↓** (side tabs) — previous / next pane.
 - **Alt+1 … Alt+9** — jump straight to a pane by number.
 - **Alt+N** — new shell pane; **Alt+Shift+N** — new claude agent pane.
+- **Alt+W** — close the active pane (kills its process).
 - **Ctrl+S** — open the fullscreen settings page (Esc closes). ↑/↓ select a
   row, ←/→ or Enter cycle its value; changes persist to
   `~/.config/zodiac/config.json` and apply live.

@@ -514,6 +514,13 @@ impl GuiApp {
                     }
                     return;
                 }
+                // Alt+W closes the active pane (kills its process).
+                Key::Character(s) if s.eq_ignore_ascii_case("w") => {
+                    if let Some(id) = self.panes.get(self.active).map(|p| p.id) {
+                        self.send(T_CLOSE_PANE, id, &[]);
+                    }
+                    return;
+                }
                 _ => {}
             }
         }

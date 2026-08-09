@@ -13,9 +13,10 @@ import {
   WrapText,
   X,
 } from "lucide-react";
-import type { CommandSets, PaneState, SessionState } from "./types";
+import type { CommandSets, PaneState, PermRequest, SessionState } from "./types";
 import { client } from "./ws";
 import { Term, type TermHandle, type ViewMode } from "./Term";
+import { AgentChat, type AgentChatHandle } from "./AgentChat";
 import { KeyPad } from "./KeyPad";
 import { SlashPalette } from "./SlashPalette";
 import { Button, ROMAN, Sheet, StatusPill, cn, roman, sigil } from "./ui";
@@ -55,6 +56,63 @@ function Bracket({ pos }: { pos: "tl" | "tr" | "bl" | "br" }) {
   );
 }
 
+/** A tool input rendered compactly for a permission card: object inputs as
+    `key: value` lines (long values clipped), anything else as plain JSON. */
+function permInputLines(input: unknown): string[] {
+  const clip = (s: string, n = 240) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
+  if (input && typeof input === "object" && !Array.isArray(input)) {
+    return Object.entries(input as Record<string, unknown>).map(([k, v]) =>
+      clip(`${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`)
+    );
+  }
+  const s = JSON.stringify(input);
+  return s && s !== "null" && s !== "{}" ? [clip(s)] : [];
+}
+
+/** One pending tool-permission ask from an agent pane: tool name, the input
+    it wants to run with, Allow / Deny. Dismissal is driven by the store —
+    the card unmounts when the request settles anywhere. */
+function PermCard({
+  req,
+  onAnswer,
+}: {
+  req: PermRequest;
+  onAnswer: (behavior: "allow" | "deny") => void;
+}) {
+  const lines = permInputLines(req.input);
+  const label = req.display_name || req.tool_name;
+  return (
+    <div className="rounded-[10px] border border-red-400/40 bg-red-400/5 px-3 py-2.5 font-mono">
+      <div className="flex items-baseline gap-2">
+        <span className="text-caption font-bold text-red-300">?</span>
+        <span className="min-w-0 flex-1 truncate text-subhead font-semibold text-gold-soft">
+          {label}
+        </span>
+        {req.display_name && req.display_name !== req.tool_name && (
+          <span className="shrink-0 text-[10px] text-dim">{req.tool_name}</span>
+        )}
+      </div>
+      {lines.length > 0 && (
+        <div className="mt-1.5 max-h-36 overflow-y-auto rounded-md bg-[rgba(4,6,14,0.6)] px-2 py-1.5 text-[11px] leading-relaxed text-zinc-300">
+          {lines.map((l, i) => (
+            <div key={i} className="whitespace-pre-wrap break-words">
+              {l}
+            </div>
+          ))}
+        </div>
+      )}
+      <div className="mt-2 flex gap-2">
+        <Button variant="gold" className="flex-1" onClick={() => onAnswer("allow")}>
+          Allow
+        </Button>
+        <Button variant="default" className="flex-1" onClick={() => onAnswer("deny")}>
+          Deny
+        </Button>
+      </div>
+    </div>
+  );
+}
+
 // Mirror font: fit ~110 cols (where agent content lives) instead of the full
 // desktop grid, and never drop below readable — the rest scrolls sideways.
 function fitFont(cols: number) {
@@ -86,6 +144,7 @@ export function Pane({
   state,
   watch,
   commands,
+  perms = [],
   onBack,
   onSwipeComplete,
   backdrop,
@@ -94,6 +153,8 @@ export function Pane({
   state: SessionState;
   watch: boolean | null;
   commands: CommandSets;
+  /** Pending tool-permission requests for this pane (agent panes only). */
+  perms?: PermRequest[];
   onBack: () => void;
   /** Fires once a swipe-back's own release animation finishes, instead of
       `onBack` — the swipe already revealed `backdrop` live, so the caller
@@ -104,6 +165,9 @@ export function Pane({
 }) {
   const rows = state.rows || 45;
   const cols = state.cols || 160;
+  // Structured agent pane: chat feed instead of a terminal — no mirror/read
+  // toggle, no keypad, no scrollback search; prompts go out whole.
+  const isAgent = pane.kind === "agent";
   const [mode, setMode] = useState<ViewMode>(initialMode);
   const [mirrorFont, setMirrorFont] = useState(() => initialMirrorFont(cols));
   const [readFont, setReadFont] = useState(initialReadFont);
@@ -117,6 +181,7 @@ export function Pane({
   const [query, setQuery] = useState("");
   const [moreOpen, setMoreOpen] = useState(false);
   const term = useRef<TermHandle>(null);
+  const chat = useRef<AgentChatHandle>(null);
   const box = useRef<HTMLTextAreaElement>(null);
   const sendBtn = useRef<HTMLButtonElement>(null);
   const header = useRef<HTMLElement>(null);
@@ -150,18 +215,20 @@ export function Pane({
     localStorage.setItem("astrolabe-view-mode", m);
   };
   const bumpFont = (d: number) => {
-    if (mode === "read") setReadFont((f) => Math.max(9, Math.min(22, f + d)));
+    if (isAgent || mode === "read") setReadFont((f) => Math.max(9, Math.min(22, f + d)));
     else setMirrorFont((f) => Math.max(4, Math.min(22, f + d)));
   };
   const pinch = usePinchZoom(
     (factor) => {
-      if (mode === "read") {
+      if (isAgent || mode === "read") {
         setReadFont((f) => Math.max(9, Math.min(22, Math.round(f * factor))));
       } else {
         setMirrorFont((f) => Math.max(4, Math.min(22, Math.round(f * factor))));
       }
     },
-    (factor) => term.current?.previewScale(factor)
+    (factor) => {
+      if (!isAgent) term.current?.previewScale(factor);
+    }
   );
 
   // Keep multi-line dictation intact instead of submitting at the first
@@ -170,6 +237,15 @@ export function Pane({
   const sendText = (submit: boolean) => {
     const t = text.replace(/\s+$/, "");
     if (!t) return;
+    if (isAgent) {
+      // Structured pane: the whole text goes out verbatim as one prompt
+      // (the bridge sends T_AGENT_INPUT) — no keystroke wiring, and
+      // "type without submitting" has no meaning without an input box.
+      client.promptPane(pane.id, t);
+      hapticTap("success", sendBtn.current);
+      setText("");
+      return;
+    }
     const wired =
       !pane.agent || pane.agent === "pi" ? t : t.replaceAll("\n", "\\\r");
     if (submit) {
@@ -254,13 +330,15 @@ export function Pane({
           {pane.cwd && <span className="truncate">{tail(pane.cwd)}</span>}
           <span className="tabular-nums">↑{uptime(pane.uptime_ms)}</span>
           <span className="ml-auto flex shrink-0 items-center gap-1 text-zinc-300">
-            <button
-              onClick={() => setSearching((s) => !s)}
-              aria-label="search"
-              className="flex h-8 w-8 items-center justify-center"
-            >
-              <Search className="h-3.5 w-3.5" />
-            </button>
+            {!isAgent && (
+              <button
+                onClick={() => setSearching((s) => !s)}
+                aria-label="search"
+                className="flex h-8 w-8 items-center justify-center"
+              >
+                <Search className="h-3.5 w-3.5" />
+              </button>
+            )}
             <button
               onClick={() => setMoreOpen(true)}
               aria-label="more"
@@ -318,18 +396,22 @@ export function Pane({
         <Bracket pos="bl" />
         <Bracket pos="br" />
         <div className="h-full overflow-hidden rounded-md bg-[rgba(4,6,14,0.6)] p-1.5">
-          <Term
-            ref={term}
-            pane={pane.id}
-            rows={rows}
-            cols={cols}
-            mode={mode}
-            mirrorFont={mirrorFont}
-            readFont={readFont}
-          />
+          {isAgent ? (
+            <AgentChat ref={chat} pane={pane.id} font={readFont} status={pane.status} />
+          ) : (
+            <Term
+              ref={term}
+              pane={pane.id}
+              rows={rows}
+              cols={cols}
+              mode={mode}
+              mirrorFont={mirrorFont}
+              readFont={readFont}
+            />
+          )}
         </div>
         <button
-          onClick={() => term.current?.scrollToBottom()}
+          onClick={() => (isAgent ? chat.current : term.current)?.scrollToBottom()}
           className="absolute bottom-2 right-2 flex h-11 w-11 items-center justify-center rounded-full border border-card-edge bg-sky-mid/80 text-zinc-300 backdrop-blur active:scale-95"
           aria-label="jump to live"
         >
@@ -339,11 +421,33 @@ export function Pane({
 
       {/* composer */}
       <div className="border-t border-card-edge bg-sky-mid/70 backdrop-blur safe-bottom">
+        {/* Agent pane permission inbox: structured T_PERM_REQ cards with
+            real Allow/Deny (→ T_PERM_RESP). Cards dismiss themselves when
+            the request settles anywhere — here, the desktop, a timeout. */}
+        {isAgent && perms.length > 0 && (
+          <div className="space-y-2.5 px-3.5 pt-3">
+            {perms.map((req) => (
+              <PermCard
+                key={req.request_id}
+                req={req}
+                onAnswer={(behavior) => {
+                  client.perm(pane.id, req.request_id, behavior, text.trim() || undefined);
+                  setText("");
+                  hapticTap("success", header.current);
+                }}
+              />
+            ))}
+            <div className="font-mono text-[10px] text-zinc-600">
+              anything typed below rides along — the reason on deny, a follow-up on allow
+            </div>
+          </div>
+        )}
         {/* Question dialog on screen: real answer buttons. Typing into the
             composer would feed keystrokes to a picker that ignores text —
             these send the option's digit instead (plus the composer text
-            as a follow-up note, if any). */}
-        {pane.status === "needs_input" && pane.options?.length ? (
+            as a follow-up note, if any). pty panes only — agent panes get
+            the structured cards above instead. */}
+        {!isAgent && pane.status === "needs_input" && pane.options?.length ? (
           <div className="px-3.5 pt-3">
             {pane.question && (
               <div className="mb-2 flex items-baseline gap-2 font-mono">
@@ -422,7 +526,7 @@ export function Pane({
             <SendHorizonal className="h-4 w-4" />
           </button>
         </div>
-        {pad && <KeyPad pane={pane.id} />}
+        {pad && !isAgent && <KeyPad pane={pane.id} />}
       </div>
 
       <SlashPalette
@@ -434,42 +538,48 @@ export function Pane({
 
       <Sheet open={moreOpen} onClose={() => setMoreOpen(false)} title="view options">
         <div className="space-y-4 px-2 pb-2">
-          <div>
-            <div className="mb-1.5 px-1 text-caption font-semibold uppercase tracking-wider text-zinc-500">
-              input
-            </div>
-            <Button
-              variant={pad ? "gold" : "default"}
-              onClick={() => {
-                setPad((p) => !p);
-                setMoreOpen(false);
-              }}
-              className="w-full"
-            >
-              <Keyboard className="h-4 w-4" /> special keys {pad ? "on" : "off"}
-            </Button>
-          </div>
-          <div>
-            <div className="mb-1.5 px-1 text-caption font-semibold uppercase tracking-wider text-zinc-500">
-              display
-            </div>
-            <div className="flex gap-2">
+          {/* keypad + mirror/read only mean something with a terminal behind
+              them — an agent pane's sheet is just the font control */}
+          {!isAgent && (
+            <div>
+              <div className="mb-1.5 px-1 text-caption font-semibold uppercase tracking-wider text-zinc-500">
+                input
+              </div>
               <Button
-                variant={mode === "mirror" ? "gold" : "default"}
-                onClick={() => setViewMode("mirror")}
-                className="flex-1"
+                variant={pad ? "gold" : "default"}
+                onClick={() => {
+                  setPad((p) => !p);
+                  setMoreOpen(false);
+                }}
+                className="w-full"
               >
-                <SquareTerminal className="h-4 w-4" /> mirror
-              </Button>
-              <Button
-                variant={mode === "read" ? "gold" : "default"}
-                onClick={() => setViewMode("read")}
-                className="flex-1"
-              >
-                <WrapText className="h-4 w-4" /> read
+                <Keyboard className="h-4 w-4" /> special keys {pad ? "on" : "off"}
               </Button>
             </div>
-          </div>
+          )}
+          {!isAgent && (
+            <div>
+              <div className="mb-1.5 px-1 text-caption font-semibold uppercase tracking-wider text-zinc-500">
+                display
+              </div>
+              <div className="flex gap-2">
+                <Button
+                  variant={mode === "mirror" ? "gold" : "default"}
+                  onClick={() => setViewMode("mirror")}
+                  className="flex-1"
+                >
+                  <SquareTerminal className="h-4 w-4" /> mirror
+                </Button>
+                <Button
+                  variant={mode === "read" ? "gold" : "default"}
+                  onClick={() => setViewMode("read")}
+                  className="flex-1"
+                >
+                  <WrapText className="h-4 w-4" /> read
+                </Button>
+              </div>
+            </div>
+          )}
           <div>
             <div className="mb-1.5 px-1 text-caption font-semibold uppercase tracking-wider text-zinc-500">
               font size
@@ -479,7 +589,7 @@ export function Pane({
                 <AArrowDown className="h-4 w-4" />
               </Button>
               <div className="flex-1 text-center text-body tabular-nums text-zinc-300">
-                {mode === "read" ? readFont : mirrorFont}px
+                {isAgent || mode === "read" ? readFont : mirrorFont}px
               </div>
               <Button size="icon" variant="default" onClick={() => bumpFont(1)} aria-label="bigger">
                 <AArrowUp className="h-4 w-4" />

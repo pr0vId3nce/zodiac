@@ -105,6 +105,7 @@ export default function App() {
           state={astrolabe.state}
           watch={astrolabe.watch}
           commands={astrolabe.commands}
+          perms={astrolabe.perms[pane.id] ?? []}
           onBack={() => nav(null)}
           // A completed swipe already revealed Herd live behind the Pane —
           // jump Nav straight to "herd" instead of letting it replay its

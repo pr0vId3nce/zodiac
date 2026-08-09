@@ -3,7 +3,7 @@
 // data lives here.
 
 import { useEffect, useSyncExternalStore } from "react";
-import type { CommandSets, ServerMsg, SessionState } from "./types";
+import type { CommandSets, PermRequest, ServerMsg, SessionState } from "./types";
 import { getToken } from "./auth";
 
 export interface AstrolabeState {
@@ -13,6 +13,9 @@ export interface AstrolabeState {
   session: string;
   state: SessionState | null;
   commands: CommandSets;
+  /** Pending tool-permission requests per agent pane id, oldest first —
+      seeded by hello, kept live by perm_req/perm_resolved. */
+  perms: Record<number, PermRequest[]>;
   /** The bridge closed the connection specifically for a missing/wrong
       token (close code 4001) — worth telling apart from "still trying to
       reconnect," since retrying with the same bad token forever looks
@@ -31,6 +34,7 @@ class AstrolabeClient {
     session: "main",
     state: null,
     commands: {},
+    perms: {},
     unauthorized: false,
   };
   private listeners = new Set<() => void>();
@@ -63,18 +67,57 @@ class AstrolabeClient {
         return;
       }
       switch (msg.t) {
-        case "hello":
+        case "hello": {
+          // The hello's perm list is authoritative — it replaces anything
+          // held across a reconnect (requests settled while we were away).
+          const perms: Record<number, PermRequest[]> = {};
+          for (const { pane, req } of msg.perms ?? []) {
+            (perms[pane] ??= []).push(req);
+          }
           this.set({
             session: msg.session,
             state: msg.state ?? this.snapshot.state,
             link: msg.link,
             watch: msg.watch,
             commands: msg.commands,
+            perms,
           });
           break;
+        }
         case "state":
           this.set({ state: msg.state });
           break;
+        case "perm_req": {
+          const cur = this.snapshot.perms[msg.pane] ?? [];
+          // attach replays re-send pending requests — dedup on request_id
+          const perms = {
+            ...this.snapshot.perms,
+            [msg.pane]: [
+              ...cur.filter((r) => r.request_id !== msg.req.request_id),
+              msg.req,
+            ],
+          };
+          this.set({ perms });
+          break;
+        }
+        case "perm_resolved": {
+          const cur = this.snapshot.perms[msg.pane];
+          if (!cur) break;
+          const left = cur.filter((r) => r.request_id !== msg.request_id);
+          const perms = { ...this.snapshot.perms };
+          if (left.length) perms[msg.pane] = left;
+          else delete perms[msg.pane];
+          this.set({ perms });
+          break;
+        }
+        case "pane_closed": {
+          if (this.snapshot.perms[msg.pane]) {
+            const perms = { ...this.snapshot.perms };
+            delete perms[msg.pane];
+            this.set({ perms });
+          }
+          break;
+        }
         case "link":
           this.set({ link: msg.up });
           break;
@@ -123,6 +166,12 @@ class AstrolabeClient {
       with a note once the dialog closes (wired server-side). */
   answer(pane: number, option: number, note?: string) {
     this.send({ t: "answer", pane, option, note });
+  }
+
+  /** Allow/Deny an agent pane's pending tool-permission request. The note
+      becomes the deny message, or a follow-up prompt on allow. */
+  perm(pane: number, requestId: string, behavior: "allow" | "deny", note?: string) {
+    this.send({ t: "perm", pane, request_id: requestId, behavior, note });
   }
 }
 

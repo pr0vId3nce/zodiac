@@ -43,7 +43,7 @@ say "new CLI sanity (state includes kind fields)"
 say "open an agent pane (pi, local model) so state carries kind=agent"
 "$NEW" -s "$SESSION" new --agent pi
 sleep 1
-"$NEW" -s "$SESSION" ls --json | grep -q '"kind":"agent"'
+"$NEW" -s "$SESSION" ls --json | grep -q '"kind": "agent"'
 
 say "OLD client parses new state (unknown fields ignored)"
 "$OLD" -s "$SESSION" ls

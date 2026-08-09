@@ -17,6 +17,8 @@ export const T_READ_SCREEN = 12;
 export const T_WATCH = 14;
 export const T_SEEN = 17;
 export const T_TRANSCRIPT_REQ = 18;
+export const T_AGENT_INPUT = 19;
+export const T_PERM_RESP = 34;
 // server -> client
 export const T_REPLAY = 21;
 export const T_OUTPUT = 22;
@@ -26,11 +28,16 @@ export const T_SERVER_EXIT = 25;
 export const T_STATE = 26;
 export const T_SCREEN = 27;
 export const T_TRANSCRIPT = 31;
+export const T_AGENT_EVENT = 32;
+export const T_PERM_REQ = 33;
 
 export interface PaneState {
   index: number;
   id: number;
   name: string;
+  /** "pty" (a shell/TUI under the VT engine) or "agent" (structured NDJSON
+      pane, ADR 0002). Missing from an old server's state = "pty". */
+  kind?: string;
   title: string;
   status: string; // working | idle | done | needs_input
   agent: string | null;
@@ -57,6 +64,29 @@ export interface SessionState {
   pairing_token?: string;
 }
 
+/** T_PERM_REQ payload: one pending tool-permission request from an agent
+    pane (claude's can_use_tool, ADR 0002). The server-side inbox is
+    authoritative — requests persist until answered or expired (10 min =
+    deny) and are re-sent on watch/attach. */
+export interface PermRequest {
+  request_id: string;
+  tool_name: string;
+  display_name?: string | null;
+  /** The tool input as the agent sent it (raw JSON value). */
+  input: unknown;
+  /** Milliseconds this request has been pending (for UI countdowns, and
+      for telling a live request from an attach-replay re-send). */
+  age_ms: number;
+}
+
+/** T_PERM_RESP payload. */
+export interface PermResponse {
+  request_id: string;
+  behavior: "allow" | "deny";
+  /** Optional message shown to the agent on deny. */
+  message?: string;
+}
+
 // Must match (or exceed) the zodiac server's RING_CAP (src/pane.rs) — a
 // smaller cap here silently truncates the scrollback every client sees.
 const RING_CAP = 6 * 1024 * 1024;
@@ -78,6 +108,9 @@ const WATCH_PROBE_MS = 6000;
  *   screen(pane, text)         poll-mode plain-text screen (only when changed)
  *   pane_closed(pane)
  *   watch(supported: boolean)  resolved once per connection
+ *   agent_event(pane, lines)   NDJSON transcript lines for an agent pane
+ *                              (watch replay = the whole ring at once)
+ *   perm_req(pane, req)        pending tool-permission request (agent pane)
  */
 export class ZodiacLink extends EventEmitter {
   socketPath: string;
@@ -144,6 +177,19 @@ export class ZodiacLink extends EventEmitter {
   prompt(pane: number, text: string) {
     this.send(T_INPUT, pane, Buffer.from(text, "utf8"));
     setTimeout(() => this.send(T_INPUT, pane, Buffer.from("\r")), 200);
+  }
+
+  /** One user prompt for an agent pane (`kind == "agent"`): text goes out
+      verbatim as T_AGENT_INPUT — the server wraps it in the agent's native
+      input envelope, so no keystroke pacing and no newline wiring. An old
+      server silently ignores the frame. */
+  agentInput(pane: number, text: string) {
+    this.send(T_AGENT_INPUT, pane, Buffer.from(text, "utf8"));
+  }
+
+  /** Answer a pending T_PERM_REQ. Old servers silently ignore this. */
+  permResponse(pane: number, resp: PermResponse) {
+    this.send(T_PERM_RESP, pane, Buffer.from(JSON.stringify(resp), "utf8"));
   }
 
   readScreen(pane: number) {
@@ -374,6 +420,25 @@ export class ZodiacLink extends EventEmitter {
           this.pendingTranscripts.set(pane, []);
           const json = data.toString("utf8");
           for (const w of waiters) w(json);
+        }
+        break;
+      }
+      case T_AGENT_EVENT: {
+        // One or more newline-joined NDJSON lines: live traffic is one line
+        // per frame, a watch/attach replay is the pane's whole transcript
+        // ring in a single frame. Consumers get lines, never raw bytes.
+        const lines = data.toString("utf8").split("\n").filter((l) => l.trim());
+        if (lines.length) this.emit("agent_event", pane, lines);
+        break;
+      }
+      case T_PERM_REQ: {
+        try {
+          const req = JSON.parse(data.toString("utf8")) as PermRequest;
+          if (typeof req.request_id === "string" && typeof req.tool_name === "string") {
+            this.emit("perm_req", pane, req);
+          }
+        } catch {
+          /* malformed permission frame — skip */
         }
         break;
       }

@@ -24,7 +24,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { execFileSync } from "node:child_process";
 import { WebSocketServer, WebSocket } from "ws";
-import { ZodiacLink, type SessionState } from "./zodiac.ts";
+import { ZodiacLink, type PaneState, type PermRequest, type SessionState } from "./zodiac.ts";
 import { parseQuestion, type PaneQuestion } from "./question.ts";
 import { scanCommands } from "./commands.ts";
 import { Apns, stateDir } from "./apns.ts";
@@ -232,14 +232,129 @@ function maybePush(
 /** The parsed question dialog per needs_input pane, merged into the state
     web clients see (publicState) and into push payloads. Entries live from
     the needs_input transition until the pane leaves that status, is
-    answered through /api/answer or the WS `answer` action, or closes. */
+    answered through /api/answer or the WS `answer` action, or closes.
+    PTY panes only — agent panes never go through the screen scraper (their
+    permission asks arrive structured, see `perms` below). */
 const questions = new Map<number, PaneQuestion>();
+
+// ------------------------------------------------------- agent permissions
+
+/** Pending tool-permission requests per agent pane (T_PERM_REQ, ADR 0002),
+    keyed pane id → request_id, insertion-ordered (oldest first). The zodiac
+    server's inbox is authoritative — this cache only exists so a phone that
+    connects mid-request still gets the card (hello carries it) and so the
+    push fires once per request. Entries clear on zodiac_perm_resolved (the
+    event stream carries resolution, wherever it was answered), pane close,
+    or link drop — the server re-sends still-pending ones on reconnect. */
+const perms = new Map<number, Map<string, PermRequest>>();
+
+function pendingPerms(): { pane: number; req: PermRequest }[] {
+  const out: { pane: number; req: PermRequest }[] = [];
+  for (const [pane, m] of perms) for (const req of m.values()) out.push({ pane, req });
+  return out;
+}
+
+function dropPerm(pane: number, requestId: string): boolean {
+  const m = perms.get(pane);
+  if (!m?.delete(requestId)) return false;
+  if (m.size === 0) perms.delete(pane);
+  return true;
+}
+
+function paneOf(id: number): PaneState | undefined {
+  return link.state?.panes.find((p) => p.id === id);
+}
+
+/** One line of a tool input for a push body: `{"file_path":"/x","content":…}`
+    squeezed to something a lock screen can show. */
+function compactInput(input: unknown): string | undefined {
+  try {
+    const s = JSON.stringify(input);
+    if (!s || s === "{}" || s === "null") return undefined;
+    return s.length > 200 ? `${s.slice(0, 199)}…` : s;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Answer a pending permission request. The zodiac server settles it and
+    broadcasts a zodiac_perm_resolved transcript line (which clears every
+    client's card, including other bridges'); dropping the cache entry and
+    broadcasting here too just makes the answering phone snappy while that
+    echo is in flight. An allow with a note sends the note on as a normal
+    agent prompt; on deny it rides inside the response as the message the
+    agent sees. */
+function resolvePerm(paneId: number, requestId: string, behavior: "allow" | "deny", note: string) {
+  link.permResponse(paneId, {
+    request_id: requestId,
+    behavior,
+    ...(behavior === "deny" && note ? { message: note } : {}),
+  });
+  dropPerm(paneId, requestId);
+  broadcast({ t: "perm_resolved", pane: paneId, request_id: requestId, how: behavior });
+  if (behavior === "allow" && note) link.agentInput(paneId, note);
+}
+
+link.on("perm_req", (pane: number, req: PermRequest) => {
+  const m = perms.get(pane) ?? new Map<string, PermRequest>();
+  const fresh = !m.has(req.request_id);
+  m.set(req.request_id, req);
+  perms.set(pane, m);
+  broadcast({ t: "perm_req", pane, req });
+  // Push once per request: an attach/reconnect replay re-sends still-pending
+  // requests with their real age, so anything older than the cooldown either
+  // already fired or predates this bridge process — don't re-alert.
+  if (fresh && req.age_ms < PUSH_COOLDOWN_MS) {
+    const p = paneOf(pane);
+    const name = p?.name ?? `pane ${pane}`;
+    const label = req.display_name || req.tool_name;
+    const badge = link.state?.panes.filter((x) => x.status === "needs_input").length ?? 0;
+    maybePush(
+      "perm",
+      { id: pane, name },
+      {
+        title: `${name} asks: ${label}`,
+        body: PUSH_REDACT ? "wants to use a tool" : compactInput(req.input),
+      },
+      badge,
+      // Rides as question/options so the iOS shell's numbered notification
+      // actions (AGENT_PROMPT_2) work — they land on /api/answer, which
+      // maps 1/2 to allow/deny for agent panes below.
+      PUSH_REDACT ? undefined : { question: `allow ${label}?`, options: ["Allow", "Deny"] },
+    );
+  }
+});
+
+link.on("agent_event", (pane: number, lines: string[]) => {
+  // Permission lifecycle rides the event stream as synthetic
+  // zodiac_perm_resolved lines — track those even when nobody is viewing,
+  // so the inbox (and every phone's cards) stays honest no matter where a
+  // request was answered (desktop TUI, another phone, server timeout).
+  for (const line of lines) {
+    if (!line.includes('"zodiac_perm_resolved"')) continue;
+    try {
+      const ev = JSON.parse(line);
+      if (ev?.type === "zodiac_perm_resolved" && typeof ev.request_id === "string") {
+        dropPerm(pane, ev.request_id);
+        broadcast({
+          t: "perm_resolved",
+          pane,
+          request_id: ev.request_id,
+          how: typeof ev.how === "string" ? ev.how : "",
+        });
+      }
+    } catch {
+      /* a transcript line that merely mentions the marker — not ours */
+    }
+  }
+  if (paneViewed(pane)) broadcast({ t: "agent_event", pane, lines }, pane);
+});
 
 /** needs_input just fired: grab the pane's rendered screen, parse the
     dialog out of it, then push with the real question + options and let
     web clients re-render with answer buttons. Falls back to the old
     subtitle/recap body when there's nothing parseable on screen. */
-async function captureQuestion(p: { id: number; name: string; subtitle?: string; recap?: string; title?: string }, badge: number) {
+async function captureQuestion(p: { id: number; name: string; subtitle?: string | null; recap?: string | null; title?: string | null }, badge: number) {
   let q: PaneQuestion | null = null;
   if (link.up) {
     const screen = await link.readScreenOnce(p.id);
@@ -284,6 +399,18 @@ function answerPane(paneId: number, option: number, note: string) {
   broadcast({ t: "state", state: publicState(link.state) });
 }
 
+/** The agent-pane flavor of answerPane, for the same numbered entry points
+    (iOS notification actions, /api/answer, the WS `answer` action): typed
+    digits mean nothing to a structured pane, so 1/2 map to Allow/Deny on
+    the pane's OLDEST pending permission request. Anything else — no pending
+    request, option 3+ — is a no-op that reports false. */
+function answerAgentPane(paneId: number, option: number, note: string): boolean {
+  const first = perms.get(paneId)?.values().next().value;
+  if (!first || (option !== 1 && option !== 2)) return false;
+  resolvePerm(paneId, first.request_id, option === 1 ? "allow" : "deny", note);
+  return true;
+}
+
 link.on("state", (state: SessionState) => {
   // Keep the persisted token when talking to an old server that predates
   // the field — nulling it here would reopen the unauthenticated window.
@@ -301,7 +428,22 @@ link.on("state", (state: SessionState) => {
     }
     if (!prev || prev === p.status) continue;
     if (p.status === "needs_input") {
-      captureQuestion(p, badge).catch(() => {});
+      if (p.kind === "agent") {
+        // Structured pane: NEVER screen-scrape — permission asks arrive as
+        // T_PERM_REQ (which already pushed, with real tool names). Anything
+        // else that flips an agent pane to needs_input gets the plain
+        // notification body.
+        if (!perms.get(p.id)?.size) {
+          maybePush("needs_input", p, {
+            title: `${p.name} needs you`,
+            body: PUSH_REDACT
+              ? "needs your attention"
+              : p.subtitle || p.recap || p.title || undefined,
+          }, badge);
+        }
+      } else {
+        captureQuestion(p, badge).catch(() => {});
+      }
     } else if (p.status === "done" && prev === "working") {
       maybePush("done", p, {
         title: `${p.name} finished`,
@@ -328,10 +470,16 @@ link.on("link", (up: boolean) => {
     prevStatus = new Map();
     questions.clear();
     lastPush.clear();
+    // The server re-sends still-pending permissions on the next watch hello;
+    // anything not re-sent was settled (or belongs to a dead process).
+    perms.clear();
   }
 });
 
-link.on("pane_closed", (pane: number) => questions.delete(pane));
+link.on("pane_closed", (pane: number) => {
+  questions.delete(pane);
+  perms.delete(pane);
+});
 
 // ------------------------------------------------------------------- web side
 
@@ -450,7 +598,11 @@ function onClientMessage(c: Client, raw: string) {
           // user opened flips to idle instead of staying green until it's
           // focused on the desktop someday.
           if (link.up) link.seen(c.viewing);
-          if (link.watchSupported) {
+          if (paneOf(c.viewing)?.kind === "agent") {
+            // Agent panes have no pty ring: history comes from
+            // /api/transcript, live lines follow as `agent_event`
+            // broadcasts now that the pane counts as viewed.
+          } else if (link.watchSupported) {
             sendJson(c, {
               t: "replay",
               pane: c.viewing,
@@ -480,7 +632,11 @@ function onClientMessage(c: Client, raw: string) {
       }
       case "prompt": {
         if (paneExists(msg.pane) && typeof msg.text === "string") {
-          link.prompt(msg.pane, msg.text);
+          // Agent panes take the prompt structurally (T_AGENT_INPUT, text
+          // verbatim — the web client skips its newline wiring for them);
+          // pty panes keep typed keystrokes + Enter.
+          if (paneOf(msg.pane)?.kind === "agent") link.agentInput(msg.pane, msg.text);
+          else link.prompt(msg.pane, msg.text);
         }
         break;
       }
@@ -489,7 +645,28 @@ function onClientMessage(c: Client, raw: string) {
           paneExists(msg.pane) &&
           Number.isInteger(msg.option) && msg.option >= 1 && msg.option <= 9
         ) {
-          answerPane(msg.pane, msg.option, typeof msg.note === "string" ? msg.note.trim() : "");
+          const note = typeof msg.note === "string" ? msg.note.trim() : "";
+          if (paneOf(msg.pane)?.kind === "agent") {
+            answerAgentPane(msg.pane, msg.option, note);
+          } else {
+            answerPane(msg.pane, msg.option, note);
+          }
+        }
+        break;
+      }
+      case "perm": {
+        // Allow/Deny from a phone's permission card → T_PERM_RESP.
+        if (
+          paneExists(msg.pane) &&
+          typeof msg.request_id === "string" && msg.request_id.length <= 256 &&
+          (msg.behavior === "allow" || msg.behavior === "deny")
+        ) {
+          resolvePerm(
+            msg.pane,
+            msg.request_id,
+            msg.behavior,
+            typeof msg.note === "string" ? msg.note.trim() : "",
+          );
         }
         break;
       }
@@ -647,7 +824,8 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
         return true;
       }
       const text = body.text.replace(/\s+$/, "");
-      link.prompt(pane.id, wireNewlines(pane.agent, text));
+      if (pane.kind === "agent") link.agentInput(pane.id, text);
+      else link.prompt(pane.id, wireNewlines(pane.agent, text));
       json(res, 200, { ok: true });
       return true;
     }
@@ -671,7 +849,15 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
         json(res, 404, { error: "no such pane" });
         return true;
       }
-      answerPane(pane.id, body.option, typeof body.note === "string" ? body.note.trim() : "");
+      const note = typeof body.note === "string" ? body.note.trim() : "";
+      if (pane.kind === "agent") {
+        if (!answerAgentPane(pane.id, body.option, note)) {
+          json(res, 409, { error: "no pending permission request" });
+          return true;
+        }
+      } else {
+        answerPane(pane.id, body.option, note);
+      }
       json(res, 200, { ok: true });
       return true;
     }
@@ -793,6 +979,9 @@ wss.on("connection", (ws, req) => {
     link: link.up,
     watch: link.watchSupported,
     commands: commandsCache,
+    // Pending agent-pane permission requests, so a phone that connects
+    // mid-request still shows the card (live ones arrive as `perm_req`).
+    perms: pendingPerms(),
   });
   ws.on("message", (raw) => onClientMessage(c, raw.toString()));
   ws.on("close", () => {

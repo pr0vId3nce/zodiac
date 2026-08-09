@@ -263,11 +263,13 @@ time + latency, `softbuffer` CPU fallback yes/no. Target = Linux only for v1.
 
 ### Tasks
 
-- [ ] **3.1 Extract `client_core`** from `client.rs`: socket IO + frame decode,
+- [x] **3.1 Extract `client_core`** from `client.rs`: socket IO + frame decode,
       attach/replay, per-pane client-side engine, input encoding, gfx snapshot
       tracking. Move-only, gated by goldens + a scripted TUI smoke check.
-- [ ] **3.2 Workspace split**: `zodiac` (server + TUI), `zodiac-gui`, `vendor/vt100`.
-      One atomic commit, announced (concurrent sessions rebase).
+      *(a2156f0: src/client_core.rs, 588 lines; term.rs keeps only TermView.)*
+- [x] **3.2 Workspace split**: `zodiac` (server + TUI + lib), `zodiac-gui`,
+      `vendor/vt100` (path dep, excluded from lints). One atomic commit,
+      announced (concurrent sessions rebase). *(85ea522)*
 - [ ] **3.3 Grid renderer**: monospace, full SGR, cursor shapes, damage-driven
       redraw, present-on-demand.
 - [ ] **3.4 Input**: keyboard → existing legacy encoder from `client_core`; mouse per
@@ -279,8 +281,11 @@ time + latency, `softbuffer` CPU fallback yes/no. Target = Linux only for v1.
 - [ ] **3.6 Chrome parity, minimal**: reuse `kitty.rs`'s RGBA card/sparkline/mascot
       renderer as textures; tabs/status as text.
 - [ ] **3.7 Perf + a week of daily driving.**
-- [ ] **(during S3) Write ADR 0005** — child capability advertisement (Phase 4
+- [x] **(during S3) Write ADR 0005** — child capability advertisement (Phase 4
       design; it constrains the GUI blit path, so decide on paper now).
+      *(decisions/0005-capability-advertisement.md; ADR 0004 accepted from the
+      S3 measurements: 13.3 ms pathological full-redraw at 120x50 on the
+      Renoir iGPU, Wayland+Vulkan window verified, softbuffer fallback yes.)*
 
 ### Exit criteria
 

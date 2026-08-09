@@ -1,0 +1,8 @@
+@chunk   32: title_state=Unknown agent=Some("pi") stall=None spinner(any)=false spinner(claude)=false bells=0
+@chunk   64: title_state=Unknown agent=Some("pi") stall=None spinner(any)=false spinner(claude)=false bells=0
+@chunk   97: title_state=Unknown agent=Some("pi") stall=None spinner(any)=false spinner(claude)=false bells=0
+@chunk  129: title_state=Unknown agent=Some("pi") stall=None spinner(any)=false spinner(claude)=false bells=0
+@chunk  161: title_state=Unknown agent=Some("pi") stall=None spinner(any)=false spinner(claude)=false bells=0
+@chunk  194: title_state=Unknown agent=Some("pi") stall=None spinner(any)=false spinner(claude)=false bells=0
+@chunk  226: title_state=Unknown agent=Some("pi") stall=None spinner(any)=false spinner(claude)=false bells=0
+@chunk  258: title_state=Unknown agent=Some("pi") stall=None spinner(any)=false spinner(claude)=false bells=0

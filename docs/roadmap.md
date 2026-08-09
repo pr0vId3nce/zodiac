@@ -34,7 +34,7 @@ over real recordings.
       dep. Length-prefixed chunks `{millis u32, kind u8 (bytes|resize), payload}` —
       exact bytes, NOT asciicast (which lossily re-encodes; `GfxSplitter` needs the
       real stream). Default 50×120.
-- [ ] **0.3 Corpus capture** into `tests/corpus/` + `MANIFEST` (pinned app versions):
+- [x] **0.3 Corpus capture** into `tests/corpus/` + `MANIFEST` (pinned app versions):
       `vim` (alt screen + scroll regions), `less` (quit/restore), `htop`, `fzf`, one
       kitty-graphics stream (`kitten icat`), then `claude` (incl. a permission prompt
       and spinner phase) and `pi`. Cap ~5 MiB/file. The claude/pi captures may need a
@@ -67,9 +67,9 @@ over real recordings.
 
 ### Exit criteria
 
-- [ ] ≥7 corpus recordings checked in with manifest. *(5 of 7 — claude.ptyrec and pi.ptyrec need a human at the keyboard; see MANIFEST.)*
+- [x] ≥7 corpus recordings checked in with manifest. *(7 of 7 — claude/pi captured via a scripted PTY driver over real sessions; see MANIFEST.)*
 - [x] `scripts/check.sh` green and deterministic 3 runs in a row.
-- [x] Screen, TermEvent, Gfx, QueryScanner goldens exist and pass; heuristic goldens populate when the claude/pi recordings land.
+- [x] Screen, TermEvent, Gfx, QueryScanner goldens exist and pass; heuristic goldens populated over the claude/pi recordings.
 - [x] Working tree clean; 2026 host emission shipped in the TUI client.
 
 ### Non-goals

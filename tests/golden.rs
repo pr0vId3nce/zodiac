@@ -168,7 +168,7 @@ macro_rules! golden {
     };
 }
 
-golden!(vim, less, fzf, htop);
+golden!(vim, less, fzf, htop, claude, pi);
 
 /// The graphics recording goes through the same replay; the vt100 layer
 /// only sees what's left after vte drops the APC (GfxSplitter handling is
@@ -182,7 +182,7 @@ fn timg_kitty() {
 /// isn't replayed is a silent coverage hole.
 #[test]
 fn corpus_fully_covered() {
-    let covered = ["vim", "less", "fzf", "htop", "timg-kitty"];
+    let covered = ["vim", "less", "fzf", "htop", "timg-kitty", "claude", "pi"];
     for entry in std::fs::read_dir(corpus_dir()).unwrap() {
         let path = entry.unwrap().path();
         if path.extension().is_some_and(|e| e == "ptyrec") {

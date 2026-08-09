@@ -11,8 +11,10 @@ less.ptyrec           less 704                   paging, search highlight, alt-s
 fzf.ptyrec            fzf 0.74.1                 fullscreen redraws, live filtering, cursor movement
 htop.ptyrec           htop 3.5.2 (nixpkgs)       heavy SGR color, meters, full-screen refresh
 timg-kitty.ptyrec     timg 1.6.3 (-pk, f=100)    kitty graphics APC transmit+display, terminal probes (CSI 16t, DA1, DSR, >q)
+claude.ptyrec         claude 2.1.226             trust dialog, Write-tool permission prompt, spinner phase, tool result, Ctrl-C exit
+pi.ptyrec             pi 0.84.1 (qwen3.6 local)  streamed reply, braille Working... status footer, model line, Ctrl-D exit
 #
-# Flagged follow-ups (need a human at the keyboard; record via:
-#   cargo build --bin ptyrec && ./target/debug/ptyrec -o tests/corpus/<name>.ptyrec -- <cmd>):
-#   claude.ptyrec  — claude TUI: include a tool-permission prompt and a spinner phase
-#   pi.ptyrec      — pi session: include its footer/status line while working
+# claude/pi captured via a scripted expect-style PTY driver feeding ptyrec's
+# stdin (session bytes are a real session; only the typist was scripted).
+# Terminal-identity env (KITTY_*, TERM_PROGRAM, ...) stripped so agents see
+# plain xterm-256color — pi otherwise floods kitty-graphics retransmits.

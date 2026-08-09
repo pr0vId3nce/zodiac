@@ -1,0 +1,8 @@
+@chunk   14: title_state=Working agent=Some("claude") stall=None spinner(any)=false spinner(claude)=false bells=0
+@chunk   29: title_state=Working agent=Some("claude") stall=None spinner(any)=false spinner(claude)=false bells=0
+@chunk   44: title_state=Working agent=Some("claude") stall=None spinner(any)=false spinner(claude)=false bells=0
+@chunk   59: title_state=Working agent=Some("claude") stall=None spinner(any)=false spinner(claude)=false bells=0
+@chunk   73: title_state=Working agent=Some("claude") stall=None spinner(any)=false spinner(claude)=false bells=0
+@chunk   88: title_state=Working agent=Some("claude") stall=None spinner(any)=false spinner(claude)=false bells=0
+@chunk  103: title_state=Idle agent=Some("claude") stall=None spinner(any)=false spinner(claude)=false bells=0
+@chunk  117: title_state=Unknown agent=None stall=None spinner(any)=false spinner(claude)=false bells=0

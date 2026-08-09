@@ -315,7 +315,7 @@ keyboard, animation, or placeholders (Phase 4). No astrolabe changes.
 
 ### Tasks
 
-- [ ] **4.1 Capability authority** (per ADR 0005, written in Phase 3). Recommended
+- [x] **4.1 Capability authority** (per ADR 0005, written in Phase 3). Recommended
       shape: **the server is the capability authority.** Children keep
       `TERM=xterm-256color`; the server answers the kitty APC probe (`a=q`)
       positively — `GfxEngine.active` already gates exactly this — and degradation
@@ -323,14 +323,16 @@ keyboard, animation, or placeholders (Phase 4). No astrolabe changes.
       (settings) controls what's advertised; changes apply to newly probed apps only
       (documented limitation). No per-pane TERM switching; panes outliving clients
       stops mattering because advertisement never depended on the attached client.
-- [ ] **4.2 Animation**: accept `a=f`/`a=a` (drop the ENOTSUP), frames under the
+- [x] **4.2 Animation**: accept `a=f`/`a=a` (drop the ENOTSUP), frames under the
       existing 64 MiB/pane quota; GUI plays, TUI renders frame 0. Server stores,
-      client times playback — the server never schedules frames.
-- [ ] **4.3 Unicode placeholders (`U=1`)**: placeholder-cell → placement mapping in
+      client times playback — the server never schedules frames. *(2cb5d4a
+      server: frames, playback state, T_GFX_FRAME relay, SnapAnim; GUI
+      playback in the Phase 4 GUI commit.)*
+- [x] **4.3 Unicode placeholders (`U=1`)**: placeholder-cell → placement mapping in
       `GfxEngine` + `GfxSnapshot`; GUI renders; TUI on kitty hosts may re-emit
       (kitty resolves placeholders itself — verify, else fallback cells). Unblocks
       yazi/mdcat-style TUIs.
-- [ ] **4.4 Kitty keyboard protocol**: per-pane CSI `>`/`<`/`=` flag stack in the
+- [x] **4.4 Kitty keyboard protocol**: per-pane CSI `>`/`<`/`=` flag stack in the
       engine; GUI synthesizes full CSI-u (Ctrl+Shift disambiguation, finally); TUI
       translates only if the host supports it (one-shot probe), else a documented
       downgrade table with a per-pane kill switch.
@@ -338,8 +340,11 @@ keyboard, animation, or placeholders (Phase 4). No astrolabe changes.
       panes stay monospace.
 - [ ] **4.6 Drag-and-drop**: winit `DroppedFile` on an agent pane → paths into
       `T_AGENT_INPUT` (content attachment → icebox).
-- [ ] **4.7 OSC 52 write-through**: Phase 1's clipboard event → GUI clipboard
-      (`arboard`) behind the Phase 2 permission inbox.
+- [x] **4.7 OSC 52 write-through**: Phase 1's clipboard event → GUI clipboard
+      (`arboard`) behind a gate (`clipboard_write`, default off). *(c56e8e3
+      server/TUI; GUI arboard write in the Phase 4 GUI commit. The
+      interactive per-write inbox prompt is iceboxed — the opt-in setting is
+      the v1 gate.)*
 
 ### Exit criteria
 

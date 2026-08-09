@@ -19,3 +19,9 @@ roadmap task in a future phase — never slipping it into the current one.
 - IRM insert mode (CSI 4 h) — reset is consumed, set still logs as unhandled.
 - Focus reporting (DECSET 1004) passthrough to clients.
 - DECALN (ESC # 8) screen alignment test.
+- Interactive per-write OSC 52 permission prompt (v1 gate is the
+  `clipboard_write` opt-in setting; routing each write through the Phase 2
+  inbox modal is the richer follow-up).
+- Kitty Unicode-placeholder diacritic row/col decoding (v1 handles the
+  contiguous rectangular-block common case; the full combining-mark scheme
+  for arbitrary tile placement is deferred).

@@ -59,6 +59,8 @@ const TEXT_SETTINGS_START: usize = 27;
 /// same bindings the bottom bar hints at (hideable there).
 const CONTROLS: &[(&str, &str)] = &[
     ("Alt+N", "new pane"),
+    ("Alt+A", "new agent pane"),
+    ("Alt+⇧A", "new pi pane"),
     ("Alt+W", "close pane"),
     ("Alt+R", "rename pane"),
     ("Alt+⇧R", "restore agents"),
@@ -427,9 +429,179 @@ struct OuterGeom {
     offy: u16,
 }
 
+/// Transcript entry roles for an agent pane (`kind == "agent"`).
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum ARole {
+    User,
+    Assistant,
+    Tool,
+    Error,
+}
+
+/// Client-side view state for one agent pane: the parsed transcript, the
+/// streaming tail, pending permission requests, and the prompt editor.
+#[derive(Default)]
+struct AgentUi {
+    log: Vec<(ARole, String)>,
+    /// Assistant text still streaming in (shown at the transcript tail
+    /// until the completed block replaces it).
+    stream: String,
+    /// A thinking block is open — shown as a dim marker, never as text.
+    thinking: bool,
+    /// Wrapped-line offset from the bottom; 0 = follow the tail.
+    scroll: usize,
+    perms: Vec<PermRequest>,
+    input: String,
+    cursor: usize, // char index into `input`
+}
+
+impl AgentUi {
+    /// Fold one agent-native NDJSON line (ADR 0002) into the transcript.
+    /// Handles both claude stream-json and pi rpc shapes; unknown types
+    /// are ignored — the event stream only ever grows.
+    fn apply_line(&mut self, v: &serde_json::Value) {
+        let s = |v: &serde_json::Value, k: &str| -> Option<String> {
+            v.get(k).and_then(|x| x.as_str()).map(str::to_string)
+        };
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("zodiac_user") => {
+                if let Some(t) = s(v, "text") {
+                    self.log.push((ARole::User, t));
+                }
+            }
+            Some("assistant") => {
+                let blocks = v
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array());
+                for b in blocks.into_iter().flatten() {
+                    match b.get("type").and_then(|t| t.as_str()) {
+                        Some("text") => {
+                            if let Some(t) = s(b, "text") {
+                                self.log.push((ARole::Assistant, t));
+                            }
+                            // The completed block replaces the partial.
+                            self.stream.clear();
+                            self.thinking = false;
+                        }
+                        Some("tool_use") => {
+                            let name = s(b, "name").unwrap_or_else(|| "tool".into());
+                            let arg = b.get("input").map(tool_compact).unwrap_or_default();
+                            self.log.push((ARole::Tool, format!("{name}({arg})")));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            Some("stream_event") => {
+                let Some(ev) = v.get("event") else { return };
+                match ev.get("type").and_then(|t| t.as_str()) {
+                    Some("content_block_start") => {
+                        self.thinking = ev
+                            .get("content_block")
+                            .and_then(|b| b.get("type"))
+                            .and_then(|t| t.as_str())
+                            == Some("thinking");
+                    }
+                    Some("content_block_delta") => {
+                        let Some(d) = ev.get("delta") else { return };
+                        match d.get("type").and_then(|t| t.as_str()) {
+                            Some("text_delta") => {
+                                if let Some(t) = d.get("text").and_then(|t| t.as_str()) {
+                                    self.stream.push_str(t);
+                                }
+                                self.thinking = false;
+                            }
+                            Some("thinking_delta") => self.thinking = true,
+                            _ => {}
+                        }
+                    }
+                    Some("message_stop") => {
+                        self.stream.clear();
+                        self.thinking = false;
+                    }
+                    _ => {}
+                }
+            }
+            Some("result") => {
+                if v.get("is_error").and_then(|e| e.as_bool()) == Some(true) {
+                    let msg = s(v, "result").unwrap_or_else(|| "turn failed".into());
+                    self.log.push((ARole::Error, msg));
+                }
+                self.stream.clear();
+                self.thinking = false;
+            }
+            Some("zodiac_perm_resolved") => {
+                if let Some(rid) = s(v, "request_id") {
+                    self.perms.retain(|p| p.request_id != rid);
+                }
+            }
+            // pi rpc shapes (ADR 0002).
+            Some("message_end") => {
+                let Some(m) = v.get("message") else { return };
+                if m.get("role").and_then(|r| r.as_str()) != Some("assistant") {
+                    return;
+                }
+                for b in m
+                    .get("content")
+                    .and_then(|c| c.as_array())
+                    .into_iter()
+                    .flatten()
+                {
+                    if b.get("type").and_then(|t| t.as_str()) == Some("text") {
+                        if let Some(t) = s(b, "text") {
+                            self.log.push((ARole::Assistant, t));
+                        }
+                    }
+                }
+                self.stream.clear();
+                self.thinking = false;
+            }
+            Some("message_update") => {
+                let Some(ev) = v.get("assistantMessageEvent") else {
+                    return;
+                };
+                if ev.get("type").and_then(|t| t.as_str()) == Some("text_delta") {
+                    if let Some(t) = ev.get("delta").and_then(|d| d.as_str()) {
+                        self.stream.push_str(t);
+                    }
+                }
+            }
+            Some("turn_end") | Some("agent_end") => {
+                self.stream.clear();
+                self.thinking = false;
+            }
+            _ => {}
+        }
+    }
+}
+
+/// A tool call's first input value, compacted to one short run for the
+/// transcript's "⏺ Tool(…)" line — `Bash({"command":"ls"})` reads as
+/// `Bash(ls)`.
+fn tool_compact(input: &serde_json::Value) -> String {
+    let first = match input {
+        serde_json::Value::Object(m) => match m.values().next() {
+            Some(v) => v,
+            None => return String::new(),
+        },
+        v => v,
+    };
+    let text = match first {
+        serde_json::Value::String(s) => s.clone(),
+        v => v.to_string(),
+    };
+    truncate(&text.replace(['\n', '\r'], " "), 48)
+}
+
 struct CPane {
     id: u64,
     name: String,
+    /// "pty" or "agent" — mirrors `PaneState.kind`. Synced from T_STATE and
+    /// inferred from agent frames arriving for the pane, whichever is first.
+    kind: String,
+    /// Transcript/permission/input state; only meaningful for agent panes.
+    agent: AgentUi,
     parser: vt100::Parser,
     scroll: usize,
     last_output: Option<Instant>,
@@ -465,6 +637,8 @@ impl CPane {
         Self {
             id,
             name,
+            kind: "pty".into(),
+            agent: AgentUi::default(),
             parser: vt100::Parser::new(rows, cols, CLIENT_SCROLLBACK),
             scroll: 0,
             last_output: None,
@@ -482,6 +656,10 @@ impl CPane {
             images: std::collections::HashMap::new(),
             partial: std::collections::HashMap::new(),
         }
+    }
+
+    fn is_agent(&self) -> bool {
+        self.kind == "agent"
     }
 
     fn resize(&mut self, rows: u16, cols: u16) {
@@ -1054,6 +1232,13 @@ impl App {
         self.panes.iter_mut().find(|p| p.id == id)
     }
 
+    /// Server-side metadata for a pane, from the last T_STATE snapshot.
+    fn state_pane(&self, id: u64) -> Option<&PaneState> {
+        self.home_state
+            .as_ref()
+            .and_then(|s| s.panes.iter().find(|sp| sp.id == id))
+    }
+
     fn focus(&mut self, idx: usize) {
         self.active = idx;
         if let Some(p) = self.panes.get_mut(idx) {
@@ -1101,6 +1286,24 @@ impl App {
                                 break;
                             }
                             self.chat_input.push(if c == '\n' { ' ' } else { c });
+                        }
+                        return;
+                    }
+                    // Agent panes: paste lands in the prompt editor, never
+                    // on the wire as raw pty bytes.
+                    let home = self.home;
+                    if let Some(p) = self
+                        .panes
+                        .get_mut(self.active)
+                        .filter(|p| p.is_agent() && !home)
+                    {
+                        for c in text.chars() {
+                            if p.agent.input.chars().count() >= 4000 {
+                                break;
+                            }
+                            let at = char_byte(&p.agent.input, p.agent.cursor);
+                            p.agent.input.insert(at, if c == '\n' { ' ' } else { c });
+                            p.agent.cursor += 1;
                         }
                         return;
                     }
@@ -1209,6 +1412,11 @@ impl App {
                     self.selection = None;
                     return;
                 }
+                // No cell grid to select from in the transcript view.
+                if self.panes.get(self.active).is_some_and(|p| p.is_agent()) {
+                    self.selection = None;
+                    return;
+                }
                 let cell = self.main_cell(m.column, m.row);
                 self.selection = Some(Sel {
                     pane: self.active_id().unwrap_or(0),
@@ -1246,6 +1454,15 @@ impl App {
                 let Some(p) = self.panes.get_mut(self.active) else {
                     return;
                 };
+                if p.is_agent() {
+                    // Wheel scrolls the transcript, clamped at draw time.
+                    p.agent.scroll = if up {
+                        p.agent.scroll.saturating_add(3)
+                    } else {
+                        p.agent.scroll.saturating_sub(3)
+                    };
+                    return;
+                }
                 if p.parser.screen().alternate_screen() {
                     // Fullscreen app without mouse reporting: emulate the
                     // terminals' "alternate scroll" — wheel becomes arrows.
@@ -1424,6 +1641,11 @@ impl App {
                                     .insert(p.id, (p.status.clone(), now, false));
                             }
                         }
+                        // The state broadcast is where a pane's kind lives;
+                        // the transcript view keys off the local mirror.
+                        if let Some(cp) = self.panes.iter_mut().find(|cp| cp.id == p.id) {
+                            cp.kind = p.kind.clone();
+                        }
                     }
                     self.home_state = Some(s);
                 }
@@ -1517,6 +1739,49 @@ impl App {
                         self.active -= 1;
                     } else if i == self.active {
                         self.focus(self.active);
+                    }
+                }
+            }
+            T_AGENT_EVENT => {
+                // One or more NDJSON lines for pane f.id — attach replay
+                // sends the whole ring as one multi-line frame, live events
+                // one line each. Only live events count as fresh activity.
+                let active_id = self.active_id();
+                let replay = f.data.contains(&b'\n');
+                let text = String::from_utf8_lossy(&f.data).into_owned();
+                if let Some(p) = self.pane_by_id(f.id) {
+                    p.kind = "agent".into(); // may beat the first T_STATE
+                    for line in text.split('\n').filter(|l| !l.trim().is_empty()) {
+                        if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
+                            p.agent.apply_line(&v);
+                        }
+                    }
+                    if Some(f.id) != active_id && !replay {
+                        p.activity = true;
+                    }
+                }
+            }
+            T_PERM_REQ => {
+                if let Ok(pr) = serde_json::from_slice::<PermRequest>(&f.data) {
+                    let active_id = self.active_id();
+                    let session = self.session.clone();
+                    if let Some(p) = self.pane_by_id(f.id) {
+                        p.kind = "agent".into();
+                        // Fresh request, not the server's attach re-broadcast
+                        // of one that has been waiting a while already.
+                        let fresh = pr.age_ms < 3000;
+                        if !p.agent.perms.iter().any(|x| x.request_id == pr.request_id) {
+                            p.agent.perms.push(pr);
+                        }
+                        if Some(f.id) != active_id && !p.attention {
+                            p.attention = true;
+                            if fresh {
+                                notify(
+                                    &format!("{} asks permission", p.name),
+                                    &format!("zodiac session '{session}'"),
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -1831,6 +2096,14 @@ impl App {
                     self.send(T_NEW_PANE, 0, &[]);
                     return;
                 }
+                // Alt+A: a structured agent pane (ADR 0002) — claude by
+                // default, pi on Alt+⇧A (same shift pattern as Alt+R/⇧R).
+                KeyCode::Char(c @ ('a' | 'A')) => {
+                    let agent = if c == 'A' || shift { "pi" } else { "claude" };
+                    let req = format!(r#"{{"kind":"agent","agent":"{agent}"}}"#);
+                    self.send(T_NEW_PANE, 0, req.as_bytes());
+                    return;
+                }
                 KeyCode::Char('w') | KeyCode::Char('W') => {
                     if let Some(id) = self.active_id() {
                         self.send(T_CLOSE_PANE, id, &[]);
@@ -1920,6 +2193,15 @@ impl App {
             }
         }
 
+        // Agent panes: keys drive the transcript + prompt editor, never raw
+        // pty bytes — nothing below this line may emit T_INPUT for them.
+        if self.panes.get(self.active).is_some_and(|p| p.is_agent()) {
+            if !self.home {
+                self.handle_agent_key(key);
+            }
+            return;
+        }
+
         if shift && !alt && !ctrl {
             match key.code {
                 KeyCode::PageUp => {
@@ -1951,6 +2233,82 @@ impl App {
         }
     }
 
+    /// Keys for an active agent pane: the permission modal takes y/n while
+    /// open; PageUp/PageDown/Home/End scroll the transcript; everything
+    /// else edits the one-line prompt (Enter sends it as T_AGENT_INPUT).
+    fn handle_agent_key(&mut self, key: KeyEvent) {
+        if key.modifiers.contains(KeyModifiers::ALT) {
+            return; // unbound Alt combos never type into the editor
+        }
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let half = (self.main_size.0 / 2).max(1) as usize;
+        let Some(p) = self.panes.get_mut(self.active) else {
+            return;
+        };
+        let id = p.id;
+        // The modal captures y/n for itself and lets the rest through to
+        // the editor — someone answering from the phone dismisses it too
+        // (zodiac_perm_resolved).
+        if let Some(rid) = p.agent.perms.first().map(|pr| pr.request_id.clone()) {
+            let behavior = match key.code {
+                KeyCode::Char('y') | KeyCode::Char('Y') if !ctrl => Some("allow"),
+                KeyCode::Char('n') | KeyCode::Char('N') if !ctrl => Some("deny"),
+                _ => None,
+            };
+            if let Some(behavior) = behavior {
+                p.agent.perms.retain(|pr| pr.request_id != rid);
+                let resp = serde_json::to_vec(&PermResponse {
+                    request_id: rid,
+                    behavior: behavior.into(),
+                    message: None,
+                })
+                .unwrap_or_default();
+                self.send(T_PERM_RESP, id, &resp);
+                return;
+            }
+        }
+        let mut submit: Option<String> = None;
+        match key.code {
+            KeyCode::PageUp => p.agent.scroll = p.agent.scroll.saturating_add(half),
+            KeyCode::PageDown => p.agent.scroll = p.agent.scroll.saturating_sub(half),
+            KeyCode::Home => p.agent.scroll = usize::MAX, // clamped at draw
+            KeyCode::End => p.agent.scroll = 0,
+            KeyCode::Enter => {
+                let text = p.agent.input.trim().to_string();
+                p.agent.input.clear();
+                p.agent.cursor = 0;
+                p.agent.scroll = 0;
+                if !text.is_empty() {
+                    submit = Some(text);
+                }
+            }
+            KeyCode::Esc => {
+                p.agent.input.clear();
+                p.agent.cursor = 0;
+            }
+            KeyCode::Backspace => {
+                if p.agent.cursor > 0 {
+                    let at = char_byte(&p.agent.input, p.agent.cursor - 1);
+                    p.agent.input.remove(at);
+                    p.agent.cursor -= 1;
+                }
+            }
+            KeyCode::Left => p.agent.cursor = p.agent.cursor.saturating_sub(1),
+            KeyCode::Right => {
+                p.agent.cursor = (p.agent.cursor + 1).min(p.agent.input.chars().count());
+            }
+            KeyCode::Char(c) if !ctrl && p.agent.input.chars().count() < 4000 => {
+                let at = char_byte(&p.agent.input, p.agent.cursor);
+                p.agent.input.insert(at, c);
+                p.agent.cursor += 1;
+            }
+            _ => {}
+        }
+        if let Some(text) = submit {
+            self.send(T_AGENT_INPUT, id, text.as_bytes());
+        }
+    }
+
     /// Whether the pane's agent is working right now, regardless of focus —
     /// the sidebar spinner shows on the active pane too. A braille title
     /// frame means working; "✳" is ambiguous: Claude Code's title spinner
@@ -1963,6 +2321,13 @@ impl App {
     /// programs — an ordinary TUI emits output forever.
     fn working(&self, i: usize) -> bool {
         let p = &self.panes[i];
+        // Agent panes have no pty to read tea leaves from — the server
+        // computes their status from the event stream.
+        if p.is_agent() {
+            return self
+                .state_pane(p.id)
+                .is_some_and(|sp| sp.status == "working");
+        }
         let title = p.parser.screen().title();
         let recent = p
             .last_output
@@ -3159,7 +3524,10 @@ impl App {
         self.sidebar_rect = sidebar;
         self.main_rect = main;
 
-        if let Some(p) = self.panes.get(self.active) {
+        if self.panes.get(self.active).is_some_and(|p| p.is_agent()) {
+            // Agent panes render the structured transcript, not a vt grid.
+            self.draw_agent(f, main);
+        } else if let Some(p) = self.panes.get(self.active) {
             let screen = p.parser.screen();
             f.render_widget(TermView { screen }, main);
             // Orb/aleph cursors hide the hardware cursor — the overlay (or
@@ -6385,6 +6753,262 @@ impl App {
         f.render_widget(Paragraph::new(lines), inner);
     }
 
+    /// The transcript view for an active agent pane (roadmap 2.4): role-
+    /// prefixed entries wrapped to the pane width, the streaming partial at
+    /// the tail, a one-line prompt editor at the bottom, and the permission
+    /// modal (2.5) floating over it all while a request is pending.
+    fn draw_agent(&mut self, f: &mut Frame, area: Rect) {
+        if area.width < 12 || area.height < 3 {
+            return;
+        }
+        let pal = self.palette();
+        let gold = crate::theme::color(pal.accent);
+        let fg = crate::theme::color(pal.fg);
+        let dim = crate::theme::color(pal.dim);
+        let faint = crate::theme::color(pal.faint);
+        let phosphor = crate::theme::color(pal.phosphor);
+        let idx = self.active;
+        let agent = self
+            .panes
+            .get(idx)
+            .and_then(|p| self.state_pane(p.id))
+            .and_then(|sp| sp.agent.clone());
+        // The assistant's voice carries its agent's color: claude ember,
+        // pi cool blue, anything else the theme brass.
+        let (mark, body) = match agent.as_deref() {
+            Some("claude") => (Color::Indexed(208), Color::Indexed(223)),
+            Some("pi") => (Color::Indexed(75), Color::Indexed(153)),
+            _ => (gold, fg),
+        };
+
+        let rows = area.height.saturating_sub(1) as usize; // last row = editor
+        let wrapw = area.width.saturating_sub(3).max(8) as usize;
+        let mut lines: Vec<Line<'static>> = Vec::new();
+        let p = &self.panes[idx];
+        let mut prev_tool = false;
+        for (role, text) in &p.agent.log {
+            let tool = *role == ARole::Tool;
+            if !lines.is_empty() && !(prev_tool && tool) {
+                lines.push(Line::default());
+            }
+            prev_tool = tool;
+            match role {
+                ARole::User => md_lines(
+                    &mut lines,
+                    text,
+                    wrapw,
+                    "❯ ",
+                    Style::default().fg(gold).bold(),
+                    Style::default().fg(fg),
+                    false,
+                ),
+                ARole::Assistant => md_lines(
+                    &mut lines,
+                    text,
+                    wrapw,
+                    "✦ ",
+                    Style::default().fg(mark).bold(),
+                    Style::default().fg(body),
+                    false,
+                ),
+                ARole::Tool => lines.push(Line::from(vec![
+                    Span::styled("⏺ ", Style::default().fg(dim)),
+                    Span::styled(truncate(text, wrapw), Style::default().fg(dim)),
+                ])),
+                ARole::Error => {
+                    for (i, l) in wrap_text(text, wrapw).into_iter().enumerate() {
+                        let head = if i == 0 {
+                            Span::styled("✗ ", Style::default().fg(Color::Indexed(203)).bold())
+                        } else {
+                            Span::raw("  ")
+                        };
+                        lines.push(Line::from(vec![
+                            head,
+                            Span::styled(l, Style::default().fg(Color::Indexed(203))),
+                        ]));
+                    }
+                }
+            }
+        }
+        if !p.agent.stream.is_empty() {
+            if !lines.is_empty() {
+                lines.push(Line::default());
+            }
+            md_lines(
+                &mut lines,
+                &p.agent.stream,
+                wrapw,
+                "✦ ",
+                Style::default().fg(mark).bold(),
+                Style::default().fg(body),
+                true,
+            );
+        } else if p.agent.thinking {
+            if !lines.is_empty() {
+                lines.push(Line::default());
+            }
+            lines.push(Line::from(Span::styled(
+                "✻ thinking…",
+                Style::default().fg(faint).italic(),
+            )));
+        }
+
+        // Auto-follow the tail unless scrolled up; clamp what a stale
+        // offset (or Home) asked for against what actually exists.
+        let max = lines.len().saturating_sub(rows);
+        let scroll = p.agent.scroll.min(max);
+        let input: Vec<char> = p.agent.input.chars().collect();
+        let cursor = p.agent.cursor.min(input.len());
+        let perm = p.agent.perms.first().cloned();
+        let nperms = p.agent.perms.len();
+        self.panes[idx].agent.scroll = scroll;
+
+        let end = lines.len() - scroll;
+        let start = end.saturating_sub(rows);
+        let shown = (end - start) as u16;
+        if shown > 0 {
+            f.render_widget(
+                Paragraph::new(lines[start..end].to_vec()),
+                Rect {
+                    x: area.x,
+                    y: area.y + rows as u16 - shown, // bottom-anchored
+                    width: area.width,
+                    height: shown,
+                },
+            );
+        }
+
+        // The prompt editor, pinned to the bottom row. Long input shows a
+        // window that keeps the cursor cell visible.
+        let budget = area.width.saturating_sub(4) as usize;
+        let win = cursor.saturating_sub(budget.saturating_sub(1));
+        let win_end = (win + budget).min(input.len());
+        let before: String = input[win..cursor].iter().collect();
+        let at: String = input
+            .get(cursor)
+            .map(|c| c.to_string())
+            .unwrap_or(" ".into());
+        let after: String = input[(cursor + 1).min(win_end)..win_end].iter().collect();
+        let mut spans = vec![
+            Span::styled("❯ ", Style::default().fg(phosphor).bold()),
+            Span::styled(before, Style::default().fg(fg)),
+            Span::styled(
+                at,
+                Style::default()
+                    .fg(phosphor)
+                    .add_modifier(Modifier::REVERSED),
+            ),
+            Span::styled(after, Style::default().fg(fg)),
+        ];
+        if input.is_empty() {
+            spans.push(Span::styled(
+                format!(
+                    " ask {}… (⏎ send · esc clear)",
+                    agent.as_deref().unwrap_or("the agent")
+                ),
+                Style::default().fg(faint),
+            ));
+        }
+        f.render_widget(
+            Paragraph::new(Line::from(spans)),
+            Rect {
+                x: area.x,
+                y: area.y + area.height - 1,
+                width: area.width,
+                height: 1,
+            },
+        );
+
+        if let Some(pr) = perm {
+            self.draw_perm_modal(f, area, &pr, nperms);
+        }
+    }
+
+    /// Centered modal for the oldest pending permission request (2.5):
+    /// tool identity, the input JSON clamped to ~10 lines, and y/n keys.
+    fn draw_perm_modal(&self, f: &mut Frame, area: Rect, pr: &PermRequest, total: usize) {
+        if area.width < 24 || area.height < 8 {
+            return;
+        }
+        const JSON_ROWS: usize = 10;
+        let json = serde_json::to_string_pretty(&pr.input).unwrap_or_else(|_| pr.input.to_string());
+        let mut jlines: Vec<String> = json.lines().map(str::to_string).collect();
+        if jlines.len() > JSON_ROWS {
+            let more = jlines.len() - JSON_ROWS;
+            jlines.truncate(JSON_ROWS);
+            jlines.push(format!("… ({more} more lines)"));
+        }
+        let w = 64.min(area.width.saturating_sub(4)).max(24);
+        let h = (jlines.len() as u16 + 6).min(area.height.saturating_sub(2));
+        let rect = Rect {
+            x: area.x + (area.width - w) / 2,
+            y: area.y + (area.height - h) / 3,
+            width: w,
+            height: h,
+        };
+        f.render_widget(Clear, rect);
+        let red = crate::theme::color(crate::theme::STATUS_TEXT[0]);
+        let title = if total > 1 {
+            format!(" ⚿ permission (1/{total}) ")
+        } else {
+            " ⚿ permission ".to_string()
+        };
+        let block = Block::bordered()
+            .border_type(BorderType::Rounded)
+            .title(title)
+            .title_style(Style::default().fg(red).bold())
+            .border_style(Style::default().fg(red));
+        let inner = block.inner(rect);
+        f.render_widget(block, rect);
+        let iw = inner.width as usize;
+        let mut out: Vec<Line> = Vec::new();
+        let mut head = vec![Span::styled(
+            truncate(&pr.tool_name, iw),
+            Style::default()
+                .fg(crate::theme::color(self.palette().gold_soft))
+                .bold(),
+        )];
+        if let Some(d) = pr.display_name.as_deref().filter(|d| *d != pr.tool_name) {
+            head.push(Span::styled(
+                format!(
+                    " · {}",
+                    truncate(d, iw.saturating_sub(pr.tool_name.chars().count() + 3))
+                ),
+                Style::default().fg(crate::theme::color(self.palette().dim)),
+            ));
+        }
+        out.push(Line::from(head));
+        out.push(Line::default());
+        for l in &jlines {
+            out.push(Line::from(Span::styled(
+                truncate(l, iw),
+                Style::default().fg(crate::theme::color(self.palette().dim)),
+            )));
+        }
+        out.push(Line::default());
+        out.push(
+            Line::from(vec![
+                Span::styled(
+                    "y",
+                    Style::default()
+                        .fg(crate::theme::color(self.palette().phosphor))
+                        .bold(),
+                ),
+                Span::styled(
+                    " allow · ",
+                    Style::default().fg(crate::theme::color(self.palette().faint)),
+                ),
+                Span::styled("n", Style::default().fg(red).bold()),
+                Span::styled(
+                    " deny",
+                    Style::default().fg(crate::theme::color(self.palette().faint)),
+                ),
+            ])
+            .alignment(Alignment::Center),
+        );
+        f.render_widget(Paragraph::new(out), inner);
+    }
+
     fn draw_status(&self, f: &mut Frame, area: Rect) {
         let mut spans: Vec<Span> = Vec::new();
         if self.home {
@@ -6456,9 +7080,14 @@ impl App {
                         Style::default().fg(Color::Magenta).bold(),
                     ));
                 }
-                if p.scroll > 0 {
+                let scroll = if p.is_agent() {
+                    p.agent.scroll
+                } else {
+                    p.scroll
+                };
+                if scroll > 0 {
                     spans.push(Span::styled(
-                        format!(" · SCROLL +{}", p.scroll),
+                        format!(" · SCROLL +{scroll}"),
                         Style::default().fg(Color::Yellow).bold(),
                     ));
                 }
@@ -6828,6 +7457,39 @@ fn wrap_md_runs(runs: &[(String, MdStyle)], width: usize) -> Vec<Vec<(String, Md
     lines
 }
 
+/// One transcript entry as prefixed, wrapped, md-styled lines: `pfx` on the
+/// first line (continuations get two spaces), `st` as the body style. With
+/// `cursor`, a plain "▌" block trails the text — the streaming tail marker.
+fn md_lines(
+    out: &mut Vec<Line<'static>>,
+    text: &str,
+    width: usize,
+    pfx: &'static str,
+    pst: Style,
+    st: Style,
+    cursor: bool,
+) {
+    let mut runs = parse_md(text);
+    if cursor {
+        // Plain style: an unterminated bold/code marker still streaming in
+        // shouldn't catch the cursor block.
+        runs.push(("▌".to_string(), MdStyle::default()));
+    }
+    for (i, line) in wrap_md_runs(&runs, width).into_iter().enumerate() {
+        let head = if i == 0 {
+            Span::styled(pfx, pst)
+        } else {
+            Span::raw("  ")
+        };
+        let mut spans = vec![head];
+        spans.extend(
+            line.into_iter()
+                .map(|(t, s)| Span::styled(t, apply_md(st, s))),
+        );
+        out.push(Line::from(spans));
+    }
+}
+
 /// Decode `send_keys`' space-separated token spec into raw bytes for
 /// `T_INPUT`: named keys (Esc, Enter, Tab, Backspace, Ctrl+<letter>), or
 /// anything else sent as its literal UTF-8 bytes.
@@ -6906,6 +7568,12 @@ fn truncate(s: &str, max: usize) -> String {
         let cut: String = s.chars().take(max.saturating_sub(1)).collect();
         format!("{cut}…")
     }
+}
+
+/// Byte offset of the `ci`-th char (== s.len() past the end) — the agent
+/// prompt editor tracks its cursor in chars.
+fn char_byte(s: &str, ci: usize) -> usize {
+    s.char_indices().nth(ci).map(|(i, _)| i).unwrap_or(s.len())
 }
 
 #[cfg(test)]
@@ -7009,6 +7677,154 @@ mod md_tests {
             "same-style words should merge into one span"
         );
         assert_eq!(lines[0][0].0, "plain plain plain");
+    }
+}
+
+#[cfg(test)]
+mod agent_tests {
+    use super::*;
+
+    fn line(ui: &mut AgentUi, s: &str) {
+        ui.apply_line(&serde_json::from_str(s).unwrap());
+    }
+
+    #[test]
+    fn claude_events_fold_into_the_transcript() {
+        let mut ui = AgentUi::default();
+        line(&mut ui, r#"{"type":"zodiac_user","text":"fix the bug"}"#);
+        line(
+            &mut ui,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"Looking"}}}"#,
+        );
+        line(
+            &mut ui,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":" now"}}}"#,
+        );
+        assert_eq!(ui.stream, "Looking now");
+        // The completed block replaces the partial, not duplicates it.
+        line(
+            &mut ui,
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Looking now"}]}}"#,
+        );
+        assert!(ui.stream.is_empty());
+        line(
+            &mut ui,
+            r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Bash","input":{"command":"ls -la"}}]}}"#,
+        );
+        line(
+            &mut ui,
+            r#"{"type":"result","is_error":false,"result":"ok"}"#,
+        );
+        assert_eq!(
+            ui.log,
+            vec![
+                (ARole::User, "fix the bug".to_string()),
+                (ARole::Assistant, "Looking now".to_string()),
+                (ARole::Tool, "Bash(ls -la)".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn thinking_marker_opens_and_closes() {
+        let mut ui = AgentUi::default();
+        line(
+            &mut ui,
+            r#"{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"thinking"}}}"#,
+        );
+        assert!(ui.thinking);
+        line(
+            &mut ui,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"text_delta","text":"hi"}}}"#,
+        );
+        assert!(!ui.thinking, "text streaming ends the thinking marker");
+        line(
+            &mut ui,
+            r#"{"type":"stream_event","event":{"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"…"}}}"#,
+        );
+        assert!(ui.thinking);
+        line(
+            &mut ui,
+            r#"{"type":"stream_event","event":{"type":"message_stop"}}"#,
+        );
+        assert!(!ui.thinking);
+        assert!(ui.stream.is_empty());
+    }
+
+    #[test]
+    fn errored_result_lands_red() {
+        let mut ui = AgentUi {
+            stream: "half a sente".into(),
+            ..Default::default()
+        };
+        line(
+            &mut ui,
+            r#"{"type":"result","is_error":true,"result":"API overloaded"}"#,
+        );
+        assert_eq!(ui.log, vec![(ARole::Error, "API overloaded".to_string())]);
+        assert!(ui.stream.is_empty(), "turn end clears the partial");
+    }
+
+    #[test]
+    fn perm_resolved_dismisses_the_request() {
+        let mut ui = AgentUi::default();
+        ui.perms.push(PermRequest {
+            request_id: "r1".into(),
+            tool_name: "Write".into(),
+            display_name: None,
+            input: serde_json::json!({"file_path": "/tmp/x"}),
+            age_ms: 0,
+        });
+        line(
+            &mut ui,
+            r#"{"type":"zodiac_perm_resolved","request_id":"r1","how":"phone"}"#,
+        );
+        assert!(ui.perms.is_empty());
+    }
+
+    #[test]
+    fn pi_events_stream_and_complete() {
+        let mut ui = AgentUi::default();
+        line(
+            &mut ui,
+            r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"par"}}"#,
+        );
+        line(
+            &mut ui,
+            r#"{"type":"message_update","assistantMessageEvent":{"type":"text_delta","delta":"tial"}}"#,
+        );
+        assert_eq!(ui.stream, "partial");
+        line(
+            &mut ui,
+            r#"{"type":"message_end","message":{"role":"assistant","content":[{"type":"text","text":"partial"}]}}"#,
+        );
+        assert!(ui.stream.is_empty());
+        assert_eq!(ui.log, vec![(ARole::Assistant, "partial".to_string())]);
+        // Unknown types are ignored silently.
+        line(&mut ui, r#"{"type":"toolcall_start","id":7}"#);
+        assert_eq!(ui.log.len(), 1);
+    }
+
+    #[test]
+    fn tool_compact_takes_the_first_value() {
+        assert_eq!(
+            tool_compact(&serde_json::json!({"command": "ls -la", "timeout": 5})),
+            "ls -la"
+        );
+        assert_eq!(tool_compact(&serde_json::json!({"count": 3})), "3");
+        assert_eq!(tool_compact(&serde_json::json!({})), "");
+        let long = "x".repeat(80);
+        assert_eq!(
+            tool_compact(&serde_json::json!({ "cmd": long }))
+                .chars()
+                .count(),
+            48
+        );
+        assert_eq!(
+            tool_compact(&serde_json::json!({"cmd": "a\nb"})),
+            "a b",
+            "newlines flatten for the one-liner"
+        );
     }
 }
 

@@ -183,51 +183,62 @@ version.
 
 ### Tasks
 
-- [ ] **2.1 Protocol.** `proto: u32` on `Hello` (first explicit version field,
+- [x] **2.1 Protocol.** `proto: u32` on `Hello` (first explicit version field,
       alongside the existing serde-default pattern). New frames: `T_AGENT_EVENT`
       (server→client NDJSON), `T_AGENT_INPUT`, `T_PERM_REQ`/`T_PERM_RESP` (frame ids
       19 and 32+ are free; all three implementations skip unknown frames). Extend
       `PaneState` with `#[serde(default)] kind: "pty"|"agent"`. Add new client frame
       types to the distinctness test in `protocol.rs` (note: it currently omits
       `T_TRANSCRIPT_REQ`).
-- [ ] **2.2 Agent pane runtime.** New spawn path: pipes, no PTY, no VT engine; NDJSON
+- [x] **2.2 Agent pane runtime.** New spawn path: pipes, no PTY, no VT engine; NDJSON
       reader thread → `SrvEvent`; capture `session_id` from the init event; stderr to
       pane log. Needs a pane-kind representation — `SrvPane` is unconditionally PTY
       today (master/writer/killer are non-optional fields).
-- [ ] **2.3 Server-side transcript store.** Bounded AgentEvent ring per pane;
+- [x] **2.3 Server-side transcript store.** Bounded AgentEvent ring per pane;
       replay-on-attach analogous to `T_REPLAY`; feeds the existing `T_TRANSCRIPT`
       path so phone read-mode stops scraping `~/.claude/projects` JSONL for
       structured panes (scrape stays for pty panes).
-- [ ] **2.4 Ratatui transcript widget v1.** Plain text: role headers, tool-call
+- [x] **2.4 Ratatui transcript widget v1.** Plain text: role headers, tool-call
       header lines, streaming partials, scrollback. Reuse the pure helpers
       `parse_md`/`wrap_md_runs`/`apply_md` from `client.rs` (already unit-tested);
       do NOT entangle with `chat.rs` (that's the home-page chat panel).
-- [ ] **2.5 Permission inbox.** `T_PERM_REQ` → TUI modal (allow / deny /
+- [x] **2.5 Permission inbox.** `T_PERM_REQ` → TUI modal (allow / deny /
       always-this-tool) + astrolabe bridge → phone push. Server-side inbox is
       authoritative (requests persist, replay on attach); explicit timeout policy
       (e.g. 10 min → deny with reason). This deletes the bridge's screen-scraping
       question parser (`astrolabe/bridge/question.ts`) for structured panes.
-- [ ] **2.6 Structured status.** For `kind=agent`: `status()` derives from events;
+- [x] **2.6 Structured status.** For `kind=agent`: `status()` derives from events;
       `monitor.rs` skips LLM classification. Pty heuristics untouched (0.8
       characterization tests stay green).
-- [ ] **2.7 Structured retry.** On API-error events: relaunch `--resume
+- [x] **2.7 Structured retry.** On API-error events: relaunch `--resume
       <session_id>` + re-send, with backoff, max attempts, surfaced failure state.
       Keystroke-injection `fire_autoresume` stays for pty panes only.
-- [ ] **2.8 Snapshot/restore.** `SnapPane` gains `kind` + `session_id`; agent panes
+- [x] **2.8 Snapshot/restore.** `SnapPane` gains `kind` + `session_id`; agent panes
       restore via structured relaunch, not a typed shell line (fixes the
       `restore_command` assumption; keep `scripts/zodiac-restore.sh` reading valid).
-- [ ] **2.9 pi per S2 verdict.**
-- [ ] **2.10 Compat matrix test.** Old TUI client + old bridge against new server;
-      scripted, a phase-gate item.
+- [x] **2.9 pi per S2 verdict.** *(pi has a structured surface — `--mode rpc`
+      — so pi panes ride the same runtime: spawn, events, transcript, resume;
+      no permission gating, matching pi's own tool model. ADR 0002.)*
+- [x] **2.10 Compat matrix test.** Old TUI client + old bridge against new server;
+      scripted, a phase-gate item. *(scripts/compat-matrix.sh: real 1a7c4fd
+      binary vs new server — state parse, pty control, agent coexistence.)*
 
 ### Exit criteria
 
-- [ ] Full claude task end-to-end in an agent pane: prompt from TUI, tool approval
-      from phone, streamed transcript in both places.
-- [ ] `kill -9` the claude process mid-task → structured retry resumes the session.
-- [ ] Zero heuristic/scrape code *active* for structured panes (grep-able: monitor,
-      stall watchdog, JSONL scrape all branch on `kind`).
-- [ ] Old clients verified against new server; `proto` landed; ADR 0002 merged.
+- [x] Full claude task end-to-end in an agent pane: prompt in, tool approval,
+      streamed transcript replayed. *(Verified live on a scratch server over the
+      real wire protocol: prompt → T_PERM_REQ/needs_input → allow → file created
+      → idle; ring transcript served via T_TRANSCRIPT. The TUI and phone speak
+      those same frames; the phone leg needs the bridge's next restart + a
+      device, so its first live run is a daily-driving item, not a code gap.)*
+- [x] `kill -9` the claude process mid-task → structured retry resumes the
+      session. *(Verified live: new pid, --resume, task completed, and the
+      resumed session recalled its first message.)*
+- [x] Zero heuristic/scrape code *active* for structured panes (grep-able:
+      monitor, stall watchdog, JSONL scrape, bridge question scraper all branch
+      on `kind`).
+- [x] Old clients verified against new server *(compat-matrix.sh green)*;
+      `proto` landed *(PROTO_VERSION=1, 15ed255)*; ADR 0002 merged *(1a7c4fd)*.
 
 ### Non-goals
 

@@ -49,6 +49,22 @@ pub struct SrvPane {
     /// to deserve that. RefCell: panes live on the single event-loop thread.
     agent_memo: std::cell::RefCell<Option<(Instant, Option<String>)>>,
     ssh_memo: std::cell::RefCell<Option<(Instant, Option<String>)>>,
+    /// When a spinner status line was last seen on screen — how a pi pane
+    /// reads as working (see `pi_working`).
+    busy_memo: std::cell::RefCell<Option<Instant>>,
+    /// Which transcript file this pane's session is, memoized like
+    /// `agent_memo`: resolving it walks the process table for the agent's
+    /// argv, and both the model name and the recap ask once a second. Keyed
+    /// by agent and cwd so swapping either invalidates it at once, rather
+    /// than describing the previous occupant for a second.
+    #[allow(clippy::type_complexity)]
+    transcript_memo: std::cell::RefCell<
+        Option<(Instant, (String, String), Option<(PathBuf, std::time::SystemTime)>)>,
+    >,
+    /// Transcript-derived recap, keyed by the transcript's mtime (see
+    /// `pi_recap`).
+    recap_mtime: std::cell::RefCell<Option<std::time::SystemTime>>,
+    recap_cache: std::cell::RefCell<Option<String>>,
     pub activity: bool,
     pub attention: bool,
     pub auto_resume: bool,
@@ -118,6 +134,16 @@ impl SrvPane {
         cmd.env_remove("CLAUDE_CODE_CHILD_SESSION");
         cmd.env_remove("CLAUDE_CODE_SSE_PORT");
         cmd.env_remove("CLAUDE_CODE_ENTRYPOINT");
+        // Same for pi: it marks child processes with PI_CODING_AGENT and
+        // hands its bash tool the live session's id/file/model. Inherited
+        // into a pane, those describe a *different* conversation — a pi
+        // started here would report its parent's session when asked.
+        cmd.env_remove("PI_CODING_AGENT");
+        cmd.env_remove("PI_SESSION_ID");
+        cmd.env_remove("PI_SESSION_FILE");
+        cmd.env_remove("PI_PROVIDER");
+        cmd.env_remove("PI_MODEL");
+        cmd.env_remove("PI_REASONING_LEVEL");
         if let Some(dir) = cwd
             .filter(|d| d.is_dir())
             .or_else(|| std::env::current_dir().ok())
@@ -172,6 +198,10 @@ impl SrvPane {
             last_title_working: None,
             agent_memo: std::cell::RefCell::new(None),
             ssh_memo: std::cell::RefCell::new(None),
+            busy_memo: std::cell::RefCell::new(None),
+            transcript_memo: std::cell::RefCell::new(None),
+            recap_mtime: std::cell::RefCell::new(None),
+            recap_cache: std::cell::RefCell::new(None),
             activity: false,
             attention: false,
             auto_resume: true,
@@ -348,7 +378,11 @@ impl SrvPane {
                         .last_title_working
                         .is_some_and(|t| t.elapsed() < std::time::Duration::from_secs(2))
             }
-            TitleState::Unknown => recent && self.agent().is_some(),
+            TitleState::Unknown => match self.agent().as_deref() {
+                Some("pi") => self.pi_working(),
+                Some(_) => recent,
+                None => false,
+            },
         };
         if working {
             "working"
@@ -492,37 +526,94 @@ impl SrvPane {
         }
     }
 
-    /// Claude Code's session ("chat") id for this pane: the newest transcript
-    /// file's stem in the project dir for the pane's cwd. `claude --resume
-    /// <id>` in that directory reopens exactly this conversation, which is
-    /// what makes the session snapshot restorable across a reboot.
+    /// The agent's session ("chat") id for this pane — the handle that
+    /// reopens exactly this conversation (`claude --resume <id>`, `pi
+    /// --session <id>`), which is what makes the session snapshot
+    /// restorable across a reboot. None for agents with no readable
+    /// session store.
     pub fn chat_id(&self) -> Option<String> {
+        let agent = self.agent()?;
         let cwd = self.cwd()?;
-        let (path, _) = self.claude_transcript(&cwd)?;
-        Some(path.file_stem()?.to_str()?.to_string())
+        let (path, _) = self.session_transcript(&agent, &cwd)?;
+        let stem = path.file_stem()?.to_str()?;
+        Some(match agent.as_str() {
+            // pi names transcripts `<timestamp>_<uuid>.jsonl`; the uuid is
+            // the session id its `--session` flag wants.
+            "pi" => stem.rsplit_once('_').map_or(stem, |(_, id)| id).to_string(),
+            _ => stem.to_string(),
+        })
     }
 
-    /// The pane's claude conversation as rendered entries, JSON-encoded
-    /// for `T_TRANSCRIPT` — the phone's read-mode history. The pty ring
-    /// can't provide this (Claude Code repaints its viewport in place, so
-    /// almost nothing ever scrolls into replayable history); the session
+    /// The pane's conversation as rendered entries, JSON-encoded for
+    /// `T_TRANSCRIPT` — the phone's read-mode history. The pty ring can't
+    /// provide this (agent TUIs repaint their viewport in place, so almost
+    /// nothing ever scrolls into replayable history); the session
     /// transcript on disk holds the whole conversation. Reads the file's
     /// last `TRANSCRIPT_TAIL` bytes and renders user text, assistant text,
-    /// and tool calls as one-liners. Empty when the pane isn't claude or
-    /// has no transcript yet.
+    /// and tool calls as one-liners. Empty when the pane's agent keeps no
+    /// transcript we can read, or hasn't written one yet.
     pub fn transcript_json(&self) -> Vec<u8> {
-        if self.agent().as_deref() != Some("claude") {
+        let Some(agent) = self.agent() else {
             return Vec::new();
-        }
+        };
         let Some(cwd) = self.cwd() else {
             return Vec::new();
         };
-        let Some((path, _)) = self.claude_transcript(&cwd) else {
+        let Some((path, _)) = self.session_transcript(&agent, &cwd) else {
             return Vec::new();
         };
-        transcript_entries(&path)
+        let entries = match agent.as_str() {
+            "claude" => transcript_entries(&path),
+            "pi" => pi_transcript_entries(&path),
+            _ => None,
+        };
+        entries
             .map(|e| serde_json::to_vec(&e).unwrap_or_default())
             .unwrap_or_default()
+    }
+
+    /// One line saying what the agent in this pane last did — the card
+    /// subtitle's fallback. Claude Code marks every response and tool call
+    /// with a "⏺" bullet, so its recap is scraped straight off the
+    /// already-rendered screen `text`. pi paints no such marker (every tool
+    /// renders its own way: `$ cargo build`, `find … in …`), so its recap
+    /// comes from the session transcript instead.
+    pub fn recap(&self, agent: Option<&str>, text: Option<&str>) -> Option<String> {
+        match agent {
+            Some("pi") => self.pi_recap(),
+            _ => text.and_then(recap_in),
+        }
+    }
+
+    /// pi's last conversation beat: the newest tool call or assistant
+    /// paragraph in its session transcript. Cached by the transcript's
+    /// mtime — the caller's cadence is one broadcast a second and an idle
+    /// pane's transcript doesn't move — and only the last `RECAP_TAIL`
+    /// bytes are parsed, which is several turns' worth.
+    fn pi_recap(&self) -> Option<String> {
+        let cwd = self.cwd()?;
+        let (path, mtime) = self.session_transcript("pi", &cwd)?;
+        if *self.recap_mtime.borrow() == Some(mtime) {
+            return self.recap_cache.borrow().clone();
+        }
+        let recap = self.pi_recap_uncached(&path);
+        *self.recap_mtime.borrow_mut() = Some(mtime);
+        *self.recap_cache.borrow_mut() = recap.clone();
+        recap
+    }
+
+    fn pi_recap_uncached(&self, path: &std::path::Path) -> Option<String> {
+        let entries = pi_entries_in_tail(path, RECAP_TAIL)?;
+        let last = entries
+            .iter()
+            .rev()
+            .find(|e| e.role != "user" && !e.text.trim().is_empty())?;
+        let one = last.text.split_whitespace().collect::<Vec<_>>().join(" ");
+        let mut out: String = one.chars().take(120).collect();
+        if one.chars().nth(120).is_some() {
+            out.push('…');
+        }
+        Some(out)
     }
 
     /// The short model name for whatever agent is running here, if any.
@@ -533,26 +624,28 @@ impl SrvPane {
 
     /// The model the agent in this pane currently runs, as a short display
     /// name (`fable 5`, `sonnet 4.5`) — only for agents whose model is
-    /// discoverable: claude via its session transcripts, opencode via its
-    /// on-screen footer.
+    /// discoverable: claude and pi via their session transcripts, opencode
+    /// via its on-screen footer.
     fn agent_model(&mut self, agent: &str) -> Option<String> {
         match agent {
-            "claude" => self.claude_model(),
+            "claude" | "pi" => self
+                .transcript_model(agent)
+                .or_else(|| if agent == "pi" { self.pi_footer_model() } else { None }),
             "opencode" => self.opencode_model(),
             _ => None,
         }
     }
 
-    /// Claude Code writes each assistant turn's `model` into its session
-    /// transcript under ~/.claude/projects/<munged-cwd>/. The newest .jsonl
-    /// for the pane's cwd is almost certainly this pane's session (multiple
-    /// claude panes in one directory share a project dir — the most recently
-    /// written one wins, which is right whenever they run the same model and
-    /// a harmless near-miss when they don't). Cached by file mtime so the
-    /// 1s auto-name tick doesn't re-read an idle transcript.
-    fn claude_model(&mut self) -> Option<String> {
+    /// Both claude and pi write each assistant turn's `model` into the
+    /// session transcript for the pane's cwd (~/.claude/projects/<munged>/
+    /// and ~/.pi/agent/sessions/--<munged>--/ respectively). The transcript
+    /// this pane owns is picked by `session_transcript`; multiple panes in
+    /// one directory share a folder, so the pick is a best effort that's
+    /// exact whenever argv or birth time gives it away. Cached by file
+    /// mtime so the 1s auto-name tick doesn't re-read an idle transcript.
+    fn transcript_model(&mut self, agent: &str) -> Option<String> {
         let cwd = self.cwd()?;
-        let (path, mtime) = self.claude_transcript(&cwd)?;
+        let (path, mtime) = self.session_transcript(agent, &cwd)?;
         if self.model_mtime == Some(mtime) {
             return self.model_name.clone();
         }
@@ -562,38 +655,55 @@ impl SrvPane {
         name
     }
 
-    /// The claude process serving this pane, with its argv — found among
+    /// The agent process serving this pane, with its argv — found among
     /// the shell's descendants, same match as agent detection.
-    fn claude_proc(&self) -> Option<(u32, Vec<String>)> {
+    fn agent_proc(&self, agent: &str) -> Option<(u32, Vec<String>)> {
         let root = self.pid?;
         descendant_procs(root).into_iter().find(|(_, args)| {
             args.iter()
                 .take(2)
-                .any(|a| a.rsplit('/').next() == Some("claude"))
+                .any(|a| a.rsplit('/').next() == Some(agent))
         })
     }
 
-    /// Which transcript is *this pane's* claude session? Two claude panes
-    /// in the same directory share a project folder, and "newest by mtime"
-    /// labels both panes with whichever session wrote last — wrong whenever
-    /// they run different models. Stronger signals first:
+    /// Which transcript is *this pane's* session? Two agent panes in the
+    /// same directory share a session folder, and "newest by mtime" labels
+    /// both panes with whichever session wrote last — wrong whenever they
+    /// run different models. Stronger signals first:
     ///
-    ///  1. `claude --resume <id>` carries the session id in argv — exact.
-    ///  2. A fresh `claude` creates its transcript within moments of the
+    ///  1. The session id in argv (`claude --resume <id>`, `pi --session
+    ///     <id>`) — exact.
+    ///  2. A fresh agent creates its transcript within moments of the
     ///     process starting — match file birth time to process start.
     ///  3. Otherwise (resume via the interactive picker, filesystems
     ///     without birth times): newest by mtime, the old near-miss.
-    fn claude_transcript(&self, cwd: &str) -> Option<(std::path::PathBuf, std::time::SystemTime)> {
-        let dir = claude_project_dir(cwd)?;
-        let proc = self.claude_proc();
-        if let Some((_, args)) = &proc {
-            if let Some(id) = resume_id(args) {
-                let path = dir.join(format!("{id}.jsonl"));
-                if let Ok(meta) = std::fs::metadata(&path) {
-                    if let Ok(mtime) = meta.modified() {
-                        return Some((path, mtime));
-                    }
-                }
+    fn session_transcript(
+        &self,
+        agent: &str,
+        cwd: &str,
+    ) -> Option<(std::path::PathBuf, std::time::SystemTime)> {
+        if let Some((t, key, v)) = self.transcript_memo.borrow().clone() {
+            if t.elapsed() < Duration::from_secs(2) && key.0 == agent && key.1 == cwd {
+                return v;
+            }
+        }
+        let v = self.resolve_transcript(agent, cwd);
+        let key = (agent.to_string(), cwd.to_string());
+        *self.transcript_memo.borrow_mut() = Some((Instant::now(), key, v.clone()));
+        v
+    }
+
+    fn resolve_transcript(
+        &self,
+        agent: &str,
+        cwd: &str,
+    ) -> Option<(std::path::PathBuf, std::time::SystemTime)> {
+        let proc = self.agent_proc(agent);
+        let args = proc.as_ref().map(|(_, a)| a.as_slice());
+        let dir = session_dir(agent, cwd, args)?;
+        if let Some(args) = args {
+            if let Some(hit) = session_arg_transcript(agent, &dir, args) {
+                return Some(hit);
             }
         }
         if let Some((pid, _)) = &proc {
@@ -604,6 +714,28 @@ impl SrvPane {
             }
         }
         newest_jsonl(&dir)
+    }
+
+    /// pi's footer carries `<model> • <thinking level>` at the bottom right
+    /// — the fallback when the session transcript is unavailable (`pi
+    /// --no-session`, or before the first assistant turn is written).
+    fn pi_footer_model(&self) -> Option<String> {
+        let tail = self.tail_text(3)?;
+        for line in tail.lines().rev() {
+            if let Some((left, _)) = line.rsplit_once('•') {
+                let id = left.split_whitespace().next_back()?;
+                let plausible = id.len() >= 3
+                    && id.chars().any(|c| c.is_ascii_digit())
+                    && id.chars().all(|c| {
+                        c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '/')
+                    });
+                if plausible {
+                    let id = id.rsplit('/').next().unwrap_or(id);
+                    return Some(short_model_name(id));
+                }
+            }
+        }
+        None
     }
 
     /// opencode shows `provider/model` in its TUI footer — parse it out of
@@ -701,27 +833,42 @@ impl SrvPane {
     /// is on screen: a bottom row led by a spinner glyph with the
     /// "esc to interrupt" suffix. Same visual signature the stall watchdog
     /// uses for the waiting phrase, minus the phrase.
+    /// Is a turn in flight? Both agents draw a braille spinner at the head
+    /// of a status line low on the screen. Claude Code always hangs an "esc
+    /// to interrupt" hint off it, and requiring that hint is what keeps a
+    /// pane merely *quoting* a spinner glyph from reading as busy.
+    ///
+    /// pi's line is usually bare — ` ⠏ Working...` — and only sometimes
+    /// carries a hint ("Esc to cancel" while retrying or compacting), so
+    /// there the leading spinner has to stand alone. That's a looser test,
+    /// and deliberately: for pi this only ever decides a status label,
+    /// while claude's stricter reading also arms the watchdog's keystrokes.
     pub fn thinking(&self) -> bool {
-        let screen = self.parser.screen();
-        let (rows, cols) = screen.size();
-        for r in rows.saturating_sub(STALL_ROWS)..rows {
-            let mut text = String::new();
-            for c in 0..cols {
-                if let Some(cell) = screen.cell(r, c) {
-                    for ch in cell.contents().chars() {
-                        if !ch.is_whitespace() {
-                            text.push(ch);
-                        }
-                    }
-                }
-            }
-            if text.contains("esctointerrupt")
-                && text.chars().next().is_some_and(is_spinner_char)
-            {
-                return true;
-            }
+        let hint: Option<&[&str]> = match self.agent().as_deref() {
+            Some("pi") => None,
+            _ => Some(&["esctointerrupt"]),
+        };
+        spinner_row(self.parser.screen(), hint)
+    }
+
+    /// Is pi mid-turn? Its terminal title carries no state (`π - <dir>`), so
+    /// the spinner line is the signal. That line blinks out for a moment
+    /// between a tool finishing and the next one starting, so a recent
+    /// sighting bridges the gap — the same job claude's `last_title_working`
+    /// does for its ✳ rest frames. Memoized rather than tracked in
+    /// `update()`: this scans rows, and `status()` runs once per broadcast
+    /// while `update()` runs on every pty chunk.
+    fn pi_working(&self) -> bool {
+        if self.thinking() {
+            *self.busy_memo.borrow_mut() = Some(Instant::now());
+            return true;
         }
-        false
+        self.busy_memo
+            .borrow()
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(2))
+            && self
+                .last_output
+                .is_some_and(|t| t.elapsed() < Duration::from_secs(2))
     }
 
     pub fn resize(&mut self, rows: u16, cols: u16) {
@@ -833,9 +980,43 @@ fn is_error_color(c: vt100::Color) -> bool {
     }
 }
 
-/// Claude Code's status-line spinner frames: ✳ or a braille pattern.
+/// Claude Code's status-line spinner frames: ✳ or a braille pattern. pi
+/// animates braille too, from its own frame list.
 fn is_spinner_char(c: char) -> bool {
     c == '✳' || ('\u{2800}'..='\u{28ff}').contains(&c)
+}
+
+/// Is there a spinner-led status line in the bottom rows? `hint`, when
+/// given, is a set of whitespace-stripped lowercase phrases of which the
+/// row must carry one — the "this is a live status line, not quoted text"
+/// evidence.
+fn spinner_row(screen: &vt100::Screen, hint: Option<&[&str]>) -> bool {
+    let (rows, cols) = screen.size();
+    for r in rows.saturating_sub(STALL_ROWS)..rows {
+        let mut text = String::new();
+        for c in 0..cols {
+            if let Some(cell) = screen.cell(r, c) {
+                for ch in cell.contents().chars() {
+                    if !ch.is_whitespace() {
+                        text.push(ch);
+                    }
+                }
+            }
+        }
+        if !text.chars().next().is_some_and(is_spinner_char) {
+            continue;
+        }
+        match hint {
+            None => return true,
+            Some(phrases) => {
+                let text = text.to_ascii_lowercase();
+                if phrases.iter().any(|p| text.contains(p)) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 /// Only the bottom rows are scanned — that's where Claude Code renders the
 /// error/status area; old conversation text scrolled above doesn't count.
@@ -844,7 +1025,18 @@ const STALL_COOLDOWN: Duration = Duration::from_secs(30);
 /// If the phrase never leaves the screen after an intervention, try again.
 const STALL_RETRY: Duration = Duration::from_secs(90);
 
-const AGENT_BINARIES: &[&str] = &["claude", "opencode", "codex", "aider", "gemini", "goose"];
+const AGENT_BINARIES: &[&str] =
+    &["claude", "pi", "opencode", "codex", "aider", "gemini", "goose"];
+
+/// Where an agent keeps the session transcripts for a working directory.
+/// `args` is the agent process's argv, for flags that move the directory.
+fn session_dir(agent: &str, cwd: &str, args: Option<&[String]>) -> Option<std::path::PathBuf> {
+    match agent {
+        "claude" => claude_project_dir(cwd),
+        "pi" => pi_session_dir(cwd, args),
+        _ => None,
+    }
+}
 
 /// Claude Code's project directory for a working directory:
 /// ~/.claude/projects/<munged>, where the name is the cwd with every
@@ -858,6 +1050,67 @@ fn claude_project_dir(cwd: &str) -> Option<std::path::PathBuf> {
     Some(std::path::Path::new(&home).join(".claude/projects").join(munged))
 }
 
+/// pi's session directory for a working directory. Its own rule (from
+/// `getDefaultSessionDirPath`): drop the leading slash, map `/`, `\` and
+/// `:` to `-`, wrap the result in `--`, and hang it under
+/// <agent dir>/sessions. Everything else in the path — dots, underscores —
+/// survives, unlike claude's flatten-everything munging.
+///
+/// `--session-dir` and `PI_CODING_AGENT_SESSION_DIR` name a directory
+/// outright (no per-project subdirectory); `PI_CODING_AGENT_DIR` moves the
+/// ~/.pi/agent root that the default is computed from.
+fn pi_session_dir(cwd: &str, args: Option<&[String]>) -> Option<std::path::PathBuf> {
+    if let Some(dir) = args.and_then(|a| flag_value(a, &["--session-dir"])) {
+        return Some(std::path::PathBuf::from(dir));
+    }
+    if let Ok(dir) = std::env::var("PI_CODING_AGENT_SESSION_DIR") {
+        if !dir.is_empty() {
+            return Some(std::path::PathBuf::from(dir));
+        }
+    }
+    let agent_dir = match std::env::var("PI_CODING_AGENT_DIR") {
+        Ok(d) if !d.is_empty() => std::path::PathBuf::from(d),
+        _ => std::path::Path::new(&std::env::var("HOME").ok()?).join(".pi/agent"),
+    };
+    Some(agent_dir.join("sessions").join(pi_project_name(cwd)))
+}
+
+/// The `--home-d3s-claude-zodiac--` directory name pi derives from a cwd.
+fn pi_project_name(cwd: &str) -> String {
+    let trimmed = cwd.strip_prefix('/').or_else(|| cwd.strip_prefix('\\')).unwrap_or(cwd);
+    let munged: String = trimmed
+        .chars()
+        .map(|c| if matches!(c, '/' | '\\' | ':') { '-' } else { c })
+        .collect();
+    format!("--{munged}--")
+}
+
+/// The transcript named outright by the agent's argv, if any: claude's
+/// `--resume <id>` is the file's stem, while pi's `--session`/`--fork` take
+/// a path or a *partial* uuid that has to be matched against the directory.
+fn session_arg_transcript(
+    agent: &str,
+    dir: &std::path::Path,
+    args: &[String],
+) -> Option<(std::path::PathBuf, std::time::SystemTime)> {
+    let path = match agent {
+        "claude" => dir.join(format!("{}.jsonl", resume_id(args)?)),
+        "pi" => {
+            let id = pi_session_arg(args)?;
+            // A path (absolute, relative, or just a file name) is used as
+            // given; anything else is a session id to look up.
+            if id.contains('/') || id.ends_with(".jsonl") {
+                std::path::PathBuf::from(id)
+            } else {
+                jsonl_matching(dir, id)?
+            }
+        }
+        _ => return None,
+    };
+    let mtime = std::fs::metadata(&path).ok()?.modified().ok()?;
+    Some((path, mtime))
+}
+
 /// The session id from a `claude --resume <id>` argv, if present.
 fn resume_id(args: &[String]) -> Option<&str> {
     let at = args.iter().position(|a| a == "--resume" || a == "-r")?;
@@ -865,6 +1118,45 @@ fn resume_id(args: &[String]) -> Option<&str> {
     // A session id, not a following flag or prompt text.
     (id.len() >= 8 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
         .then_some(id.as_str())
+}
+
+/// The session pi was pointed at: `--session`/`--session-id`/`--fork` take
+/// a session file path or a (possibly partial) uuid. `-r`/`--resume` is
+/// deliberately not read — in pi those take no argument and open the
+/// interactive picker, so the session isn't knowable from argv.
+fn pi_session_arg(args: &[String]) -> Option<&str> {
+    let v = flag_value(args, &["--session", "--session-id", "--fork"])?;
+    // Not a following flag, and long enough to be a session handle.
+    (v.len() >= 4 && !v.starts_with('-')).then_some(v)
+}
+
+/// The value after the first of `flags` present in argv.
+fn flag_value<'a>(args: &'a [String], flags: &[&str]) -> Option<&'a str> {
+    let at = args.iter().position(|a| flags.contains(&a.as_str()))?;
+    args.get(at + 1).map(String::as_str)
+}
+
+/// The transcript in `dir` whose file name carries `id` — how pi resolves
+/// a partial uuid, its file names being `<timestamp>_<uuid>.jsonl`. Newest
+/// by mtime wins if a short id somehow matches more than one.
+fn jsonl_matching(dir: &std::path::Path, id: &str) -> Option<std::path::PathBuf> {
+    let mut best: Option<(std::path::PathBuf, std::time::SystemTime)> = None;
+    for entry in std::fs::read_dir(dir).ok()?.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
+            continue;
+        }
+        if !path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains(id)) {
+            continue;
+        }
+        let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
+            continue;
+        };
+        if best.as_ref().is_none_or(|(_, t)| mtime > *t) {
+            best = Some((path, mtime));
+        }
+    }
+    best.map(|(p, _)| p)
 }
 
 /// The transcript whose creation time sits within a couple of minutes of
@@ -1022,6 +1314,92 @@ fn transcript_entries(path: &std::path::Path) -> Option<Vec<TranscriptEntry>> {
         out.drain(..out.len() - TRANSCRIPT_MAX_ENTRIES);
     }
     Some(out)
+}
+
+/// Parse a pi session transcript's tail into the same readable entries.
+/// pi's JSONL is a *tree* of typed entries rather than claude's flat log:
+/// conversation lines are `{"type":"message","message":{"role":…}}` with
+/// `text`, `thinking` and `toolCall` content blocks, interleaved with
+/// bookkeeping lines (`session`, `model_change`, `compaction`, …) that are
+/// skipped. Branching is ignored: the tail is read in file order, which is
+/// the order the user actually saw things happen.
+fn pi_transcript_entries(path: &std::path::Path) -> Option<Vec<TranscriptEntry>> {
+    pi_entries_in_tail(path, TRANSCRIPT_TAIL)
+}
+
+/// How much of a pi transcript the card recap parses — several turns, far
+/// cheaper than the full read-mode tail on a once-a-second path.
+const RECAP_TAIL: u64 = 64 * 1024;
+
+fn pi_entries_in_tail(path: &std::path::Path, tail: u64) -> Option<Vec<TranscriptEntry>> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut file = std::fs::File::open(path).ok()?;
+    let len = file.metadata().ok()?.len();
+    file.seek(SeekFrom::Start(len.saturating_sub(tail))).ok()?;
+    let mut bytes = Vec::new();
+    file.read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let mut out = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if i == 0 && len > tail {
+            continue; // the seek almost certainly landed mid-line
+        }
+        let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if v.get("type").and_then(|t| t.as_str()) != Some("message") {
+            continue;
+        }
+        let Some(message) = v.get("message") else { continue };
+        // "toolResult" is the third role pi uses; like claude's tool_result
+        // blocks it isn't part of the readable conversation flow.
+        let role: &'static str = match message.get("role").and_then(|r| r.as_str()) {
+            Some("user") => "user",
+            Some("assistant") => "assistant",
+            _ => continue,
+        };
+        match message.get("content") {
+            Some(serde_json::Value::String(s)) => push_pi_entry(&mut out, role, s),
+            Some(serde_json::Value::Array(blocks)) => {
+                for b in blocks {
+                    match b.get("type").and_then(|t| t.as_str()) {
+                        Some("text") => {
+                            if let Some(s) = b.get("text").and_then(|t| t.as_str()) {
+                                push_pi_entry(&mut out, role, s);
+                            }
+                        }
+                        Some("toolCall") => {
+                            let name =
+                                b.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
+                            out.push(TranscriptEntry {
+                                role: "tool",
+                                text: tool_line(name, b.get("arguments")),
+                            });
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if out.len() > TRANSCRIPT_MAX_ENTRIES {
+        out.drain(..out.len() - TRANSCRIPT_MAX_ENTRIES);
+    }
+    Some(out)
+}
+
+/// pi carries no harness markup on the user channel — what the transcript
+/// shows as a user turn is what the user typed.
+fn push_pi_entry(out: &mut Vec<TranscriptEntry>, role: &'static str, s: &str) {
+    let t = s.trim();
+    if t.is_empty() {
+        return;
+    }
+    out.push(TranscriptEntry {
+        role,
+        text: t.to_string(),
+    });
 }
 
 fn push_entry(out: &mut Vec<TranscriptEntry>, role: &'static str, s: &str) {
@@ -1622,6 +2000,53 @@ mod model_name_tests {
 }
 
 #[cfg(test)]
+mod pi_session_tests {
+    use super::{pi_project_name, pi_session_arg};
+
+    fn args(s: &str) -> Vec<String> {
+        s.split_whitespace().map(str::to_string).collect()
+    }
+
+    #[test]
+    fn project_name_keeps_everything_but_separators() {
+        // pi's own rule: drop the leading slash, map separators to `-`,
+        // wrap in `--`. Unlike claude's munging, dots and underscores live.
+        assert_eq!(pi_project_name("/home/d3s"), "--home-d3s--");
+        assert_eq!(
+            pi_project_name("/home/d3s/claude/zodiac"),
+            "--home-d3s-claude-zodiac--"
+        );
+        assert_eq!(
+            pi_project_name("/tmp/pi.test.dir/a_b.c"),
+            "--tmp-pi.test.dir-a_b.c--"
+        );
+        // Both the drive colon and its separator map, as they do in pi.
+        assert_eq!(pi_project_name("C:\\src\\app"), "--C--src-app--");
+    }
+
+    #[test]
+    fn session_arg_reads_the_flags_that_carry_one() {
+        assert_eq!(
+            pi_session_arg(&args("pi --session 019fe295-3523-7d14")),
+            Some("019fe295-3523-7d14")
+        );
+        assert_eq!(pi_session_arg(&args("pi --session-id abcd1234")), Some("abcd1234"));
+        assert_eq!(pi_session_arg(&args("pi --fork abcd1234")), Some("abcd1234"));
+        assert_eq!(
+            pi_session_arg(&args("pi --session /tmp/s/019f.jsonl")),
+            Some("/tmp/s/019f.jsonl")
+        );
+        // -r/--resume open pi's picker and take no argument, so argv says
+        // nothing about which session ends up loaded.
+        assert_eq!(pi_session_arg(&args("pi -r")), None);
+        assert_eq!(pi_session_arg(&args("pi --resume")), None);
+        assert_eq!(pi_session_arg(&args("pi --session --continue")), None);
+        assert_eq!(pi_session_arg(&args("pi --session")), None);
+        assert_eq!(pi_session_arg(&args("pi")), None);
+    }
+}
+
+#[cfg(test)]
 mod transcript_entry_tests {
     use super::transcript_entries;
 
@@ -1655,6 +2080,42 @@ mod transcript_entry_tests {
                 ("assistant", "Fixed."),
             ]
         );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn pi_entries_skip_bookkeeping_and_tool_results() {
+        use crate::pane::{model_from_transcript, pi_transcript_entries};
+        let dir = std::env::temp_dir().join("zodiac-pi-transcript-test");
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("session.jsonl");
+        std::fs::write(
+            &path,
+            concat!(
+                r#"{"type":"session","version":3,"id":"019f","cwd":"/src"}"#, "\n",
+                r#"{"type":"model_change","provider":"anthropic","modelId":"claude-opus-5"}"#, "\n",
+                r#"{"type":"message","message":{"role":"user","content":[{"type":"text","text":"fix the bug"}]}}"#, "\n",
+                r#"{"type":"message","message":{"role":"assistant","model":"claude-opus-5","content":[{"type":"thinking","thinking":"hmm"},{"type":"text","text":"On it."},{"type":"toolCall","id":"t1","name":"bash","arguments":{"command":"cargo   build\n--release"}}]}}"#, "\n",
+                r#"{"type":"message","message":{"role":"toolResult","toolCallId":"t1","content":[{"type":"text","text":"ok"}]}}"#, "\n",
+                r#"{"type":"thinking_level_change","thinkingLevel":"medium"}"#, "\n",
+                r#"{"type":"message","message":{"role":"assistant","content":[{"type":"text","text":"Fixed."}]}}"#, "\n",
+            ),
+        )
+        .unwrap();
+        let e = pi_transcript_entries(&path).unwrap();
+        let flat: Vec<(&str, &str)> =
+            e.iter().map(|x| (x.role, x.text.as_str())).collect();
+        assert_eq!(
+            flat,
+            vec![
+                ("user", "fix the bug"),
+                ("assistant", "On it."),
+                ("tool", "bash(cargo build --release)"),
+                ("assistant", "Fixed."),
+            ]
+        );
+        // The same file answers the model question.
+        assert_eq!(model_from_transcript(&path).as_deref(), Some("opus 5"));
         let _ = std::fs::remove_file(&path);
     }
 }

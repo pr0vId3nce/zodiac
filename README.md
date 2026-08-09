@@ -12,7 +12,7 @@ so switching costs nothing.
 Each pane spawns `$SHELL` as a login shell — your profile, prompt and PATH
 are rebuilt fresh even under the long-lived server — with
 `TERM=xterm-256color` and `COLORTERM=truecolor`. Run whatever agent you like
-inside it; zodiac recognizes claude, opencode, codex, aider, gemini and
+inside it; zodiac recognizes claude, pi, opencode, codex, aider, gemini and
 goose, and treats everything else as an ordinary shell.
 
 Also here: a phone UI over Tailscale ([astrolabe](astrolabe/README.md)), a
@@ -62,15 +62,15 @@ a "restored session" banner above the recovered scrollback. State lives in
 
 The server also writes `snapshot.json` next to that state every 60 s: session
 name, save time, and per pane its index, name, directory, the agent running
-there, that agent's model, and — for claude — the **chat id** of the
+there, that agent's model, and — for claude and pi — the **chat id** of the
 conversation on screen. At startup the previous file is kept as
 `snapshot.prev.json`, but only if it had agents in it, so restarting twice
 can't push the last useful snapshot out.
 
 **`Alt+Shift+R`** replays it. The overlay lists what the snapshot holds and
 `Enter` puts it back: each pane gets `cd <directory> && claude --resume <chat
-id>` typed in, so claude reopens the same conversation instead of a blank
-one. Other agents relaunch by name. Panes the snapshot had but this session
+id>` typed in (`pi --session <chat id>` for pi), so the agent reopens the
+same conversation instead of a blank one. Other agents relaunch by name. Panes the snapshot had but this session
 doesn't are opened first. Panes already running that agent, or with anything
 else in the foreground, are left alone — nothing gets typed into your vim,
 and pressing the key twice is harmless.
@@ -89,13 +89,15 @@ scripts/zodiac-restore.sh --from <file>  # a specific snapshot
 A new pane is named for its working directory (`zodiac`, not the whole path;
 `~` for home). Open something in it and the name follows: `nvim`, `htop`,
 `psql`. SSH into a box and it becomes the hostname. Start an agent and it
-becomes the agent — and for claude and opencode, the **model** that agent is
-currently using: `opus 5`, `sonnet 4.5`, `fable 5`.
+becomes the agent — and for claude, pi and opencode, the **model** that agent
+is currently using: `opus 5`, `sonnet 4.5`, `fable 5`.
 
 Priority runs agent (or its model) → ssh host → foreground app → directory,
-re-evaluated once a second. claude's model comes from its session transcript,
-so `/model` switches show up within a second; opencode's comes from the
-`provider/model` in its footer.
+re-evaluated once a second. claude's and pi's models come from their session
+transcripts, so a `/model` switch shows up within a second; pi falls back to
+the `<model> • <thinking>` in its footer when it runs without a session
+(`--no-session`), and opencode's comes from the `provider/model` in its own
+footer.
 
 `Alt+R` overrides all of it: a name you type is pinned until you clear it
 (empty rename un-pins and hands the name back to the automatic logic).
@@ -109,8 +111,8 @@ and its version (probed once via `--version`), uptime, working directory,
 live status, and — when a local model is configured — a short summary of what
 that pane is doing and its latest `⏺` transcript line.
 
-Status is one of **thinking** (Claude's `esc to interrupt` spinner is on
-screen), **working**, **finished**, **needs approval** (the pane rang the
+Status is one of **thinking** (an `esc to interrupt` spinner is on screen —
+Claude Code's or pi's), **working**, **finished**, **needs approval** (the pane rang the
 bell), or idle. Arrow keys move between panes, `Enter` opens one, and a click
 does both. `Alt+~` returns here from anywhere; `Esc` goes back to the current
 pane.
@@ -118,8 +120,9 @@ pane.
 In a kitty-graphics terminal (ghostty, kitty) cards are painted images — a
 night-sky gradient, a vector emblem, a gold frame, a glow in the status
 color — composited under the text. Everywhere else they fall back to Unicode
-box-drawing. claude panes get an animated mascot while working and Claude's
-`✳` when idle; other panes get a `>_` prompt.
+box-drawing. claude and pi panes get an animated mascot while working — a
+bouncing Clawd and a bouncing `π` — and Claude's `✳` when idle; other panes
+get a `>_` prompt.
 
 ## Keys
 
@@ -158,7 +161,12 @@ to background panes only, and focusing a pane clears its sticky state.
   bright band sweeping across the pane's name. A pane counts as working when
   a braille spinner frame starts its terminal title (Claude Code animates
   one), or it produced output in the last 5 s *and* is running a known agent.
-  Non-agent panes never count output recency, or htop would spin forever.
+  Non-agent panes never count output recency, or htop would spin forever. pi
+  titles its terminal `π - <dir>` and puts no state there, so its panes are
+  read off the screen instead: the spinner line offering `Esc to interrupt`
+  (or `Esc to cancel`, while it retries or compacts) means a turn is in
+  flight, and a sighting carries two seconds so the gap between tool calls
+  doesn't flicker.
 - **Green — finished.** It did work since you last looked and has gone quiet.
   Sticky until you focus it. This also plays the finish sound: a ringtone
   from `~/.config/zodiac/ringtones/`, played server-side, so it fires for
@@ -189,7 +197,9 @@ submits `--resume`:
   briefly on healthy requests.
 
 Matching is whitespace-insensitive, limited to the bottom 15 rows, and only
-fires in panes running claude. The row must also carry the visual signature
+fires in panes running claude — pi retries failed requests on its own backoff
+and shows a countdown while it does, so there is nothing for the watchdog to
+un-stick there. The row must also carry the visual signature
 of a real status line — the error phrase starting its row in an error color,
 the waiting phrase on a live spinner line — so an agent merely *discussing*
 these strings doesn't trip it. After intervening, zodiac waits for the phrase
@@ -389,9 +399,16 @@ why some TUIs used to take seconds to start inside a multiplexer.
 - Desktop notifications need `notify-send`, so macOS is silent for now.
 - The background summarizer's endpoint is hardcoded in `src/monitor.rs`
   rather than configurable.
-- Two claude panes in the *same* directory share a project folder, so
-  model-based naming shows whichever session wrote most recently — right when
-  they run the same model, a near-miss when they don't.
+- Two claude (or two pi) panes in the *same* directory share a session
+  folder. zodiac pairs a pane with its own transcript when argv names the
+  session (`claude --resume <id>`, `pi --session <id>`) or when the file was
+  born alongside the process; failing both — a session picked interactively,
+  on a filesystem without birth times — it falls back to whichever session
+  wrote most recently, which is right when they run the same model and a
+  near-miss when they don't.
+- pi's `-r`/`--resume` opens its session picker and takes no argument, so
+  argv can't say which session a pane ended up on; that case lands on the
+  fallback above.
 
 ## License
 

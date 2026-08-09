@@ -210,8 +210,8 @@ pub enum TitleState {
 
 /// Per-agent title patterns. Claude Code prefixes the terminal title with a
 /// braille spinner while working and "✳" when idle. opencode sets a static
-/// "OpenCode" title (identity, no state) — Unknown means "fall back to
-/// output-timing heuristics".
+/// "OpenCode" title and pi a static "π - <dir>" (identity, no state) —
+/// Unknown means "fall back to output-timing heuristics".
 pub fn title_state(title: &str) -> TitleState {
     match title.chars().next() {
         Some(c) if ('\u{2800}'..='\u{28ff}').contains(&c) => TitleState::Working,
@@ -227,11 +227,20 @@ pub fn agent_from_title(title: &str) -> Option<&'static str> {
         TitleState::Unknown => {
             if title.to_ascii_lowercase().starts_with("opencode") {
                 Some("opencode")
+            } else if is_pi_title(title) {
+                Some("pi")
             } else {
                 None
             }
         }
     }
+}
+
+/// pi titles its terminal "π - <dir>", or "π - <session name> - <dir>" once
+/// the session is named. The separator is required: a bare "π" (or a title
+/// that merely opens with the letter) shouldn't claim the pane.
+fn is_pi_title(title: &str) -> bool {
+    title.strip_prefix('π').is_some_and(|rest| rest.starts_with(" - "))
 }
 
 /// Fire-and-forget desktop notification; silently a no-op without notify-send.
@@ -345,6 +354,22 @@ mod tests {
         let back: Hello = serde_json::from_str(&json).unwrap();
         assert!(back.mouse_gate);
         assert_eq!(back.active, 3);
+    }
+
+    #[test]
+    fn agents_that_name_themselves_in_the_title() {
+        assert_eq!(agent_from_title("✳ claude"), Some("claude"));
+        assert_eq!(agent_from_title("⠼ claude"), Some("claude"));
+        assert_eq!(agent_from_title("OpenCode"), Some("opencode"));
+        assert_eq!(agent_from_title("π - zodiac"), Some("pi"));
+        assert_eq!(agent_from_title("π - fix the parser - zodiac"), Some("pi"));
+        // pi's title carries no working/idle state.
+        assert!(title_state("π - zodiac") == TitleState::Unknown);
+        // Near misses: a shell whose prompt happens to start with the
+        // letter, or a bare glyph, mustn't claim the pane.
+        assert_eq!(agent_from_title("π"), None);
+        assert_eq!(agent_from_title("πalpha - beta"), None);
+        assert_eq!(agent_from_title("zsh"), None);
     }
 
     #[test]

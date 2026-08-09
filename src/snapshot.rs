@@ -92,12 +92,13 @@ pub fn best(session: &str) -> Option<Snapshot> {
 impl SnapPane {
     /// The shell line that puts this pane's agent back: `cd` into its old
     /// directory (skipped when the pane is already there) and start the
-    /// agent — claude on the very conversation it had open. None for panes
-    /// that were sitting at a shell prompt.
+    /// agent — claude and pi on the very conversation they had open. None
+    /// for panes that were sitting at a shell prompt.
     pub fn restore_command(&self, current_cwd: Option<&str>) -> Option<String> {
         let agent = self.agent.as_deref()?;
         let launch = match (agent, self.chat_id.as_deref()) {
             ("claude", Some(chat)) => format!("claude --resume {chat}"),
+            ("pi", Some(chat)) => format!("pi --session {chat}"),
             _ => agent.to_string(),
         };
         match self.cwd.as_deref() {
@@ -145,6 +146,20 @@ mod tests {
     fn no_cd_when_the_pane_is_already_there() {
         let p = pane(Some("claude"), Some("abc"), Some("/src"));
         assert_eq!(p.restore_command(Some("/src")).unwrap(), "claude --resume abc");
+    }
+
+    #[test]
+    fn pi_resumes_its_session() {
+        let p = pane(Some("pi"), Some("019fe295-3523-7d14-8293-6db6edbacb02"), Some("/src"));
+        assert_eq!(
+            p.restore_command(None).unwrap(),
+            "cd '/src' && pi --session 019fe295-3523-7d14-8293-6db6edbacb02"
+        );
+    }
+
+    #[test]
+    fn an_agent_without_a_session_still_just_launches() {
+        assert_eq!(pane(Some("pi"), None, None).restore_command(None).unwrap(), "pi");
     }
 
     #[test]

@@ -956,7 +956,7 @@ impl Server {
                             .and_then(|a| self.versions.get(a).cloned().flatten())
                             .filter(|v| !v.is_empty()),
                         thinking: p.thinking(),
-                        recap: text.as_deref().and_then(crate::pane::recap_in),
+                        recap: p.recap(agent.as_deref(), text.as_deref()),
                         subtitle: p.subtitle.clone(),
                         ssh: p.ssh_target(),
                         tail: text
@@ -1089,7 +1089,7 @@ impl Server {
                     name: p.name.clone(),
                     cwd: p.cwd(),
                     chat_id: match agent.as_deref() {
-                        Some("claude") => p.chat_id(),
+                        Some("claude") | Some("pi") => p.chat_id(),
                         _ => None,
                     },
                     model: p.model(),

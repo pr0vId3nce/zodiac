@@ -576,6 +576,85 @@ pub fn clawd_rgba(w: u32, h: u32, frame: u8, soft: bool) -> Vec<u8> {
     px
 }
 
+/// Draw the bouncing π mascot — pi's counterpart to Clawd, on the same
+/// four-frame arc so a home view holding both agents bounces in step. The
+/// glyph is struck rather than blobbed: a top bar and two splayed legs,
+/// squashing on the landing frame the way the coral body does.
+#[allow(clippy::too_many_arguments)]
+fn draw_pi_mascot(px: &mut [u8], w: u32, h: u32, mx: f32, my: f32, s: f32, fh: f32, frame: u8) {
+    let teal = (94u8, 205u8, 196u8);
+    let phase = [0.15f32, 0.55, 1.0, 0.55][frame as usize % 4];
+    let amp = s * 1.1;
+    let (bw0, bh0) = (s * 1.35, s * 1.15);
+    let (bw2, bh2) = (bw0 * (1.0 + 0.20 * phase), bh0 * (1.10 - 0.30 * phase));
+    let base_y = my + amp;
+    let cy = base_y - bh2 - amp * (1.0 - phase);
+    // Ground shadow first, glyph over it — same ellipse as the other mascot.
+    let (srx, sry) = (bw0 * (0.55 + 0.45 * phase), (fh * 0.006).max(1.5));
+    let sa = 0.20 + 0.25 * phase;
+    for y in (base_y - sry * 3.0).max(0.0) as u32..((base_y + sry * 3.0) as u32).min(h) {
+        for x in (mx - srx - 2.0).max(0.0) as u32..((mx + srx + 2.0) as u32).min(w) {
+            let ex = (x as f32 - mx) / srx;
+            let ey = (y as f32 - (base_y + sry)) / sry;
+            let a = ((1.0 - (ex * ex + ey * ey)).max(0.0)).sqrt() * sa;
+            if a > 0.01 {
+                let o = ((y * w + x) * 4) as usize;
+                px[o] = (px[o] as f32 * (1.0 - a)) as u8;
+                px[o + 1] = (px[o + 1] as f32 * (1.0 - a)) as u8;
+                px[o + 2] = (px[o + 2] as f32 * (1.0 - a)) as u8;
+                px[o + 3] = px[o + 3].max((a * 255.0) as u8);
+            }
+        }
+    }
+    let th = (s * 0.22).max(1.5);
+    let top = cy - bh2 * 0.70;
+    let bottom = cy + bh2 * 0.95;
+    // The bar, overhanging both legs, with a small downward flick on the
+    // left end — what makes the shape read as π and not as Н.
+    seg(px, w, h, (mx - bw2, top), (mx + bw2, top), th, teal);
+    seg(px, w, h, (mx - bw2, top), (mx - bw2, top + bh2 * 0.28), th * 0.8, teal);
+    // Legs: the left one near-upright, the right one curling outward, both
+    // splaying a little further as the landing squashes the glyph.
+    let splay = 0.10 + 0.10 * phase;
+    seg(
+        px,
+        w,
+        h,
+        (mx - bw2 * 0.45, top),
+        (mx - bw2 * (0.45 + splay), bottom),
+        th,
+        teal,
+    );
+    seg(
+        px,
+        w,
+        h,
+        (mx + bw2 * 0.42, top),
+        (mx + bw2 * (0.42 + splay), bottom),
+        th,
+        teal,
+    );
+}
+
+/// Image ids for the standalone π sprite (4 bounce frames). No soft/hard
+/// split: the `claude style` setting reshapes Clawd's body, and a struck
+/// glyph has no body to round off.
+pub const PI_MASCOT_BASE: u32 = 0x5049_4D00; // "PIM\0"
+
+pub fn pi_mascot_id(frame: u8) -> u32 {
+    PI_MASCOT_BASE + (frame as u32 % 4)
+}
+
+/// The bouncing π alone on a transparent background, sized to fill the
+/// given pixel box — the blocks view's counterpart to `clawd_rgba`.
+pub fn pi_mascot_rgba(w: u32, h: u32, frame: u8) -> Vec<u8> {
+    let mut px = vec![0u8; (w * h * 4) as usize];
+    let (fw, fh) = (w as f32, h as f32);
+    let s = (fh / 4.2).min(fw / 5.0);
+    draw_pi_mascot(&mut px, w, h, fw / 2.0, fh - 1.6 * s, s, fh, frame);
+    px
+}
+
 /// Image ids for the HAL 9000 chat portrait (status x blink frame).
 /// Image-id base for the chat panel's portrait, clear of the card, orb and
 /// pane-image ranges.

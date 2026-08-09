@@ -870,7 +870,7 @@ impl PanesPolicy {
 const SESSION_WORDS: &[&str] = &[
     "agent", "agents", "aider", "approval", "approve", "blocked", "busy",
     "card", "cards", "claude", "codex", "crashed", "done", "finished", "hung", "idle",
-    "opencode", "pane", "panes", "prompt", "running", "session", "sessions", "status",
+    "opencode", "pane", "panes", "pi", "prompt", "running", "session", "sessions", "status",
     "stuck", "tab", "tabs", "terminal", "terminals", "wedged", "working", "zodiac",
 ];
 

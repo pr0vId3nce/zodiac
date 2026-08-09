@@ -142,7 +142,8 @@ commands (against a running server; -s <session>, --json where noted):
                                      mid-stream\" / \"Waiting for API response\"
                                      gets Esc + --resume automatically)
   zodiac restore                       re-launch the agents from the last
-                                     snapshot (claude resumes its chat)
+                                     snapshot (claude and pi resume their
+                                     conversations)
   zodiac kill-server                   shut the session down"
     );
 }

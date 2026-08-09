@@ -156,13 +156,18 @@ restart.
   a 120-column session doesn't scroll off into blank space. Both have 10k
   lines of scrollback and search with prev/next. The composer's send button
   submits text + Enter (`zodiac prompt` pacing); newlines in a multi-line
-  dictation are sent as `\`+Enter so Claude Code keeps them as newlines.
+  dictation are encoded the way the pane's agent expects them — `\`+Enter
+  for Claude Code, a plain newline byte (its Ctrl+J binding) for pi.
 - **Questions**: when a pane goes to `needs_input` the bridge parses the
   numbered options off its screen and shows them as buttons above the
   composer (and in the push notification). Tapping one sends that digit;
-  anything typed in the composer rides along as a note.
-- **Slash palette**: Claude Code built-ins plus everything in
-  `~/.claude/commands/*.md`; tapping inserts the command into the reply box.
+  anything typed in the composer rides along as a note. This is a Claude
+  Code shape — pi has no per-tool approval dialog to parse, so its panes
+  fall through to the ordinary composer.
+- **Slash palette**: per agent — Claude Code's built-ins plus
+  `~/.claude/commands/*.md`, or pi's built-ins plus its prompt templates in
+  `~/.pi/agent/prompts/*.md`. Tapping inserts the command into the reply
+  box; panes running neither agent don't show the button.
 - **Keys pad**: Esc, Tab, ⇧Tab, arrows, ⏎, ^C ^U ^R ^O, PgUp/PgDn — raw
   escape sequences straight into the pane's PTY.
 

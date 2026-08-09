@@ -110,6 +110,24 @@ const CARD_OUTLINES: &[&str] = &["double", "single", "none"];
 const SELECT_STYLES: &[&str] = &["glow", "ring"];
 const CARD_NUMERALS: &[&str] = &["roman", "arabic", "zodiac", "zodiac-white"];
 const CLAUDE_STYLES: &[&str] = &["hard", "soft"];
+
+/// Which sprite bounces beside an active agent block. Agents without one
+/// (opencode, codex, …) simply get the wider text column.
+#[derive(Clone, Copy, PartialEq)]
+enum Mascot {
+    Clawd,
+    Pi,
+}
+
+impl Mascot {
+    fn for_agent(agent: Option<&str>) -> Option<Self> {
+        match agent {
+            Some("claude") => Some(Mascot::Clawd),
+            Some("pi") => Some(Mascot::Pi),
+            _ => None,
+        }
+    }
+}
 const ZODIAC: &[&str] = &["♈", "♉", "♊", "♋", "♌", "♍", "♎", "♏", "♐", "♑", "♒", "♓"];
 
 /// Selected-card outline thickness as a fraction of card pixel height.
@@ -527,9 +545,10 @@ struct App {
     /// frame bits masked off) — a changed layout frees the old family's
     /// four frames instead of letting every status change leak images.
     orrery_live: Option<u32>,
-    /// Cells reserved beside active claude blocks (blocks view) where the
-    /// hopping mascot sprite is placed by kitty_overlay.
-    home_mascots: Vec<Rect>,
+    /// Cells reserved beside active agent blocks (blocks view) where the
+    /// mascot sprite is placed by kitty_overlay, and which mascot belongs
+    /// in each.
+    home_mascots: Vec<(Rect, Mascot)>,
     kitty_on: bool,
     /// Card placements currently alive terminal-side (kitty graphics).
     kitty_placed: Vec<(Rect, u32)>,
@@ -3960,7 +3979,7 @@ impl App {
                 rect,
                 p.id,
                 accent,
-                p.agent.as_deref() == Some("claude"),
+                Mascot::for_agent(p.agent.as_deref()).is_some(),
             ));
         }
     }
@@ -4159,7 +4178,7 @@ impl App {
                 rect,
                 p.id,
                 card_status(p).3,
-                p.agent.as_deref() == Some("claude"),
+                Mascot::for_agent(p.agent.as_deref()).is_some(),
             ));
         }
     }
@@ -4244,8 +4263,8 @@ impl App {
 
     /// Blocks view: two flat columns divided by rules — shells on the left,
     /// agents on the right — filling top-down as panes open. No borders,
-    /// only line separators in the configured color; active claude blocks
-    /// get the hopping mascot sprite (placed by kitty_overlay).
+    /// only line separators in the configured color; active agent blocks
+    /// get their mascot sprite (placed by kitty_overlay).
     fn draw_home_blocks(&mut self, f: &mut Frame, area: Rect, state: &SessionState) {
         self.home_cols = 2;
         let pal = self.palette();
@@ -4326,17 +4345,20 @@ impl App {
             }
             let selected = vi == self.home_sel;
             let (_, _, _, accent) = card_status(p);
-            let claude = p.agent.as_deref() == Some("claude");
-            let active = claude && (accent == 1 || accent == 2);
+            let mascot = Mascot::for_agent(p.agent.as_deref());
+            let active = mascot.is_some() && (accent == 1 || accent == 2);
             let mascot_w: u16 = if active && self.kitty_on && col_w > 40 { 6 } else { 0 };
             self.draw_block(f, rect, pi + 1, p, selected, mascot_w);
-            if mascot_w > 0 {
-                self.home_mascots.push(Rect {
-                    x: rect.x + rect.width - mascot_w,
-                    y: rect.y + 1,
-                    width: mascot_w,
-                    height: 2.min(rect.height),
-                });
+            if let (Some(mascot), true) = (mascot, mascot_w > 0) {
+                self.home_mascots.push((
+                    Rect {
+                        x: rect.x + rect.width - mascot_w,
+                        y: rect.y + 1,
+                        width: mascot_w,
+                        height: 2.min(rect.height),
+                    },
+                    mascot,
+                ));
             }
             // The rule under the block; the selected block's rule glows in
             // the select color so the highlight reads without any border.
@@ -4347,7 +4369,7 @@ impl App {
             };
             let hsep: String = "─".repeat(col_w as usize);
             f.buffer_mut().set_string(rect.x, rect.bottom(), &hsep, st);
-            self.home_cards.push((rect, p.id, accent, claude));
+            self.home_cards.push((rect, p.id, accent, mascot.is_some()));
         }
     }
 
@@ -5102,12 +5124,18 @@ impl App {
             let frame = ((self.anim_start.elapsed().as_millis() / 250) % 4) as u8;
             let soft = self.claude_style() == "soft";
             let mut v = Vec::with_capacity(self.home_mascots.len());
-            for rect in self.home_mascots.clone() {
-                let id = crate::kitty::clawd_id(frame, soft);
+            for (rect, mascot) in self.home_mascots.clone() {
+                let id = match mascot {
+                    Mascot::Clawd => crate::kitty::clawd_id(frame, soft),
+                    Mascot::Pi => crate::kitty::pi_mascot_id(frame),
+                };
                 let (pw, ph) = (rect.width as u32 * cw as u32, rect.height as u32 * ch as u32);
                 if !self.kitty_sent.contains(&(pw, ph, id)) {
                     self.kitty_sent.retain(|&(_, _, i2)| i2 != id);
-                    let rgba = crate::kitty::clawd_rgba(pw, ph, frame, soft);
+                    let rgba = match mascot {
+                        Mascot::Clawd => crate::kitty::clawd_rgba(pw, ph, frame, soft),
+                        Mascot::Pi => crate::kitty::pi_mascot_rgba(pw, ph, frame),
+                    };
                     let _ = crate::kitty::transmit(&mut out, id, pw, ph, &rgba);
                     self.kitty_sent.insert((pw, ph, id));
                 }
@@ -5126,7 +5154,7 @@ impl App {
             // diverges from home_sel whenever the grid is scrolled.
             let sel_id = self.home_order.get(self.home_sel).copied();
             let mut desired: Vec<(Rect, u32)> = Vec::with_capacity(cards.len());
-            for &(rect, id, accent, _claude) in cards.iter() {
+            for &(rect, id, accent, _mascot) in cards.iter() {
                 let selected = Some(id) == sel_id;
                 let id = crate::kitty::flat_card_id(accent, size_idx, selected, theme_idx);
                 let (pw, ph) = (rect.width as u32 * cw as u32, rect.height as u32 * ch as u32);

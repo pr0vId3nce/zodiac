@@ -13,11 +13,6 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use vt100::TermEvent;
 
-// Corpus recording reader (shared with the ptyrec bin and tests/golden.rs),
-// used by the gfx corpus golden below.
-#[cfg(test)]
-#[path = "corpus.rs"]
-mod corpus;
 
 /// Placements whose anchor line falls more than this many lines above the
 /// live screen are dropped — matches the client's scrollback depth.
@@ -1293,6 +1288,7 @@ mod tests {
     /// UPDATE_GOLDEN=1 re-baselines (REBASELINE: note required).
     #[test]
     fn corpus_timg_kitty_gfx_golden() {
+        use crate::corpus;
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let file = root.join("tests/corpus/timg-kitty.ptyrec");
         let rec = corpus::read(std::fs::File::open(file).unwrap()).unwrap();

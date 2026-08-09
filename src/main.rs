@@ -1,4 +1,6 @@
 mod cli;
+#[cfg(test)]
+mod corpus;
 mod monitor;
 mod gfx;
 mod client;

@@ -2122,3 +2122,78 @@ mod transcript_pick_tests {
         assert_eq!(resume_id(&args("claude -r fix_the_tests")), None);
     }
 }
+
+/// Characterization goldens for the screen-scraping status heuristics over
+/// the agent corpus recordings. Two consumers: Phase 1's engine swap must
+/// not silently change pty-pane detection, and Phase 2's "retire heuristics
+/// for structured panes" is measured against these, not vibes.
+///
+/// claude.ptyrec / pi.ptyrec are flagged follow-ups in tests/corpus/MANIFEST
+/// (they need a human driving the session); until they exist this test
+/// covers whatever agent recordings are present and passes on none.
+#[cfg(test)]
+mod heuristic_characterization {
+    use crate::corpus;
+    use crate::protocol::{agent_from_title, title_state};
+
+    const CLAUDE_HINT: &[&str] = &["esc to interrupt"];
+
+    fn characterize(name: &str) -> Option<String> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let file = root.join(format!("tests/corpus/{name}.ptyrec"));
+        if !file.exists() {
+            return None;
+        }
+        let rec = corpus::read(std::fs::File::open(file).unwrap()).unwrap();
+        let mut parser = vt100::Parser::new(rec.rows, rec.cols, 0);
+        let marks: std::collections::BTreeSet<usize> =
+            (1..8).map(|k| k * rec.chunks.len() / 8).collect();
+        let mut out = String::new();
+        for (i, chunk) in rec.chunks.iter().enumerate() {
+            if chunk.kind == corpus::ChunkKind::Output {
+                parser.process(&chunk.payload);
+            }
+            if marks.contains(&i) || i + 1 == rec.chunks.len() {
+                let screen = parser.screen();
+                let title = screen.title();
+                out.push_str(&format!(
+                    "@chunk {i:4}: title_state={:?} agent={:?} stall={:?} \
+                     spinner(any)={} spinner(claude)={} bells={}\n",
+                    title_state(title),
+                    agent_from_title(title),
+                    super::stall_match(screen, true),
+                    super::spinner_row(screen, None),
+                    super::spinner_row(screen, Some(CLAUDE_HINT)),
+                    screen.audible_bell_count(),
+                ));
+            }
+        }
+        Some(out)
+    }
+
+    #[test]
+    fn agent_corpus_heuristics_golden() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for name in ["claude", "pi"] {
+            let Some(actual) = characterize(name) else {
+                continue;
+            };
+            let path = root.join(format!("tests/golden/{name}.heuristics.txt"));
+            let update = std::env::var_os("UPDATE_GOLDEN").is_some();
+            if update || !path.exists() {
+                std::fs::write(&path, &actual).unwrap();
+                assert!(
+                    update,
+                    "golden {} did not exist; wrote it — review and commit, then re-run",
+                    path.display()
+                );
+                continue;
+            }
+            assert_eq!(
+                std::fs::read_to_string(&path).unwrap(),
+                actual,
+                "{name} heuristic verdicts drifted (UPDATE_GOLDEN=1 re-baselines)"
+            );
+        }
+    }
+}

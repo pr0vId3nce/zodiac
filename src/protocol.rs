@@ -201,7 +201,7 @@ pub struct HostVitals {
     pub mem_pct: u8,
 }
 
-#[derive(PartialEq)]
+#[derive(Debug, PartialEq)]
 pub enum TitleState {
     Working,
     Idle,

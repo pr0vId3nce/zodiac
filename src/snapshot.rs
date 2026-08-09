@@ -31,6 +31,11 @@ pub struct SnapPane {
     /// 1-based, matching `zodiac ls` and every pane-taking CLI command.
     pub index: usize,
     pub name: String,
+    /// "pty" (default; also every pre-agent snapshot) or "agent" — an
+    /// agent pane restores by structured relaunch, never by typing a
+    /// shell line (roadmap 2.8).
+    #[serde(default)]
+    pub kind: Option<String>,
     pub cwd: Option<String>,
     pub agent: Option<String>,
     pub model: Option<String>,
@@ -95,6 +100,10 @@ impl SnapPane {
     /// agent — claude and pi on the very conversation they had open. None
     /// for panes that were sitting at a shell prompt.
     pub fn restore_command(&self, current_cwd: Option<&str>) -> Option<String> {
+        // Structured panes never restore via a typed shell line.
+        if self.kind.as_deref() == Some("agent") {
+            return None;
+        }
         let agent = self.agent.as_deref()?;
         let launch = match (agent, self.chat_id.as_deref()) {
             ("claude", Some(chat)) => format!("claude --resume {chat}"),
@@ -124,6 +133,7 @@ mod tests {
         SnapPane {
             index: 1,
             name: "p".into(),
+            kind: None,
             cwd: cwd.map(str::to_string),
             agent: agent.map(str::to_string),
             model: None,
@@ -176,6 +186,13 @@ mod tests {
     fn other_agents_launch_by_name() {
         let p = pane(Some("opencode"), None, None);
         assert_eq!(p.restore_command(None).unwrap(), "opencode");
+    }
+
+    #[test]
+    fn agent_panes_never_type_shell_lines() {
+        let mut p = pane(Some("claude"), Some("abc"), Some("/src"));
+        p.kind = Some("agent".into());
+        assert!(p.restore_command(None).is_none());
     }
 
     #[test]

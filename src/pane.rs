@@ -261,6 +261,7 @@ impl SrvPane {
         name: Option<String>,
         kind: crate::agent::AgentKind,
         cwd: Option<PathBuf>,
+        session: Option<String>,
         tx: Sender<SrvEvent>,
     ) -> Result<Self> {
         let mut rt = crate::agent::AgentRuntime::new(
@@ -268,6 +269,7 @@ impl SrvPane {
             cwd.filter(|d| d.is_dir())
                 .or_else(|| std::env::current_dir().ok()),
         );
+        rt.session_id = session;
         rt.spawn_process(id, &tx)?;
         Ok(Self {
             id,

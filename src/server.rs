@@ -588,7 +588,7 @@ impl Server {
                             .as_deref()
                             .and_then(crate::agent::AgentKind::parse)
                             .unwrap_or(crate::agent::AgentKind::Claude);
-                        let _ = self.new_agent_pane(kind, r.cwd.map(PathBuf::from));
+                        let _ = self.new_agent_pane(kind, r.cwd.map(PathBuf::from), None);
                     }
                     _ => {
                         let _ = self.new_pane(None, None, Vec::new(), true);
@@ -963,9 +963,24 @@ impl Server {
         }
     }
 
-    /// T_PERM_RESP: answer a pending permission request.
+    /// T_PERM_RESP: answer a pending permission request. An empty
+    /// request_id means "the oldest pending one" (CLI convenience).
     fn perm_response(&mut self, id: u64, resp: &crate::protocol::PermResponse) {
         let allow = resp.behavior == "allow";
+        let mut resp = resp.clone();
+        if resp.request_id.is_empty() {
+            if let Some(rid) = self
+                .pane_mut(id)
+                .and_then(|p| p.agent_rt())
+                .and_then(|rt| rt.pending.first())
+                .map(|(pr, _)| pr.request_id.clone())
+            {
+                resp.request_id = rid;
+            } else {
+                return;
+            }
+        }
+        let resp = &resp;
         let mut settled = false;
         if let Some(rt) = self.pane_mut(id).and_then(|p| p.agent_rt_mut()) {
             if rt
@@ -1022,10 +1037,11 @@ impl Server {
         &mut self,
         kind: crate::agent::AgentKind,
         cwd: Option<PathBuf>,
+        session: Option<String>,
     ) -> Result<u64> {
         let id = self.next_id;
         self.next_id += 1;
-        let pane = SrvPane::spawn_agent(id, None, kind, cwd, self.tx.clone())?;
+        let pane = SrvPane::spawn_agent(id, None, kind, cwd, session, self.tx.clone())?;
         let pname = pane.name.clone();
         self.panes.push(pane);
         self.dirty = true;
@@ -1509,9 +1525,12 @@ impl Server {
                 SnapPane {
                     index: i + 1,
                     name: p.name.clone(),
+                    kind: Some(p.kind_str().to_string()),
                     cwd: p.cwd(),
-                    chat_id: match agent.as_deref() {
-                        Some("claude") | Some("pi") => p.chat_id(),
+                    chat_id: match (p.agent_rt(), agent.as_deref()) {
+                        // Structured panes know their session directly.
+                        (Some(rt), _) => rt.session_id.clone(),
+                        (None, Some("claude") | Some("pi")) => p.chat_id(),
                         _ => None,
                     },
                     model: p.model(),
@@ -1546,6 +1565,26 @@ impl Server {
         };
         for sp in snap.panes {
             if sp.agent.is_none() {
+                continue;
+            }
+            // Structured panes (2.8): relaunch the agent process resuming
+            // its captured session — no shell, no typed line.
+            if sp.kind.as_deref() == Some("agent") {
+                let kind = sp
+                    .agent
+                    .as_deref()
+                    .and_then(crate::agent::AgentKind::parse)
+                    .unwrap_or(crate::agent::AgentKind::Claude);
+                if let Ok(id) =
+                    self.new_agent_pane(kind, sp.cwd.clone().map(PathBuf::from), sp.chat_id.clone())
+                {
+                    if let Some(p) = self.pane_mut(id) {
+                        if sp.renamed {
+                            p.name = sp.name.clone();
+                            p.renamed = true;
+                        }
+                    }
+                }
                 continue;
             }
             // A freshly opened pane's shell needs a moment to reach its

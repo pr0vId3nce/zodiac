@@ -14,6 +14,7 @@ pub const COMMANDS: &[&str] = &[
     "rename",
     "focus",
     "new",
+    "perm",
     "close",
     "wait",
     "autoresume",
@@ -99,9 +100,33 @@ pub fn run(mut args: Vec<String>) -> Result<()> {
             if text.is_empty() {
                 bail!("usage: zodiac prompt <pane> <text...>");
             }
-            write_frame(&mut sock, T_INPUT, id, text.as_bytes())?;
-            std::thread::sleep(Duration::from_millis(200));
-            write_frame(&mut sock, T_INPUT, id, b"\r")?;
+            // Agent panes take structured prompts; pty panes get the text
+            // typed + Enter, as ever.
+            let st = query(&mut sock)?;
+            let is_agent = st.panes.iter().any(|p| p.id == id && p.kind == "agent");
+            if is_agent {
+                write_frame(&mut sock, T_AGENT_INPUT, id, text.as_bytes())?;
+            } else {
+                write_frame(&mut sock, T_INPUT, id, text.as_bytes())?;
+                std::thread::sleep(Duration::from_millis(200));
+                write_frame(&mut sock, T_INPUT, id, b"\r")?;
+            }
+        }
+        "perm" => {
+            // `zodiac perm <pane> allow|deny [message...]` — answer the
+            // pane's oldest pending permission request (agent panes).
+            let id = resolve(&mut sock, &args, 0)?;
+            let behavior = args.get(1).map(String::as_str).unwrap_or("");
+            if behavior != "allow" && behavior != "deny" {
+                bail!("usage: zodiac perm <pane> allow|deny [message...]");
+            }
+            let msg = join_text(&args[2..]);
+            let payload = serde_json::json!({
+                "request_id": "",
+                "behavior": behavior,
+                "message": if msg.is_empty() { None } else { Some(msg) },
+            });
+            write_frame(&mut sock, T_PERM_RESP, id, payload.to_string().as_bytes())?;
         }
         "rename" => {
             let id = resolve(&mut sock, &args, 0)?;
@@ -120,7 +145,19 @@ pub fn run(mut args: Vec<String>) -> Result<()> {
             write_frame(&mut sock, T_CLOSE_PANE, id, &[])?;
         }
         "new" => {
-            write_frame(&mut sock, T_NEW_PANE, 0, &[])?;
+            // `zodiac new [--agent claude|pi] [--cwd DIR]` — with --agent,
+            // a structured agent pane (ADR 0002) instead of a shell.
+            let payload = match flag_value(&args, "--agent") {
+                Some(agent) => serde_json::json!({
+                    "kind": "agent",
+                    "agent": agent,
+                    "cwd": flag_value(&args, "--cwd"),
+                })
+                .to_string()
+                .into_bytes(),
+                None => Vec::new(),
+            };
+            write_frame(&mut sock, T_NEW_PANE, 0, &payload)?;
             let st = query(&mut sock)?;
             if let Some(p) = st.panes.last() {
                 println!("pane {} ({})", p.index, p.name);

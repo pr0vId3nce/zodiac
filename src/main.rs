@@ -141,9 +141,12 @@ commands (against a running server; -s <session>, --json where noted):
   zodiac read <pane>                   print a pane's rendered screen
   zodiac send <pane> <text> [--enter]  type text into a pane
   zodiac prompt <pane> <text>          submit text + Enter (agent prompt)
+  zodiac perm <pane> allow|deny        answer an agent pane's pending
+                                     tool-permission request
   zodiac rename <pane> <name>          rename a pane
   zodiac focus <pane>                  focus a pane
-  zodiac new                           open a new pane
+  zodiac new [--agent claude|pi]       open a new pane (with --agent: a
+                                     structured agent pane, ADR 0002)
   zodiac close <pane>                  close a pane (kills its process)
   zodiac wait <pane> [--state s1,s2] [--timeout secs]
                                      block until pane reaches a state

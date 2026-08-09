@@ -196,13 +196,35 @@ pub struct Img {
     /// Bumped when the same id is retransmitted, so the compositor knows
     /// to refresh the outer terminal's copy.
     pub ver: u32,
+    /// Animation frames beyond the root frame (kitty a=f), in receive
+    /// order (roadmap 4.2). The root data is frame 0; the GUI plays,
+    /// the TUI renders frame 0. The client times playback.
+    pub frames: Vec<AnimFrame>,
+    /// a=a state: whether playback runs and how many loops (0 = forever).
+    pub anim_running: bool,
+    pub anim_loops: u32,
     lru: u64,
+}
+
+#[derive(Clone)]
+pub struct AnimFrame {
+    pub gap_ms: u32,
+    pub format: u8,
+    pub zlib: bool,
+    pub w: u32,
+    pub h: u32,
+    pub data: Vec<u8>,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct Placement {
     /// Stable identity across moves — the compositor's diff key.
     pub key: u64,
+    /// Unicode-placeholder placement (kitty `U=1`, roadmap 4.3): the app
+    /// draws U+10EEEE cells and clients resolve tiles from the grid — the
+    /// anchor row/col here are informational only.
+    #[serde(default)]
+    pub virt: bool,
     pub img: u32,
     pub img_ver: u32,
     pub pid: u32, // 0 = anonymous
@@ -225,11 +247,26 @@ pub struct Placement {
 pub struct GfxSnapshot {
     pub placements: Vec<VisPlacement>,
     pub images: Vec<(u32, u32)>, // (id, ver)
+    /// Animation metadata for images in this layer that carry frames
+    /// (roadmap 4.2): the client owns the playback clock.
+    #[serde(default)]
+    pub anim: Vec<SnapAnim>,
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq)]
+pub struct SnapAnim {
+    pub img: u32,
+    /// Per-frame display gaps, ms; the root frame plays first.
+    pub gaps: Vec<u32>,
+    pub running: bool,
+    pub loops: u32,
 }
 
 #[derive(Clone, Serialize, Deserialize, PartialEq)]
 pub struct VisPlacement {
     pub key: u64,
+    #[serde(default)]
+    pub virt: bool,
     pub img: u32,
     pub img_ver: u32,
     pub row: i32,
@@ -266,6 +303,9 @@ pub struct GfxEngine {
     /// client's outer terminal can't render (apps then detect "unsupported"
     /// via the DA1 fallback instead of timing out).
     pub active: bool,
+    /// Whether the capability floor advertises animation (ADR 0005):
+    /// gates a=f / a=a acceptance.
+    pub anim: bool,
     /// Bumped on every visible change; the server pushes a snapshot when it
     /// differs from the last pushed value.
     pub version: u64,
@@ -297,6 +337,7 @@ impl GfxEngine {
             next_auto_id: 0x0eee_0000,
             lru_tick: 0,
             active: false,
+            anim: false,
             version: 0,
         }
     }
@@ -349,7 +390,7 @@ impl GfxEngine {
             }
             self.pending = None; // spec violation — abort the transmission
         }
-        if cmd.num(b'm') == Some(1) && matches!(cmd.action(), b't' | b'T' | b'q') {
+        if cmd.num(b'm') == Some(1) && matches!(cmd.action(), b't' | b'T' | b'q' | b'f') {
             self.pending = Some(Pending {
                 data: cmd.payload.clone(),
                 cmd,
@@ -367,6 +408,8 @@ impl GfxEngine {
             b'T' => self.cmd_transmit(&cmd, &payload, true, cursor),
             b'p' => self.cmd_place(&cmd, cursor),
             b'd' => self.cmd_delete(&cmd, cursor),
+            b'f' if self.anim => self.cmd_frame(&cmd, &payload),
+            b'a' if self.anim => self.cmd_animate(&cmd),
             b'f' | b'a' | b'c' => reply_err(&cmd, "ENOTSUP:animation is not supported"),
             _ => reply_err(&cmd, "EINVAL:unknown action"),
         }
@@ -410,11 +453,15 @@ impl GfxEngine {
         if let Some(n) = number {
             self.numbers.insert(n, id);
         }
-        // Quota: evict unplaced images LRU-first, then refuse.
-        let old = self.images.get(&id).map(|i| i.data.len()).unwrap_or(0);
+        // Quota: evict unplaced images LRU-first, then refuse. `old`
+        // counts the replaced image's frames too — retransmission drops
+        // them (animation restarts from scratch).
+        let img_total =
+            |i: &Img| i.data.len() + i.frames.iter().map(|f| f.data.len()).sum::<usize>();
+        let old = self.images.get(&id).map(img_total).unwrap_or(0);
         if self.store_bytes - old + data.len() > STORE_MAX {
             self.evict(data.len().saturating_sub(old));
-            let cur = self.images.get(&id).map(|i| i.data.len()).unwrap_or(0);
+            let cur = self.images.get(&id).map(img_total).unwrap_or(0);
             if self.store_bytes - cur + data.len() > STORE_MAX {
                 return reply_err(cmd, "ENOSPC:image store full");
             }
@@ -431,6 +478,10 @@ impl GfxEngine {
                 h,
                 data,
                 ver,
+                // Retransmission restarts any animation from scratch.
+                frames: Vec::new(),
+                anim_running: false,
+                anim_loops: 0,
                 lru: self.lru_tick,
             },
         );
@@ -450,6 +501,64 @@ impl GfxEngine {
             }
             return res;
         }
+        reply_ok(cmd)
+    }
+
+    /// kitty a=f: append one animation frame to an existing image
+    /// (roadmap 4.2). Frame data rides the same store quota as images.
+    fn cmd_frame(&mut self, cmd: &GfxCmd, payload: &[u8]) -> CmdResult {
+        let Some(id) = cmd.num(b'i').map(|i| i as u32) else {
+            return reply_err(cmd, "ENOENT:frame needs i=");
+        };
+        if !self.images.contains_key(&id) {
+            return reply_err(cmd, "ENOENT:no such image");
+        }
+        let (data, w, h) = match self.load_data(cmd, payload) {
+            Ok(t) => t,
+            Err(e) => return reply_err(cmd, &e),
+        };
+        if self.store_bytes + data.len() > STORE_MAX {
+            self.evict(data.len());
+            if self.store_bytes + data.len() > STORE_MAX {
+                return reply_err(cmd, "ENOSPC:store full");
+            }
+        }
+        // The image may have been evicted while making room.
+        let Some(img) = self.images.get_mut(&id) else {
+            return reply_err(cmd, "ENOENT:no such image");
+        };
+        self.store_bytes += data.len();
+        img.frames.push(AnimFrame {
+            gap_ms: cmd.num(b'z').filter(|z| *z > 0).unwrap_or(40) as u32,
+            format: cmd.num(b'f').unwrap_or(32) as u8,
+            zlib: cmd.ch(b'o') == Some(b'z'),
+            w,
+            h,
+            data,
+        });
+        self.bump();
+        reply_ok(cmd)
+    }
+
+    /// kitty a=a: playback control. s=1 stops, s=2/3 runs; v = loops
+    /// (0/absent = forever). The server only stores state — clients own
+    /// the clock.
+    fn cmd_animate(&mut self, cmd: &GfxCmd) -> CmdResult {
+        let Some(id) = cmd.num(b'i').map(|i| i as u32) else {
+            return reply_err(cmd, "ENOENT:animate needs i=");
+        };
+        let Some(img) = self.images.get_mut(&id) else {
+            return reply_err(cmd, "ENOENT:no such image");
+        };
+        match cmd.num(b's').unwrap_or(0) {
+            1 => img.anim_running = false,
+            2 | 3 => img.anim_running = true,
+            _ => {}
+        }
+        if let Some(v) = cmd.num(b'v') {
+            img.anim_loops = v.max(0) as u32;
+        }
+        self.bump();
         reply_ok(cmd)
     }
 
@@ -515,8 +624,10 @@ impl GfxEngine {
         } else {
             self.total_scrolled + cursor.0 as i64
         };
+        let virt = cmd.num(b'U') == Some(1);
         let place = Placement {
             key: 0, // fixed below
+            virt,
             img: id,
             img_ver,
             pid,
@@ -556,7 +667,7 @@ impl GfxEngine {
         };
         let _ = key;
         self.bump();
-        let advance = if cmd.num(b'C').unwrap_or(0) == 1 {
+        let advance = if virt || cmd.num(b'C').unwrap_or(0) == 1 {
             None
         } else {
             Some((rows.saturating_sub(1), cols))
@@ -655,7 +766,8 @@ impl GfxEngine {
             }
             for img in affected.iter() {
                 if let Some(i) = self.images.remove(img) {
-                    self.store_bytes -= i.data.len();
+                    self.store_bytes -=
+                        i.data.len() + i.frames.iter().map(|f| f.data.len()).sum::<usize>();
                 }
             }
         }
@@ -679,7 +791,10 @@ impl GfxEngine {
             .images
             .iter()
             .filter(|(id, _)| !placed.contains(id))
-            .map(|(id, img)| (img.lru, *id, img.data.len()))
+            .map(|(id, img)| {
+                let total = img.data.len() + img.frames.iter().map(|f| f.data.len()).sum::<usize>();
+                (img.lru, *id, total)
+            })
             .collect();
         candidates.sort_unstable();
         let mut freed = 0;
@@ -867,6 +982,7 @@ impl GfxEngine {
             .iter()
             .map(|p| VisPlacement {
                 key: p.key,
+                virt: p.virt,
                 img: p.img,
                 img_ver: p.img_ver,
                 row: self.screen_row(p).clamp(i32::MIN as i64, i32::MAX as i64) as i32,
@@ -882,7 +998,23 @@ impl GfxEngine {
         let mut images: Vec<(u32, u32)> = layer.iter().map(|p| (p.img, p.img_ver)).collect();
         images.sort_unstable();
         images.dedup();
-        GfxSnapshot { placements, images }
+        let anim = images
+            .iter()
+            .filter_map(|(id, _)| {
+                let img = self.images.get(id)?;
+                (!img.frames.is_empty()).then(|| SnapAnim {
+                    img: *id,
+                    gaps: img.frames.iter().map(|f| f.gap_ms).collect(),
+                    running: img.anim_running,
+                    loops: img.anim_loops,
+                })
+            })
+            .collect();
+        GfxSnapshot {
+            placements,
+            images,
+            anim,
+        }
     }
 }
 
@@ -1053,6 +1185,66 @@ mod tests {
 
     fn rgba(w: usize, h: usize) -> String {
         crate::client::b64(&vec![0u8; w * h * 4])
+    }
+
+    /// 4.2: frames rejected below the animation floor, accepted at it;
+    /// snapshot carries gaps + playback state; quota counts frame bytes.
+    #[test]
+    fn animation_frames_and_state() {
+        let mut e = engine();
+        let px = rgba(1, 1);
+        // Root image.
+        let r = e.handle(cmd(&format!("a=t,i=7,s=1,v=1,f=32;{px}")), (0, 0));
+        assert!(r.reply.windows(2).any(|w| w == b"OK"));
+        // Floor off: ENOTSUP, exactly as before.
+        let r = e.handle(cmd(&format!("a=f,i=7,s=1,v=1,f=32;{px}")), (0, 0));
+        assert!(String::from_utf8_lossy(&r.reply).contains("ENOTSUP"));
+        // Floor on: frame stored with its gap.
+        e.anim = true;
+        let r = e.handle(cmd(&format!("a=f,i=7,s=1,v=1,f=32,z=120;{px}")), (0, 0));
+        assert!(r.reply.windows(2).any(|w| w == b"OK"));
+        let r = e.handle(cmd(&format!("a=f,i=7,s=1,v=1,f=32;{px}")), (0, 0));
+        assert!(r.reply.windows(2).any(|w| w == b"OK"));
+        assert_eq!(e.image(7).unwrap().frames.len(), 2);
+        assert_eq!(e.image(7).unwrap().frames[0].gap_ms, 120);
+        assert_eq!(e.image(7).unwrap().frames[1].gap_ms, 40);
+        // Playback control + snapshot metadata (needs a placement).
+        e.handle(cmd("a=p,i=7"), (2, 3));
+        e.handle(cmd("a=a,i=7,s=3,v=2"), (0, 0));
+        let snap = e.snapshot();
+        assert_eq!(snap.anim.len(), 1);
+        assert_eq!(snap.anim[0].img, 7);
+        assert_eq!(snap.anim[0].gaps, vec![120, 40]);
+        assert!(snap.anim[0].running);
+        assert_eq!(snap.anim[0].loops, 2);
+        // Stop.
+        e.handle(cmd("a=a,i=7,s=1"), (0, 0));
+        assert!(!e.snapshot().anim[0].running);
+        // Retransmission drops frames (animation restarts from scratch).
+        e.handle(cmd(&format!("a=t,i=7,s=1,v=1,f=32;{px}")), (0, 0));
+        assert!(e.image(7).unwrap().frames.is_empty());
+        assert!(e.snapshot().anim.is_empty());
+    }
+
+    /// 4.3: a U=1 placement is virtual — no cursor advance, flagged in
+    /// the snapshot for clients to resolve from placeholder cells.
+    #[test]
+    fn unicode_placeholder_placement_is_virtual() {
+        let mut e = engine();
+        let px = rgba(20, 40);
+        e.handle(cmd(&format!("a=t,i=9,s=2,v=2,f=32;{px}")), (0, 0));
+        let r = e.handle(cmd("a=p,i=9,U=1"), (5, 5));
+        assert!(
+            r.advance.is_none(),
+            "virtual placements never move the cursor"
+        );
+        let snap = e.snapshot();
+        assert_eq!(snap.placements.len(), 1);
+        assert!(snap.placements[0].virt);
+        // A normal placement still advances (C=1 suppresses).
+        let r = e.handle(cmd("a=p,i=9"), (5, 5));
+        assert!(r.advance.is_some());
+        assert!(!e.snapshot().placements.iter().all(|p| p.virt));
     }
 
     #[test]

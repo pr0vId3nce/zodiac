@@ -115,6 +115,9 @@ struct Server {
     client_gfx: bool,
     /// Image payloads already delivered this attach: (pane, image, ver).
     gfx_sent: std::collections::HashSet<(u64, u32, u32)>,
+    /// Animation frames already delivered this attach: (pane, img, ver) →
+    /// count (roadmap 4.2).
+    frames_sent: std::collections::HashMap<(u64, u32, u32), usize>,
     /// Random secret minted on this session's first-ever launch and
     /// persisted in the state dir — see `load_or_mint_pairing_token`. Rides
     /// along on every `SessionState` broadcast so the astrolabe bridge (and,
@@ -227,6 +230,7 @@ pub fn run(session: &str) -> Result<()> {
         client_cell: (0, 0),
         client_gfx: false,
         gfx_sent: std::collections::HashSet::new(),
+        frames_sent: std::collections::HashMap::new(),
         pairing_token: load_or_mint_pairing_token(session),
     };
     srv.restore()?;
@@ -269,6 +273,7 @@ pub fn run(session: &str) -> Result<()> {
             last_stall_check = Instant::now();
             srv.autoresume_tick();
             srv.agent_tick();
+            srv.capability_tick();
             srv.finish_tick();
             srv.monitor_tick();
             srv.subtitle_tick();
@@ -1051,6 +1056,17 @@ impl Server {
         Ok(id)
     }
 
+    /// Apply capability-floor changes live (ADR 0005). Newly probed apps
+    /// see the new floor; running apps keep their cached answer — the
+    /// documented limitation.
+    fn capability_tick(&mut self) {
+        let floor = crate::settings::Settings::cached().floor();
+        for p in &mut self.panes {
+            p.gfx.active = floor != "off";
+            p.gfx.anim = floor == "animation";
+        }
+    }
+
     /// Flush panes whose DECSET 2026 hold exceeded its deadline (1.6).
     fn sync_flush_tick(&mut self) {
         let due: Vec<(u64, Vec<u8>)> = self
@@ -1251,13 +1267,19 @@ impl Server {
         // Fresh client: propagate its cell size / capability and resend
         // graphics state from scratch (image payloads + snapshots).
         self.gfx_sent.clear();
+        self.frames_sent.clear();
         let cell = self.client_cell;
-        let gfx = self.client_gfx;
+        // ADR 0005: the engine answers probes per the capability floor,
+        // never per the attached client — client_gfx only gates what gets
+        // *sent* (push_gfx). A TUI on a dumb host still lets children draw;
+        // the pixels simply stay server-side until a capable client attaches.
+        let floor = crate::settings::Settings::cached().floor();
         let ids: Vec<u64> = self.panes.iter().map(|p| p.id).collect();
         for id in &ids {
             if let Some(p) = self.pane_mut(*id) {
                 p.set_cell(cell);
-                p.gfx.active = gfx;
+                p.gfx.active = floor != "off";
+                p.gfx.anim = floor == "animation";
                 p.gfx_pushed = u64::MAX;
             }
         }
@@ -1330,6 +1352,55 @@ impl Server {
                 }
             }
             self.gfx_sent.insert((id, img_id, ver));
+        }
+        // Animation frames (4.2): send any not yet delivered for this
+        // attach, chunked like image data. frames_sent tracks the count
+        // per (pane, img, ver) so newly arriving frames stream lazily.
+        let anim_imgs: Vec<(u32, u32)> = snap.images.clone();
+        for (img_id, ver) in anim_imgs {
+            let already = *self.frames_sent.entry((id, img_id, ver)).or_insert(0);
+            let total_frames = self
+                .panes
+                .iter()
+                .find(|p| p.id == id)
+                .and_then(|p| p.gfx.image(img_id))
+                .map(|i| i.frames.len())
+                .unwrap_or(0);
+            for idx in already..total_frames {
+                let mut off = 0usize;
+                while let Some(frame) = self
+                    .panes
+                    .iter()
+                    .find(|p| p.id == id)
+                    .and_then(|p| p.gfx.image(img_id))
+                    .and_then(|i| i.frames.get(idx))
+                {
+                    let total = frame.data.len();
+                    let end = (off + GFX_CHUNK).min(total);
+                    let hdr = GfxFrameHdr {
+                        img: img_id,
+                        ver,
+                        idx: idx as u32,
+                        gap_ms: frame.gap_ms,
+                        format: frame.format,
+                        zlib: frame.zlib,
+                        w: frame.w,
+                        h: frame.h,
+                        off: off as u32,
+                        total: total as u32,
+                    }
+                    .encode();
+                    let mut data = Vec::with_capacity(GFX_FRAME_HDR + end - off);
+                    data.extend_from_slice(&hdr);
+                    data.extend_from_slice(&frame.data[off..end]);
+                    self.reply(gen, T_GFX_FRAME, id, &data);
+                    off = end;
+                    if off >= total {
+                        break;
+                    }
+                }
+            }
+            self.frames_sent.insert((id, img_id, ver), total_frames);
         }
         let json = serde_json::to_vec(&snap).unwrap_or_default();
         self.reply(gen, T_GFX_STATE, id, &json);
@@ -1422,7 +1493,8 @@ impl Server {
         let (rows, cols) = self.size;
         let mut pane = SrvPane::spawn(id, name, rows, cols, cwd, preload, self.tx.clone())?;
         pane.set_cell(self.client_cell);
-        pane.gfx.active = self.client_gfx;
+        pane.gfx.active = crate::settings::Settings::cached().floor() != "off";
+        pane.gfx.anim = crate::settings::Settings::cached().floor() == "animation";
         let pname = pane.name.clone();
         self.panes.push(pane);
         self.dirty = true;

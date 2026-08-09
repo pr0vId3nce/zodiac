@@ -73,6 +73,12 @@ pub struct Settings {
     /// mid-response" line — fires `--resume` immediately on sight.
     #[serde(default = "default_true")]
     pub connection_watch: bool,
+    /// Capability floor (ADR 0005): what the server advertises to child
+    /// apps regardless of the attached client — "off", "images" (default),
+    /// or "animation". Children keep TERM=xterm-256color; degradation
+    /// happens at client render time. Applies to newly probed apps only.
+    #[serde(default)]
+    pub capability_floor: String,
     /// Cursor shape in panes: "auto" (follow the inner app's DECSCUSR),
     /// "block", "underline", or "bar".
     #[serde(default)]
@@ -211,6 +217,18 @@ impl Settings {
             })
             .unwrap_or_default()
             .join("zodiac/config.json")
+    }
+
+    /// The effective capability floor (ADR 0005): unset/unknown values
+    /// mean "images" — the v1 default that matches what every client
+    /// ships. "off" silences graphics probe replies entirely;
+    /// "animation" additionally accepts kitty animation frames.
+    pub fn floor(&self) -> &'static str {
+        match self.capability_floor.as_str() {
+            "off" => "off",
+            "animation" => "animation",
+            _ => "images",
+        }
     }
 
     pub fn load() -> Self {

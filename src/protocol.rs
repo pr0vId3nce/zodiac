@@ -116,6 +116,63 @@ impl GfxImgHdr {
 
 const MAX_FRAME: usize = 8 * 1024 * 1024;
 
+/// One animation-frame data chunk for pane f.id (roadmap 4.2): 34-byte
+/// GfxFrameHdr + payload, chunked like T_GFX_IMG. Old clients skip it.
+pub const T_GFX_FRAME: u8 = 35;
+
+/// T_GFX_FRAME payload header (34 bytes; layout mirrors GfxImgHdr with the
+/// frame index + display gap added).
+pub const GFX_FRAME_HDR: usize = 34;
+
+pub struct GfxFrameHdr {
+    pub img: u32,
+    pub ver: u32,
+    pub idx: u32,
+    pub gap_ms: u32,
+    pub format: u8,
+    pub zlib: bool,
+    pub w: u32,
+    pub h: u32,
+    pub off: u32,
+    pub total: u32,
+}
+
+impl GfxFrameHdr {
+    pub fn encode(&self) -> [u8; GFX_FRAME_HDR] {
+        let mut hdr = [0u8; GFX_FRAME_HDR];
+        hdr[0..4].copy_from_slice(&self.img.to_le_bytes());
+        hdr[4..8].copy_from_slice(&self.ver.to_le_bytes());
+        hdr[8..12].copy_from_slice(&self.idx.to_le_bytes());
+        hdr[12..16].copy_from_slice(&self.gap_ms.to_le_bytes());
+        hdr[16] = self.format;
+        hdr[17] = self.zlib as u8;
+        hdr[18..22].copy_from_slice(&self.w.to_le_bytes());
+        hdr[22..26].copy_from_slice(&self.h.to_le_bytes());
+        hdr[26..30].copy_from_slice(&self.off.to_le_bytes());
+        hdr[30..34].copy_from_slice(&self.total.to_le_bytes());
+        hdr
+    }
+
+    pub fn decode(data: &[u8]) -> Option<Self> {
+        if data.len() < GFX_FRAME_HDR {
+            return None;
+        }
+        let u = |r: std::ops::Range<usize>| u32::from_le_bytes(data[r].try_into().unwrap());
+        Some(Self {
+            img: u(0..4),
+            ver: u(4..8),
+            idx: u(8..12),
+            gap_ms: u(12..16),
+            format: data[16],
+            zlib: data[17] != 0,
+            w: u(18..22),
+            h: u(22..26),
+            off: u(26..30),
+            total: u(30..34),
+        })
+    }
+}
+
 /// T_PERM_REQ payload: one pending tool-permission request from an agent
 /// pane, produced by claude's `control_request`/`can_use_tool` (ADR 0002).
 /// The server-side inbox is authoritative: requests persist until answered

@@ -695,6 +695,15 @@ struct App {
     tx: Sender<AppEvent>,
 }
 
+/// Emit one synchronized-output boundary marker straight to the host,
+/// flushed so it lands on the wire before (or after) the frame it brackets.
+fn sync_output(seq: &[u8]) {
+    use std::io::Write as _;
+    let mut out = std::io::stdout();
+    let _ = out.write_all(seq);
+    let _ = out.flush();
+}
+
 pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str> {
     let sock = connect_or_spawn(session)?;
     let (tx, rx) = channel();
@@ -834,12 +843,23 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
     app.home_queried = Some(Instant::now());
 
     while !app.quit {
-        terminal.draw(|f| app.draw(f))?;
-        app.kitty_overlay();
-        app.pane_overlay();
-        app.orb_overlay();
-        app.chat_overlay();
-        app.cursor_sync();
+        // Synchronized output (DECSET 2026): the ratatui diff and the four
+        // escape-emitting overlay passes land as one atomic frame on hosts
+        // that support it, so text and graphics never tear against each
+        // other. Hosts that don't simply ignore the unknown DECSET. The
+        // end marker is emitted even when draw errors — a dangling 2026h
+        // would freeze the host's view until its sync timeout.
+        sync_output(b"\x1b[?2026h");
+        let drawn = terminal.draw(|f| app.draw(f));
+        if drawn.is_ok() {
+            app.kitty_overlay();
+            app.pane_overlay();
+            app.orb_overlay();
+            app.chat_overlay();
+            app.cursor_sync();
+        }
+        sync_output(b"\x1b[?2026l");
+        drawn?;
         if app.main_size != app.sent_size {
             app.send_resize();
         }

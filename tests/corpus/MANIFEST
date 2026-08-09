@@ -1,0 +1,18 @@
+# Corpus recordings: exact PTY byte streams captured with ptyrec (PTYREC1
+# format, see src/corpus.rs). All at 50x120, TERM=xterm-256color, driven by
+# piped keystroke scripts with sleeps between phases.
+#
+# NEVER re-capture to fix a failing test — goldens re-baseline only with a
+# REBASELINE: note (docs/roadmap.md, Guardrails).
+#
+# file                app + version              what it exercises
+vim.ptyrec            NVIM v0.12.4 (-u NONE)     alt screen, scroll regions, split windows, Ctrl-D/U paging
+less.ptyrec           less 704                   paging, search highlight, alt-screen quit/restore
+fzf.ptyrec            fzf 0.74.1                 fullscreen redraws, live filtering, cursor movement
+htop.ptyrec           htop 3.5.2 (nixpkgs)       heavy SGR color, meters, full-screen refresh
+timg-kitty.ptyrec     timg 1.6.3 (-pk, f=100)    kitty graphics APC transmit+display, terminal probes (CSI 16t, DA1, DSR, >q)
+#
+# Flagged follow-ups (need a human at the keyboard; record via:
+#   cargo build --bin ptyrec && ./target/debug/ptyrec -o tests/corpus/<name>.ptyrec -- <cmd>):
+#   claude.ptyrec  — claude TUI: include a tool-permission prompt and a spinner phase
+#   pi.ptyrec      — pi session: include its footer/status line while working

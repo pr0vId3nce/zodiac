@@ -40,7 +40,13 @@ pub struct GuiApp {
     mods: ModifiersState,
     cursor_px: (f64, f64),
     wheel_accum: f32,
-    tab_hits: Vec<(usize, std::ops::Range<f32>)>,
+    tab_hits: Vec<(usize, [f32; 4])>,
+    /// Persisted settings (config.json); currently just the tab placement,
+    /// a placeholder for more to come.
+    settings: zodiac::settings::Settings,
+    /// Fullscreen settings page open (Ctrl+S), with the highlighted row.
+    settings_open: bool,
+    settings_row: usize,
     sent_grid: (u16, u16),
     want_quit: bool,
     pub exit_msg: Option<String>,
@@ -76,6 +82,9 @@ impl GuiApp {
             cursor_px: (0.0, 0.0),
             wheel_accum: 0.0,
             tab_hits: Vec::new(),
+            settings: zodiac::settings::Settings::load(),
+            settings_open: false,
+            settings_row: 0,
             sent_grid: (0, 0),
             want_quit: false,
             exit_msg: None,
@@ -308,9 +317,116 @@ impl GuiApp {
 
     // ------------------------------------------------------------- input
 
+    /// The settings rows and their presets. A placeholder list for now —
+    /// add a `(label, values)` entry plus arms in `setting_sel`/`set_setting`.
+    const SETTING_SPECS: &'static [(&'static str, &'static [&'static str])] =
+        &[("Pane tabs", &["top", "side"])];
+
+    /// Current preset index for setting `row`.
+    fn setting_sel(&self, row: usize) -> usize {
+        match row {
+            0 => usize::from(self.settings.gui_tabs() == "side"),
+            _ => 0,
+        }
+    }
+
+    /// Store preset `sel` for setting `row` (does not persist/apply).
+    fn set_setting(&mut self, row: usize, sel: usize) {
+        if row == 0 {
+            self.settings.gui_tabs = if sel == 1 { "side" } else { "top" }.into();
+        }
+    }
+
+    /// Snapshot of the rows for the renderer.
+    fn settings_view_rows(&self) -> Vec<crate::render::SettingRow> {
+        Self::SETTING_SPECS
+            .iter()
+            .enumerate()
+            .map(|(i, (label, values))| crate::render::SettingRow {
+                label,
+                values: values.to_vec(),
+                sel: self.setting_sel(i),
+            })
+            .collect()
+    }
+
+    /// Cycle the selected row's preset, persist, and apply live.
+    fn cycle_setting(&mut self, dir: isize) {
+        let row = self.settings_row;
+        let n = Self::SETTING_SPECS[row].1.len() as isize;
+        if n == 0 {
+            return;
+        }
+        let next = (self.setting_sel(row) as isize + dir).rem_euclid(n) as usize;
+        self.set_setting(row, next);
+        self.settings.save();
+        self.apply_settings();
+    }
+
+    /// Push the current settings into the renderer and resend the grid size
+    /// (tab placement changes the usable grid area).
+    fn apply_settings(&mut self) {
+        let side = self.settings.gui_tabs() == "side";
+        if let Some(r) = self.renderer.as_mut() {
+            r.set_tab_side(side);
+        }
+        // Grid dimensions changed under the new chrome — re-announce.
+        self.sent_grid = (0, 0);
+        self.sync_size();
+    }
+
+    fn settings_key(&mut self, key: &Key) {
+        let rows = Self::SETTING_SPECS.len();
+        match key {
+            Key::Named(NamedKey::Escape) => {
+                self.settings_open = false;
+            }
+            Key::Named(NamedKey::ArrowUp) if rows > 0 => {
+                self.settings_row = (self.settings_row + rows - 1) % rows;
+            }
+            Key::Named(NamedKey::ArrowDown) if rows > 0 => {
+                self.settings_row = (self.settings_row + 1) % rows;
+            }
+            Key::Named(NamedKey::ArrowLeft) => self.cycle_setting(-1),
+            Key::Named(NamedKey::ArrowRight | NamedKey::Enter | NamedKey::Space) => {
+                self.cycle_setting(1)
+            }
+            _ => {}
+        }
+        self.request_redraw();
+    }
+
     fn on_key(&mut self, ev: winit::event::KeyEvent) {
         if ev.state != ElementState::Pressed {
             return;
+        }
+        // Ctrl+S toggles the fullscreen settings page.
+        if self.mods.control_key() {
+            if let Key::Character(s) = &ev.logical_key {
+                if s.eq_ignore_ascii_case("s") {
+                    self.settings_open = !self.settings_open;
+                    self.settings_row = 0;
+                    self.request_redraw();
+                    return;
+                }
+            }
+        }
+        // While the settings page is open it owns the keyboard.
+        if self.settings_open {
+            self.settings_key(&ev.logical_key);
+            return;
+        }
+        // Alt+1..9 jumps straight to a pane (Alt+1 = first).
+        if self.mods.alt_key() {
+            if let Key::Character(s) = &ev.logical_key {
+                if let Some(d) = s.chars().next().and_then(|c| c.to_digit(10)) {
+                    if d >= 1 && (d as usize) <= self.panes.len() {
+                        self.focus(d as usize - 1);
+                        self.request_redraw();
+                    }
+                    return;
+                }
+            }
         }
         // Pane-switch shortcuts (documented in README): Ctrl+PageUp/Down.
         if self.mods.control_key() {
@@ -518,9 +634,11 @@ impl GuiApp {
         };
         let (cw, ch) = r.cell;
         let (rows, cols) = r.grid_size();
-        let col = ((self.cursor_px.0 / cw as f64).floor() as i64).clamp(0, cols as i64 - 1);
+        let (ox, oy) = r.grid_origin();
+        let col =
+            (((self.cursor_px.0 - ox as f64) / cw as f64).floor() as i64).clamp(0, cols as i64 - 1);
         let row =
-            (((self.cursor_px.1 - ch as f64) / ch as f64).floor() as i64).clamp(0, rows as i64 - 1);
+            (((self.cursor_px.1 - oy as f64) / ch as f64).floor() as i64).clamp(0, rows as i64 - 1);
         (col as u16, row as u16)
     }
 
@@ -598,23 +716,23 @@ impl GuiApp {
     }
 
     fn on_click(&mut self, state: ElementState, button: winit::event::MouseButton) {
-        let ch = self.renderer.as_ref().map(|r| r.cell.1).unwrap_or(20.0) as f64;
-        // Tab bar click switches pane.
-        if state == ElementState::Pressed
-            && button == winit::event::MouseButton::Left
-            && self.cursor_px.1 < ch
-        {
-            let x = self.cursor_px.0 as f32;
+        // Clicks do nothing on the settings page (keyboard-driven).
+        if self.settings_open {
+            return;
+        }
+        // Tab click switches pane — hit rects work for top and side tabs.
+        if state == ElementState::Pressed && button == winit::event::MouseButton::Left {
+            let (x, y) = (self.cursor_px.0 as f32, self.cursor_px.1 as f32);
             if let Some(idx) = self
                 .tab_hits
                 .iter()
-                .find(|(_, r)| r.contains(&x))
+                .find(|(_, r)| x >= r[0] && x < r[2] && y >= r[1] && y < r[3])
                 .map(|(i, _)| *i)
             {
                 self.focus(idx);
                 self.request_redraw();
+                return;
             }
-            return;
         }
         let btn = match button {
             winit::event::MouseButton::Left => MouseButton::Left,
@@ -654,9 +772,18 @@ impl GuiApp {
     }
 
     fn redraw(&mut self) {
+        // Computed before borrowing the renderer mutably.
+        let settings_rows = self.settings_open.then(|| self.settings_view_rows());
+        let settings_cursor = self.settings_row;
         let Some(r) = self.renderer.as_mut() else {
             return;
         };
+        let settings_view = settings_rows
+            .as_ref()
+            .map(|rows| crate::render::SettingsView {
+                rows,
+                cursor: settings_cursor,
+            });
         let out = r.render(
             &self.panes,
             self.active,
@@ -664,6 +791,7 @@ impl GuiApp {
             &self.session,
             &mut self.anim,
             Instant::now(),
+            settings_view,
         );
         self.tab_hits = out.tab_hits;
         // Animation timer (4.2): armed only while a visible image runs.
@@ -716,7 +844,9 @@ impl ApplicationHandler<UserEvent> for GuiApp {
         window.set_ime_allowed(true);
         let fonts = self.fonts.take().expect("fonts consumed once");
         match Renderer::new(window, fonts) {
-            Ok(r) => {
+            Ok(mut r) => {
+                // Honor the saved tab placement before the first sync/draw.
+                r.set_tab_side(self.settings.gui_tabs() == "side");
                 self.renderer = Some(r);
                 self.sync_size();
                 self.request_redraw();

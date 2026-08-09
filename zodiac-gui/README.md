@@ -43,6 +43,18 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
 - **Chrome (3.6)**: tab bar with status dots (working / needs_input / done /
   idle) and active highlight; status line with session, pane title, grid.
 
+## Keys / settings
+
+- **Ctrl+PageUp / Ctrl+PageDown** — previous / next pane.
+- **Alt+1 … Alt+9** — jump straight to a pane by number.
+- **Ctrl+S** — open the fullscreen settings page (Esc closes). ↑/↓ select a
+  row, ←/→ or Enter cycle its value; changes persist to
+  `~/.config/zodiac/config.json` and apply live.
+- Current settings: **Pane tabs** — `top` (a bar across the top) or `side`
+  (a left column, like the TUI sidebar). A placeholder page; more settings
+  land here over time. The `gui_tabs` key is GUI-only (the TUI/server
+  ignore it).
+
 ## Fonts
 
 The system font database is loaded via fontconfig (cosmic-text's default).

@@ -13,7 +13,6 @@
 
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::ops::Range;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -193,11 +192,29 @@ struct ImgTex {
 /// Texture cache key: (pane id, img id, ver, display frame — 0 = root).
 type TexKey = (u64, u32, u32, u32);
 
+/// Width of the side-tab column, in cells.
+const SIDE_TAB_COLS: usize = 22;
+
+/// A row on the fullscreen settings page (roadmap: placeholder settings).
+/// `values` are the cyclable presets; `sel` indexes the current one.
+pub struct SettingRow {
+    pub label: &'static str,
+    pub values: Vec<&'static str>,
+    pub sel: usize,
+}
+
+/// What the settings page needs to render: its rows and the highlighted one.
+pub struct SettingsView<'a> {
+    pub rows: &'a [SettingRow],
+    pub cursor: usize,
+}
+
 /// What one redraw hands back to the app.
 #[derive(Default)]
 pub struct FrameOut {
-    /// Tab bar hit ranges: (pane index, px range) for click-to-focus.
-    pub tab_hits: Vec<(usize, Range<f32>)>,
+    /// Tab hit rects: (pane index, [x0, y0, x1, y1]) for click-to-focus —
+    /// a rect (not a 1-D range) so it works for both top and side tabs.
+    pub tab_hits: Vec<(usize, [f32; 4])>,
     /// Draw-time clamp of the active agent pane's transcript scroll.
     pub agent_scroll: Option<usize>,
     /// Earliest wall-clock deadline at which a visible running animation
@@ -240,6 +257,13 @@ pub struct Renderer {
     textures: HashMap<TexKey, Option<ImgTex>>,
     // metrics + damage signatures
     pub cell: (f32, f32),
+    /// Pane tabs on the left as a column ("side") vs a top bar ("top").
+    /// Set from settings; changes the grid's origin + implied size.
+    tab_side: bool,
+    /// Grid x-origin in px: the side-tab column width when `tab_side`, else
+    /// 0. Set at the top of each `render()` and read by the grid/image/
+    /// agent builders so one value moves the whole content region.
+    ox: f32,
     grid_sig: u64,
     top_sig: u64,
     bottom_sig: u64,
@@ -499,6 +523,8 @@ impl Renderer {
             img_cap,
             textures: HashMap::new(),
             cell,
+            tab_side: false,
+            ox: 0.0,
             grid_sig: 0,
             top_sig: 0,
             bottom_sig: 0,
@@ -543,11 +569,40 @@ impl Renderer {
         self.modal_sig = 0;
     }
 
-    /// Pane grid size implied by the window: full frame minus the 1-line
-    /// tab bar and 1-line status bar.
+    /// Toggle side vs top pane tabs (persisted setting). Invalidates the
+    /// text signatures so everything re-lays out at the new origin.
+    pub fn set_tab_side(&mut self, side: bool) {
+        if self.tab_side != side {
+            self.tab_side = side;
+            self.grid_sig = 0;
+            self.top_sig = 0;
+            self.bottom_sig = 0;
+            self.input_sig = 0;
+            self.modal_sig = 0;
+        }
+    }
+
+    /// Grid content origin in px: (x, y). Side tabs push x right by the
+    /// sidebar width and drop the top bar (y = 0); top tabs give (0, ch).
+    pub fn grid_origin(&self) -> (f32, f32) {
+        if self.tab_side {
+            (SIDE_TAB_COLS as f32 * self.cell.0, 0.0)
+        } else {
+            (0.0, self.cell.1)
+        }
+    }
+
+    /// Pane grid size implied by the window, minus the chrome the current
+    /// tab placement reserves: top tabs take a top bar + status bar (2
+    /// rows); side tabs take a left column + status bar (1 row, N cols).
     pub fn grid_size(&self) -> (u16, u16) {
-        let rows = (self.config.height as f32 / self.cell.1).floor() as i32 - 2;
-        let cols = (self.config.width as f32 / self.cell.0).floor() as i32;
+        let total_rows = (self.config.height as f32 / self.cell.1).floor() as i32;
+        let total_cols = (self.config.width as f32 / self.cell.0).floor() as i32;
+        let (rows, cols) = if self.tab_side {
+            (total_rows - 1, total_cols - SIDE_TAB_COLS as i32)
+        } else {
+            (total_rows - 2, total_cols)
+        };
         (
             rows.clamp(2, u16::MAX as i32) as u16,
             cols.clamp(10, u16::MAX as i32) as u16,
@@ -634,6 +689,7 @@ impl Renderer {
         });
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &mut self,
         panes: &[CPane],
@@ -642,6 +698,7 @@ impl Renderer {
         session: &str,
         anim: &mut AnimStore,
         now: Instant,
+        settings: Option<SettingsView>,
     ) -> FrameOut {
         let mut out = FrameOut::default();
         let (w, h) = (self.config.width as f32, self.config.height as f32);
@@ -649,9 +706,17 @@ impl Renderer {
         if w < cw * 4.0 || h < ch * 3.0 {
             return out;
         }
+        // The fullscreen settings page owns the whole frame — no tabs,
+        // grid, or status bar underneath it.
+        if let Some(sv) = settings {
+            return self.render_settings(&sv);
+        }
         let cols = (w / cw).floor() as usize;
-        let grid_top = ch;
+        // One origin drives the whole content region (top vs side tabs).
+        let (ox, grid_top) = self.grid_origin();
+        self.ox = ox;
         let grid_bottom = h - ch;
+        let side = self.tab_side;
 
         let mut rects_under: Vec<RectInst> = Vec::new();
         let mut rects_over: Vec<RectInst> = Vec::new();
@@ -660,22 +725,33 @@ impl Renderer {
         let mut imgs_over: Vec<(i32, ImgInst, TexKey)> = Vec::new();
 
         // ---------------------------------------------------------- chrome
-        rects_under.push(RectInst {
-            pos: [0.0, 0.0],
-            size: [w, ch],
-            color: rgba(CHROME_BG, 1.0),
-        });
+        // Tab strip backdrop: a left column (side) or a top bar (top).
+        if side {
+            rects_under.push(RectInst {
+                pos: [0.0, 0.0],
+                size: [ox, grid_bottom],
+                color: rgba(CHROME_BG, 1.0),
+            });
+        } else {
+            rects_under.push(RectInst {
+                pos: [0.0, 0.0],
+                size: [w, ch],
+                color: rgba(CHROME_BG, 1.0),
+            });
+        }
         rects_under.push(RectInst {
             pos: [0.0, grid_bottom],
             size: [w, ch],
             color: rgba(CHROME_BG, 1.0),
         });
 
-        // Tab bar: " ● name " per pane, active highlighted. Hit ranges are
-        // estimated at one cell per char — exact for monospace glyphs.
+        // Tabs: " ● name " per pane, active highlighted. Widths are one cell
+        // per char (exact for monospace). Top → laid horizontally into a
+        // one-line buffer; side → one pane per line into a column buffer.
         let mut top_rt = RichText::default();
         let mut x = 0.0f32;
         let mut top_sig_h = DefaultHasher::new();
+        side.hash(&mut top_sig_h);
         for (i, p) in panes.iter().enumerate() {
             let status = state
                 .and_then(|s| s.panes.iter().find(|sp| sp.id == p.id))
@@ -687,35 +763,69 @@ impl Renderer {
                 "done" => [120, 220, 120],
                 _ => [110, 110, 125],
             };
-            let name: String = p.name.chars().filter(|c| *c != '\n').take(24).collect();
-            let chars = 2 + 1 + name.chars().count() + 1;
-            let width = chars as f32 * cw;
-            if i == active {
-                rects_under.push(RectInst {
-                    pos: [x, 0.0],
-                    size: [width, ch],
-                    color: rgba([45, 45, 62], 1.0),
-                });
-            }
+            let cap = if side {
+                SIDE_TAB_COLS.saturating_sub(4)
+            } else {
+                24
+            };
+            let name: String = p.name.chars().filter(|c| *c != '\n').take(cap).collect();
             let fg = if i == active { DEFAULT_FG } else { CHROME_FG };
-            top_rt.push(
-                " ●",
-                SpanAttr {
-                    color: dot,
-                    bold: false,
-                    italic: false,
-                },
-            );
-            top_rt.push(
-                &format!(" {name} "),
-                SpanAttr {
-                    color: fg,
-                    bold: i == active,
-                    italic: false,
-                },
-            );
-            out.tab_hits.push((i, x..x + width));
-            x += width;
+            if side {
+                let y = i as f32 * ch;
+                if i == active {
+                    rects_under.push(RectInst {
+                        pos: [0.0, y],
+                        size: [ox, ch],
+                        color: rgba([45, 45, 62], 1.0),
+                    });
+                }
+                top_rt.push(
+                    " ●",
+                    SpanAttr {
+                        color: dot,
+                        bold: false,
+                        italic: false,
+                    },
+                );
+                top_rt.push(
+                    &format!(" {name}"),
+                    SpanAttr {
+                        color: fg,
+                        bold: i == active,
+                        italic: false,
+                    },
+                );
+                top_rt.push_raw("\n");
+                out.tab_hits.push((i, [0.0, y, ox, y + ch]));
+            } else {
+                let chars = 2 + 1 + name.chars().count() + 1;
+                let width = chars as f32 * cw;
+                if i == active {
+                    rects_under.push(RectInst {
+                        pos: [x, 0.0],
+                        size: [width, ch],
+                        color: rgba([45, 45, 62], 1.0),
+                    });
+                }
+                top_rt.push(
+                    " ●",
+                    SpanAttr {
+                        color: dot,
+                        bold: false,
+                        italic: false,
+                    },
+                );
+                top_rt.push(
+                    &format!(" {name} "),
+                    SpanAttr {
+                        color: fg,
+                        bold: i == active,
+                        italic: false,
+                    },
+                );
+                out.tab_hits.push((i, [x, 0.0, x + width, ch]));
+                x += width;
+            }
             (i == active, status, &name).hash(&mut top_sig_h);
         }
         cols.hash(&mut top_sig_h);
@@ -904,7 +1014,7 @@ impl Renderer {
                         for r in runs {
                             let inst = ImgInst {
                                 rect: [
-                                    r.col as f32 * cw,
+                                    self.ox + r.col as f32 * cw,
                                     grid_top + r.row as f32 * ch,
                                     r.len as f32 * cw,
                                     ch,
@@ -925,7 +1035,7 @@ impl Renderer {
                     }
                     let inst = ImgInst {
                         rect: [
-                            vp.col as f32 * cw + vp.offx as f32,
+                            self.ox + vp.col as f32 * cw + vp.offx as f32,
                             grid_top + (vp.row + scroll) as f32 * ch + vp.offy as f32,
                             vp.cols as f32 * cw,
                             vp.rows as f32 * ch,
@@ -998,7 +1108,7 @@ impl Renderer {
             bottom: self.config.height as i32,
         };
         let grid_bounds = TextBounds {
-            left: 0,
+            left: self.ox as i32,
             top: grid_top as i32,
             right: self.config.width as i32,
             bottom: input_area_top.unwrap_or(grid_bottom) as i32,
@@ -1029,7 +1139,7 @@ impl Renderer {
                 if grid_text_area || is_agent {
                     areas.push(TextArea {
                         buffer: &self.grid_buf,
-                        left: 0.0,
+                        left: self.ox,
                         top: transcript_top,
                         scale: 1.0,
                         bounds: grid_bounds,
@@ -1040,7 +1150,7 @@ impl Renderer {
                 if let Some(top) = input_area_top {
                     areas.push(TextArea {
                         buffer: &self.input_buf,
-                        left: 0.0,
+                        left: self.ox,
                         top,
                         scale: 1.0,
                         bounds: full,
@@ -1142,11 +1252,11 @@ impl Renderer {
                 pass.set_vertex_buffer(0, self.rect_buf.slice(..));
                 pass.draw(0..4, 0..under_n as u32);
             }
-            // Kitty images are clipped to the grid area.
+            // Kitty images are clipped to the grid area (right of side tabs).
             let scissor = (
-                0u32,
+                self.ox as u32,
                 grid_top as u32,
-                self.config.width,
+                self.config.width.saturating_sub(self.ox as u32),
                 (grid_bottom - grid_top).max(1.0) as u32,
             );
             if !imgs_under.is_empty() {
@@ -1195,6 +1305,216 @@ impl Renderer {
         out
     }
 
+    /// Fullscreen settings page: title (top_buf), one row per setting
+    /// (grid_buf, current preset highlighted with `[value]`), footer hint
+    /// (bottom_buf), and a highlight rect behind the selected row. Its own
+    /// render pass — no tabs/grid/status underneath. Re-shaped every frame
+    /// (it's not perf-critical) and it invalidates the normal-view
+    /// signatures so returning to a pane re-lays cleanly.
+    fn render_settings(&mut self, sv: &SettingsView) -> FrameOut {
+        let out = FrameOut::default();
+        let (w, h) = (self.config.width as f32, self.config.height as f32);
+        let (cw, ch) = self.cell;
+        let pad = 3.0 * cw;
+        let title_y = 1.5 * ch;
+        let rows_top = 4.0 * ch;
+
+        // Title.
+        let mut trt = RichText::default();
+        trt.push(
+            "Settings",
+            SpanAttr {
+                color: ACCENT,
+                bold: true,
+                italic: false,
+            },
+        );
+        apply_rich(
+            &mut self.top_buf,
+            &mut self.fonts.system,
+            &self.fonts.family,
+            &trt,
+        );
+
+        // Rows: "label      current-value" with the current preset in accent.
+        let mut rrt = RichText::default();
+        let label_w = 20usize;
+        for row in sv.rows {
+            let pad_lbl = label_w.saturating_sub(row.label.chars().count());
+            let selected = false; // row highlight is a rect, not color
+            let _ = selected;
+            rrt.push(
+                &format!("{}{}", row.label, " ".repeat(pad_lbl)),
+                SpanAttr {
+                    color: DEFAULT_FG,
+                    bold: false,
+                    italic: false,
+                },
+            );
+            for (i, v) in row.values.iter().enumerate() {
+                let cur = i == row.sel;
+                rrt.push(
+                    &format!(" {} ", v),
+                    SpanAttr {
+                        color: if cur { ACCENT } else { CHROME_FG },
+                        bold: cur,
+                        italic: false,
+                    },
+                );
+            }
+            rrt.push_raw("\n");
+        }
+        self.grid_buf.set_wrap(Wrap::None);
+        self.grid_buf.set_size(None, None);
+        apply_rich(
+            &mut self.grid_buf,
+            &mut self.fonts.system,
+            &self.fonts.family,
+            &rrt,
+        );
+
+        // Footer hint.
+        let mut brt = RichText::default();
+        brt.push(
+            "↑/↓ select   ←/→ or Enter change   Esc close",
+            SpanAttr {
+                color: CHROME_FG,
+                bold: false,
+                italic: false,
+            },
+        );
+        apply_rich(
+            &mut self.bottom_buf,
+            &mut self.fonts.system,
+            &self.fonts.family,
+            &brt,
+        );
+
+        // Normal-view buffers now hold settings content — force re-lay next
+        // time a pane is shown.
+        self.top_sig = 0;
+        self.grid_sig = 0;
+        self.bottom_sig = 0;
+
+        // Selected-row highlight rect.
+        let sel_y = rows_top + sv.cursor as f32 * ch;
+        let rects = [RectInst {
+            pos: [pad - cw, sel_y],
+            size: [(w - 2.0 * (pad - cw)).max(0.0), ch],
+            color: rgba([45, 45, 62], 1.0),
+        }];
+        self.queue
+            .write_buffer(&self.rect_buf, 0, bytemuck::cast_slice(&rects));
+
+        // Text areas.
+        self.viewport.update(
+            &self.queue,
+            Resolution {
+                width: self.config.width,
+                height: self.config.height,
+            },
+        );
+        let full = TextBounds {
+            left: 0,
+            top: 0,
+            right: self.config.width as i32,
+            bottom: self.config.height as i32,
+        };
+        let dc = TextColor::rgb(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2]);
+        let areas = vec![
+            TextArea {
+                buffer: &self.top_buf,
+                left: pad,
+                top: title_y,
+                scale: 1.0,
+                bounds: full,
+                default_color: dc,
+                custom_glyphs: &[],
+            },
+            TextArea {
+                buffer: &self.grid_buf,
+                left: pad,
+                top: rows_top,
+                scale: 1.0,
+                bounds: full,
+                default_color: dc,
+                custom_glyphs: &[],
+            },
+            TextArea {
+                buffer: &self.bottom_buf,
+                left: pad,
+                top: h - 2.0 * ch,
+                scale: 1.0,
+                bounds: full,
+                default_color: dc,
+                custom_glyphs: &[],
+            },
+        ];
+        if self
+            .text_main
+            .prepare(
+                &self.device,
+                &self.queue,
+                &mut self.fonts.system,
+                &mut self.atlas,
+                &self.viewport,
+                areas,
+                &mut self.swash,
+            )
+            .is_err()
+        {
+            self.atlas.trim();
+        }
+
+        use wgpu::CurrentSurfaceTexture as CST;
+        let tex = match self.surface.get_current_texture() {
+            CST::Success(t) | CST::Suboptimal(t) => t,
+            _ => {
+                self.surface.configure(&self.device, &self.config);
+                self.window.request_redraw();
+                return out;
+            }
+        };
+        let view = tex.texture.create_view(&Default::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
+        {
+            let bg = rgba(DEFAULT_BG, 1.0);
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("settings"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: bg[0] as f64,
+                            g: bg[1] as f64,
+                            b: bg[2] as f64,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_pipeline(&self.rect_pipeline);
+            pass.set_bind_group(0, &self.rect_bind, &[]);
+            pass.set_vertex_buffer(0, self.rect_buf.slice(..));
+            pass.draw(0..4, 0..rects.len() as u32);
+            let _ = self
+                .text_main
+                .render(&self.atlas, &self.viewport, &mut pass);
+        }
+        self.queue.submit([encoder.finish()]);
+        self.queue.present(tex);
+        out
+    }
+
     /// Grid path (3.3): per-cell bg quads + underline hairlines + cursor
     /// block from the pane's vt100 screen; text re-shaped only when the
     /// cell signature changes.
@@ -1206,6 +1526,7 @@ impl Renderer {
         rects_over: &mut Vec<RectInst>,
     ) {
         let (cw, ch) = self.cell;
+        let ox = self.ox;
         let screen = p.parser.screen();
         let (rows, cols) = screen.size();
         let mut sig = DefaultHasher::new();
@@ -1228,7 +1549,7 @@ impl Renderer {
                 // signature: contents + everything that affects glyphs
                 contents.hash(&mut sig);
                 (fg, cell.italic(), cell.underline(), style.bold).hash(&mut sig);
-                let x = col as f32 * cw;
+                let x = ox + col as f32 * cw;
                 let y = grid_top + row as f32 * ch;
                 if let Some(bg) = bg {
                     rects_under.push(RectInst {
@@ -1251,7 +1572,7 @@ impl Renderer {
             let (r, c) = screen.cursor_position();
             if r < rows && c < cols {
                 rects_over.push(RectInst {
-                    pos: [c as f32 * cw, grid_top + r as f32 * ch],
+                    pos: [ox + c as f32 * cw, grid_top + r as f32 * ch],
                     size: [cw, ch],
                     color: [0.9, 0.9, 0.9, 0.35],
                 });
@@ -1324,12 +1645,13 @@ impl Renderer {
         out: &mut FrameOut,
     ) {
         let (cw, ch) = self.cell;
+        let ox = self.ox;
         let input_top = grid_bottom - ch;
         *input_area_top = Some(input_top);
-        // Prompt row backdrop.
+        // Prompt row backdrop (right of the side-tab column).
         rects_under.push(RectInst {
-            pos: [0.0, input_top],
-            size: [w, ch],
+            pos: [ox, input_top],
+            size: [w - ox, ch],
             color: rgba([22, 22, 30], 1.0),
         });
 
@@ -1421,7 +1743,7 @@ impl Renderer {
                 );
             }
             self.grid_buf.set_wrap(Wrap::Word);
-            self.grid_buf.set_size(Some(w - cw), None);
+            self.grid_buf.set_size(Some(w - ox - cw), None);
             // Proportional shaping for transcript prose (roadmap 4.5):
             // grid panes stay monospace; agent transcripts read as text.
             apply_rich(
@@ -1479,14 +1801,16 @@ impl Renderer {
             );
         }
         rects_over.push(RectInst {
-            pos: [(2 + a.cursor) as f32 * cw, input_top],
+            pos: [ox + (2 + a.cursor) as f32 * cw, input_top],
             size: [cw, ch],
             color: [0.9, 0.9, 0.9, 0.35],
         });
 
-        // Permission modal (first pending request).
+        // Permission modal (first pending request), centered in the grid
+        // region (right of any side-tab column).
         if let Some(pr) = a.perms.first() {
-            let box_w = (w - 8.0 * cw).min(72.0 * cw).max(24.0 * cw);
+            let region = w - ox;
+            let box_w = (region - 8.0 * cw).min(72.0 * cw).max(24.0 * cw);
             let modal_sig = {
                 let mut hh = DefaultHasher::new();
                 (&pr.request_id, box_w as u32).hash(&mut hh);
@@ -1534,7 +1858,7 @@ impl Renderer {
             }
             let lines = self.modal_buf.layout_runs().count().max(3);
             let box_h = lines as f32 * ch + 1.5 * ch;
-            let mx = (w - box_w) / 2.0;
+            let mx = ox + (region - box_w) / 2.0;
             let my = (grid_top + (grid_bottom - grid_top - box_h) / 2.0).max(grid_top);
             rects_over.push(RectInst {
                 pos: [mx - 2.0, my - 2.0],

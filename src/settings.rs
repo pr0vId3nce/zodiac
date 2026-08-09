@@ -102,6 +102,11 @@ pub struct Settings {
     /// Cursor tint while a pane is focused: a color name or "off".
     #[serde(default)]
     pub cursor_color: String,
+    /// GUI client only (zodiac-gui): where the pane tabs sit — "top"
+    /// (default, a tab bar across the top) or "side" (a left column, like
+    /// the TUI's sidebar). Ignored by the TUI/server.
+    #[serde(default)]
+    pub gui_tabs: String,
     /// Hide the keybinding hints in the bottom status bar (they stay
     /// visible in the settings page's Controls column).
     #[serde(default)]
@@ -241,6 +246,14 @@ impl Settings {
             "off" => "off",
             "animation" => "animation",
             _ => "images",
+        }
+    }
+
+    /// GUI tab placement (zodiac-gui): "side" or "top" (default).
+    pub fn gui_tabs(&self) -> &str {
+        match self.gui_tabs.as_str() {
+            "side" => "side",
+            _ => "top",
         }
     }
 

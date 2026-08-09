@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Pull the latest zodiac and rebuild exactly what the new commits touched:
+# the Rust binary, the astrolabe web bundle, the bridge service, or nothing.
+#
+#   ./update.sh              pull, then build what changed
+#   ./update.sh --rebuild    build everything even if already up to date
+#   ./update.sh --check      report what's waiting upstream, change nothing
+set -euo pipefail
+cd "$(dirname "$0")"
+
+MODE=pull
+case "${1:-}" in
+  --rebuild) MODE=rebuild ;;
+  --check)   MODE=check ;;
+  "")        ;;
+  *) echo "usage: $0 [--rebuild|--check]" >&2; exit 2 ;;
+esac
+
+say() { printf '\n── %s\n' "$*"; }
+note() { printf '   %s\n' "$*"; }
+
+# The installer regenerates these two PNGs byte-differently on every web
+# build, so they show up dirty without anyone having edited them. They're
+# the only paths this script is willing to throw away.
+CHURN=(astrolabe/web/public/icon-192.png astrolabe/web/public/icon-512.png)
+drop_churn() { git checkout -- "${CHURN[@]}" 2>/dev/null || true; }
+
+# cargo needs a linker. NixOS has no system cc, so borrow one for the build
+# rather than assuming a toolchain is on PATH.
+if command -v cc >/dev/null 2>&1; then
+  cargo_run() { cargo "$@"; }
+elif command -v nix >/dev/null 2>&1; then
+  cargo_run() { nix shell nixpkgs#gcc --command cargo "$@"; }
+else
+  cargo_run() { echo "no cc and no nix — can't build" >&2; return 1; }
+fi
+
+# ── refuse to run over work in progress
+# This repo is edited from more than one machine, and sometimes by more
+# than one agent session at once. A tracked file that isn't build churn
+# means someone is mid-change; a pull here could bury it. Untracked files
+# are left alone — a fast-forward can't touch them, and git refuses on its
+# own if an incoming file would land on top of one.
+drop_churn
+if [ -n "$(git status --porcelain --untracked-files=no)" ]; then
+  echo "the working tree has uncommitted changes:" >&2
+  git status --short --untracked-files=no >&2
+  echo >&2
+  echo "commit, stash, or discard them first — refusing to pull over them." >&2
+  exit 1
+fi
+
+say "fetching"
+git fetch origin
+OLD=$(git rev-parse HEAD)
+UPSTREAM=$(git rev-parse origin/main)
+
+if [ "$OLD" = "$UPSTREAM" ]; then
+  note "already at $(git log --oneline -1)"
+  [ "$MODE" = rebuild ] || exit 0
+  note "--rebuild given, building anyway"
+else
+  git --no-pager log --oneline "$OLD..$UPSTREAM"
+  if [ "$MODE" = check ]; then
+    note "--check given, stopping here"
+    exit 0
+  fi
+  say "pulling"
+  git pull --ff-only
+fi
+
+NEW=$(git rev-parse HEAD)
+
+# ── work out what actually needs rebuilding
+if [ "$MODE" = rebuild ]; then
+  rust=1 web=1 bridge=1
+else
+  changed=$(git diff --name-only "$OLD" "$NEW")
+  rust=0 web=0 bridge=0
+  grep -qE '^(src/|vendor/|build\.rs|Cargo\.(toml|lock))' <<<"$changed" && rust=1
+  grep -qE '^astrolabe/web/'                              <<<"$changed" && web=1
+  grep -qE '^astrolabe/(bridge/|astrolabe\.service|install\.sh)' <<<"$changed" && bridge=1
+fi
+
+if [ "$rust$web$bridge" = "000" ]; then
+  note "nothing that needs building changed"
+  exit 0
+fi
+
+# ── rust
+if [ "$rust" = 1 ]; then
+  say "testing"
+  cargo_run test --release 2>&1 | tail -3
+  say "building"
+  cargo_run build --release 2>&1 | tail -2
+
+  say "installing"
+  DEST="$HOME/.cargo/bin/zodiac"
+  # rm before cp: overwriting a running binary in place fails with ETXTBSY,
+  # and unlinking it also gives us the staleness check at the end for free.
+  mkdir -p "$(dirname "$DEST")"
+  rm -f "$DEST"
+  cp target/release/zodiac "$DEST"
+  note "$DEST"
+fi
+
+# ── astrolabe (web bundle and/or bridge service)
+if [ "$web" = 1 ] || [ "$bridge" = 1 ]; then
+  say "astrolabe"
+  ./astrolabe/install.sh 2>&1 | tail -4
+  drop_churn
+
+  # install.sh writes the unit and enables it, but leaves an already-running
+  # service alone — so restart only when the bridge's own code moved. A
+  # web-only change needs no restart: the bridge serves dist/ off disk.
+  if [ "$bridge" = 1 ] && [ "$(uname)" != Darwin ] && command -v systemctl >/dev/null 2>&1; then
+    say "restarting the bridge"
+    systemctl --user restart astrolabe.service
+    sleep 2
+  fi
+
+  # ── health check, best effort: ask whatever address the bridge is bound to
+  port="${ASTROLABE_PORT:-7979}"
+  addr=""
+  if command -v ss >/dev/null 2>&1; then
+    addr=$(ss -H -ltn "sport = :$port" 2>/dev/null | awk '{print $4}' | head -1)
+  elif command -v lsof >/dev/null 2>&1; then
+    addr=$(lsof -nP -iTCP:"$port" -sTCP:LISTEN 2>/dev/null | awk 'NR==2{print $9}')
+  fi
+  case "$addr" in
+    ""|0.0.0.0:*|\*:*|"[::]":*) addr="127.0.0.1:$port" ;;
+  esac
+  say "health"
+  curl -fsS --max-time 5 "http://$addr/healthz" || note "no answer from $addr"
+  echo
+fi
+
+# ── is the running server still the old binary?
+# rm-then-cp unlinks the file the live server is executing, so on Linux its
+# /proc/<pid>/exe keeps pointing at the deleted inode. That's an exact
+# signal, not a guess: this process is running code that's no longer on disk.
+stale=""
+for pid in $(pgrep -f 'zodiac --serv[e]r' 2>/dev/null || true); do
+  exe=$(readlink "/proc/$pid/exe" 2>/dev/null || true)
+  case "$exe" in *"(deleted)") stale="$stale $pid" ;; esac
+done
+if [ -n "$stale" ]; then
+  say "heads up"
+  note "zodiac server(s)$stale are still running the previous binary."
+  note "server-side changes land after you restart it yourself:"
+  note "Alt+Shift+Q, then \`zodiac\`."
+fi
+
+say "now at $(git log --oneline -1)"

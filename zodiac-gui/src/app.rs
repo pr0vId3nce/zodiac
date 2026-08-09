@@ -11,12 +11,13 @@ use crossterm::event::{
     KeyCode, KeyEvent as CKeyEvent, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use winit::application::ApplicationHandler;
-use winit::event::{ElementState, Ime, MouseScrollDelta, WindowEvent};
+use winit::event::{ElementState, Ime, MouseScrollDelta, StartCause, WindowEvent};
 use winit::event_loop::{ActiveEventLoop, ControlFlow};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
-use zodiac::client_core::{encode_key, encode_mouse, CPane};
+use zodiac::client_core::{encode_key, encode_key_kitty, encode_mouse, CPane};
 use zodiac::protocol::*;
 
+use crate::anim::AnimStore;
 use crate::font::Fonts;
 use crate::render::Renderer;
 
@@ -46,6 +47,14 @@ pub struct GuiApp {
     /// Testing hook: `ZODIAC_GUI_EXIT_AFTER_MS` closes the window after a
     /// delay so smoke tests can run unattended.
     exit_at: Option<Instant>,
+    /// Animation frame store + playheads (roadmap 4.2).
+    anim: AnimStore,
+    /// Next animation frame-flip deadline from the last redraw; drives the
+    /// WaitUntil timer — absent when nothing visible animates.
+    next_anim: Option<Instant>,
+    /// System clipboard handle for OSC 52 write-through (roadmap 4.7),
+    /// opened lazily on the first T_CLIPBOARD.
+    clipboard: Option<arboard::Clipboard>,
 }
 
 impl GuiApp {
@@ -71,6 +80,9 @@ impl GuiApp {
             want_quit: false,
             exit_msg: None,
             exit_at,
+            anim: AnimStore::default(),
+            next_anim: None,
+            clipboard: None,
         }
     }
 
@@ -207,6 +219,7 @@ impl GuiApp {
                 }
             }
             T_PANE_CLOSED => {
+                self.anim.drop_pane(f.id);
                 if let Some(i) = self.panes.iter().position(|p| p.id == f.id) {
                     self.panes.remove(i);
                     if self.panes.is_empty() {
@@ -224,6 +237,8 @@ impl GuiApp {
                     let mut dead = Vec::new(); // outer-terminal ids: TUI-only
                     if let Some(p) = self.panes.iter_mut().find(|p| p.id == f.id) {
                         p.apply_gfx_state(snap, &mut dead);
+                        // Frame store follows the server's image lifetime.
+                        self.anim.retain_pane(f.id, &p.gfx.images);
                     }
                 }
             }
@@ -234,6 +249,23 @@ impl GuiApp {
                     if let Some(p) = self.panes.iter_mut().find(|p| p.id == f.id) {
                         p.apply_gfx_chunk(&hdr, chunk, &mut dead);
                     }
+                }
+            }
+            T_GFX_FRAME => {
+                // Animation frame chunk (4.2): reassembled client-side,
+                // keyed per (pane, img, ver, idx).
+                if let Some(hdr) = GfxFrameHdr::decode(&f.data) {
+                    let chunk = &f.data[GFX_FRAME_HDR..];
+                    if self.panes.iter().any(|p| p.id == f.id) {
+                        self.anim.apply_chunk(f.id, &hdr, chunk);
+                    }
+                }
+            }
+            T_CLIPBOARD => {
+                // OSC 52 write-through (4.7): the server only forwards
+                // writes the user enabled (`clipboard_write` setting).
+                if let Ok(cwr) = serde_json::from_slice::<ClipboardWrite>(&f.data) {
+                    self.write_clipboard(&cwr.selection, cwr.text);
                 }
             }
             T_AGENT_EVENT => {
@@ -312,12 +344,79 @@ impl GuiApp {
             self.agent_key(ck);
         } else {
             let id = p.id;
-            let app_cursor = p.parser.screen().application_cursor();
-            if let Some(bytes) = encode_key(&ck, app_cursor) {
+            let screen = p.parser.screen();
+            let app_cursor = screen.application_cursor();
+            // Kitty keyboard (4.4): when the pane's flag stack is on, the
+            // GUI always synthesizes CSI-u — it is not gated on a host
+            // probe like the TUI. `encode_key_kitty` returns None for
+            // events whose legacy bytes are already unambiguous (and when
+            // flags are 0), so plain text stays plain text.
+            let flags = if p.kitty_kill {
+                0
+            } else {
+                screen.kitty_keyboard_flags()
+            };
+            if let Some(bytes) =
+                encode_key_kitty(&ck, flags).or_else(|| encode_key(&ck, app_cursor))
+            {
                 self.send_input(id, &bytes);
             }
         }
         self.request_redraw();
+    }
+
+    /// Drag-and-drop (4.6): dropped files land in the active pane as their
+    /// (shell-quoted) path text — content attachment is iceboxed. Agent
+    /// pane: appended to the local prompt editor so the user reviews before
+    /// Enter submits it as T_AGENT_INPUT. Pty pane: sent as T_INPUT,
+    /// bracketed-paste-wrapped when the app enabled paste mode, with a
+    /// trailing space so consecutive drops stay word-separated.
+    fn on_drop(&mut self, path: std::path::PathBuf) {
+        let quoted = shell_quote(&path.to_string_lossy());
+        let Some(p) = self.panes.get_mut(self.active) else {
+            return;
+        };
+        if p.is_agent() {
+            if !p.agent.input.is_empty() && !p.agent.input.ends_with(' ') {
+                p.agent.input.push(' ');
+            }
+            p.agent.input.push_str(&quoted);
+            p.agent.cursor = p.agent.input.chars().count();
+        } else {
+            let id = p.id;
+            let text = format!("{quoted} ");
+            let bytes = if p.parser.screen().bracketed_paste() {
+                format!("\x1b[200~{text}\x1b[201~").into_bytes()
+            } else {
+                text.into_bytes()
+            };
+            self.send_input(id, &bytes);
+        }
+        self.request_redraw();
+    }
+
+    /// OSC 52 write-through (4.7): selection strings containing 'p' target
+    /// the primary selection (arboard supports it on Linux); anything else
+    /// — including combined "pc" — also lands on the regular clipboard.
+    fn write_clipboard(&mut self, selection: &str, text: String) {
+        use arboard::{LinuxClipboardKind, SetExtLinux};
+        if self.clipboard.is_none() {
+            self.clipboard = arboard::Clipboard::new().ok();
+        }
+        let Some(cb) = self.clipboard.as_mut() else {
+            return;
+        };
+        let primary = selection.contains('p');
+        let regular = !primary || selection.chars().any(|c| c != 'p');
+        if primary {
+            let _ = cb
+                .set()
+                .clipboard(LinuxClipboardKind::Primary)
+                .text(text.clone());
+        }
+        if regular {
+            let _ = cb.set().clipboard(LinuxClipboardKind::Clipboard).text(text);
+        }
     }
 
     /// Keys for an active agent pane — mirrors the TUI's `handle_agent_key`:
@@ -558,8 +657,17 @@ impl GuiApp {
         let Some(r) = self.renderer.as_mut() else {
             return;
         };
-        let out = r.render(&self.panes, self.active, self.state.as_ref(), &self.session);
+        let out = r.render(
+            &self.panes,
+            self.active,
+            self.state.as_ref(),
+            &self.session,
+            &mut self.anim,
+            Instant::now(),
+        );
         self.tab_hits = out.tab_hits;
+        // Animation timer (4.2): armed only while a visible image runs.
+        self.next_anim = out.next_anim;
         if let Some(s) = out.agent_scroll {
             if let Some(p) = self.panes.get_mut(self.active) {
                 p.agent.scroll = s;
@@ -573,6 +681,20 @@ fn char_byte(s: &str, char_idx: usize) -> usize {
         .nth(char_idx)
         .map(|(i, _)| i)
         .unwrap_or(s.len())
+}
+
+/// Minimal POSIX single-quoting for dropped paths: pass clean paths
+/// through untouched, wrap anything else in single quotes (embedded quotes
+/// become `'\''`) so the shell — or an agent running one — sees one word.
+fn shell_quote(s: &str) -> String {
+    let clean = !s.is_empty()
+        && s.chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | '~' | '+'));
+    if clean {
+        s.to_string()
+    } else {
+        format!("'{}'", s.replace('\'', "'\\''"))
+    }
 }
 
 impl ApplicationHandler<UserEvent> for GuiApp {
@@ -658,6 +780,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
             }
             WindowEvent::MouseWheel { delta, .. } => self.on_wheel(delta),
             WindowEvent::MouseInput { state, button, .. } => self.on_click(state, button),
+            WindowEvent::DroppedFile(path) => self.on_drop(path),
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}
         }
@@ -666,14 +789,46 @@ impl ApplicationHandler<UserEvent> for GuiApp {
         }
     }
 
+    /// A WaitUntil deadline fired: if it was the animation timer, redraw —
+    /// the render pass picks the new frame and re-arms the timer.
+    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
+        if matches!(cause, StartCause::ResumeTimeReached { .. })
+            && self.next_anim.is_some_and(|t| Instant::now() >= t)
+        {
+            self.request_redraw();
+        }
+    }
+
     fn about_to_wait(&mut self, event_loop: &ActiveEventLoop) {
         if let Some(t) = self.exit_at {
             if Instant::now() >= t {
                 self.send(T_DETACH, 0, &[]);
                 event_loop.exit();
-            } else {
-                event_loop.set_control_flow(ControlFlow::WaitUntil(t));
+                return;
             }
         }
+        // Sleep until the earliest deadline (test-exit or animation frame
+        // flip); plain Wait when neither is armed — no idle wakeups.
+        let next = match (self.exit_at, self.next_anim) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
+        };
+        event_loop.set_control_flow(match next {
+            Some(t) => ControlFlow::WaitUntil(t),
+            None => ControlFlow::Wait,
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_quote;
+
+    #[test]
+    fn dropped_paths_are_shell_quoted() {
+        assert_eq!(shell_quote("/tmp/a-b_c.png"), "/tmp/a-b_c.png");
+        assert_eq!(shell_quote("/tmp/with space"), "'/tmp/with space'");
+        assert_eq!(shell_quote("/tmp/o'brien"), r"'/tmp/o'\''brien'");
+        assert_eq!(shell_quote(""), "''");
     }
 }

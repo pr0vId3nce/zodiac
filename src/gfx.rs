@@ -203,6 +203,9 @@ pub struct Img {
     /// a=a state: whether playback runs and how many loops (0 = forever).
     pub anim_running: bool,
     pub anim_loops: u32,
+    /// Display gap (ms) for the root frame (frame 0). Kitty sets per-frame
+    /// gaps via `a=a,r=<frame>,z=<gap>`; r=1 targets the root. Default 40.
+    pub root_gap_ms: u32,
     lru: u64,
 }
 
@@ -487,6 +490,7 @@ impl GfxEngine {
                 frames: Vec::new(),
                 anim_running: false,
                 anim_loops: 0,
+                root_gap_ms: 40,
                 lru: self.lru_tick,
             },
         );
@@ -562,6 +566,19 @@ impl GfxEngine {
         }
         if let Some(v) = cmd.num(b'v') {
             img.anim_loops = v.max(0) as u32;
+        }
+        // r=<frame>, z=<gap>: set that frame's display gap (r=1 = root).
+        if let (Some(r), Some(z)) = (cmd.num(b'r'), cmd.num(b'z')) {
+            let gap = z.max(0) as u32;
+            match r {
+                1 => img.root_gap_ms = gap,
+                n if n >= 2 => {
+                    if let Some(f) = img.frames.get_mut((n - 2) as usize) {
+                        f.gap_ms = gap;
+                    }
+                }
+                _ => {}
+            }
         }
         self.bump();
         reply_ok(cmd)
@@ -1014,11 +1031,18 @@ impl GfxEngine {
             .iter()
             .filter_map(|(id, _)| {
                 let img = self.images.get(id)?;
-                (!img.frames.is_empty()).then(|| SnapAnim {
-                    img: *id,
-                    gaps: img.frames.iter().map(|f| f.gap_ms).collect(),
-                    running: img.anim_running,
-                    loops: img.anim_loops,
+                (!img.frames.is_empty()).then(|| {
+                    // gaps[i] is the display ms of frame i, root included —
+                    // the client indexes by display frame, no off-by-one.
+                    let mut gaps = Vec::with_capacity(img.frames.len() + 1);
+                    gaps.push(img.root_gap_ms);
+                    gaps.extend(img.frames.iter().map(|f| f.gap_ms));
+                    SnapAnim {
+                        img: *id,
+                        gaps,
+                        running: img.anim_running,
+                        loops: img.anim_loops,
+                    }
                 })
             })
             .collect();
@@ -1226,7 +1250,8 @@ mod tests {
         let snap = e.snapshot();
         assert_eq!(snap.anim.len(), 1);
         assert_eq!(snap.anim[0].img, 7);
-        assert_eq!(snap.anim[0].gaps, vec![120, 40]);
+        // gaps now includes the root frame (default 40) then the two a=f gaps.
+        assert_eq!(snap.anim[0].gaps, vec![40, 120, 40]);
         assert!(snap.anim[0].running);
         assert_eq!(snap.anim[0].loops, 2);
         // Stop.

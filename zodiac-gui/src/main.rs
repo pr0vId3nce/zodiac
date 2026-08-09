@@ -4,11 +4,13 @@
 //! and renders the active pane with wgpu + glyphon per ADR 0004 — including
 //! zodiac's first actual pixel decode of the kitty image mirror.
 
+mod anim;
 mod app;
 mod font;
 mod img;
 mod keys;
 mod palette;
+mod placeholder;
 mod render;
 
 use app::{GuiApp, UserEvent};

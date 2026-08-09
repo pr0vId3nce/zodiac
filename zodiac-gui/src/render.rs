@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::ops::Range;
 use std::sync::Arc;
+use std::time::Instant;
 
 use glyphon::{
     Attrs, Buffer as TextBuffer, Cache, Color as TextColor, Family, FontSystem, Metrics,
@@ -25,6 +26,7 @@ use winit::window::Window;
 use zodiac::client_core::{tool_compact, truncate, ARole, CPane};
 use zodiac::protocol::SessionState;
 
+use crate::anim::AnimStore;
 use crate::font::{Fonts, FONT_PX};
 use crate::palette::{self, CellStyle, ACCENT, CHROME_BG, CHROME_FG, DEFAULT_BG, DEFAULT_FG};
 
@@ -188,6 +190,9 @@ struct ImgTex {
     h: u32,
 }
 
+/// Texture cache key: (pane id, img id, ver, display frame — 0 = root).
+type TexKey = (u64, u32, u32, u32);
+
 /// What one redraw hands back to the app.
 #[derive(Default)]
 pub struct FrameOut {
@@ -195,6 +200,9 @@ pub struct FrameOut {
     pub tab_hits: Vec<(usize, Range<f32>)>,
     /// Draw-time clamp of the active agent pane's transcript scroll.
     pub agent_scroll: Option<usize>,
+    /// Earliest wall-clock deadline at which a visible running animation
+    /// flips frames (roadmap 4.2). None = nothing animates, no timer.
+    pub next_anim: Option<Instant>,
 }
 
 pub struct Renderer {
@@ -227,9 +235,9 @@ pub struct Renderer {
     sampler: wgpu::Sampler,
     img_buf: wgpu::Buffer,
     img_cap: usize,
-    /// (pane id, img id, ver) -> decoded texture; None caches a failed
-    /// decode so it isn't retried every redraw.
-    textures: HashMap<(u64, u32, u32), Option<ImgTex>>,
+    /// Decoded frame textures; None caches a failed decode so it isn't
+    /// retried every redraw.
+    textures: HashMap<TexKey, Option<ImgTex>>,
     // metrics + damage signatures
     pub cell: (f32, f32),
     grid_sig: u64,
@@ -546,12 +554,14 @@ impl Renderer {
         )
     }
 
-    fn ensure_texture(&mut self, pane: u64, img_id: u32, img: &zodiac::client_core::CImg) {
-        let key = (pane, img_id, img.ver);
+    /// Decode + upload one image frame (display frame 0 = the root
+    /// `T_GFX_IMG` data; 1.. = animation frames) unless already cached.
+    #[allow(clippy::too_many_arguments)]
+    fn ensure_texture(&mut self, key: TexKey, format: u8, zlib: bool, w: u32, h: u32, data: &[u8]) {
         if self.textures.contains_key(&key) {
             return;
         }
-        let decoded = crate::img::decode_rgba(img.format, img.zlib, img.w, img.h, &img.data);
+        let decoded = crate::img::decode_rgba(format, zlib, w, h, data);
         let entry = decoded.map(|(w, h, rgba)| {
             let tex = self.device.create_texture(&wgpu::TextureDescriptor {
                 label: Some("pane img"),
@@ -611,14 +621,16 @@ impl Renderer {
     }
 
     /// Drop textures whose backing image is gone from its pane (or whose
-    /// pane is gone) — mirrors the server-driven image lifetime.
-    fn evict_textures(&mut self, panes: &[CPane]) {
-        self.textures.retain(|(pid, img, ver), _| {
-            panes
+    /// pane is gone) — mirrors the server-driven image lifetime. Frame
+    /// textures additionally require their frame to still be in the store.
+    fn evict_textures(&mut self, panes: &[CPane], anim: &AnimStore) {
+        self.textures.retain(|(pid, img, ver, fidx), _| {
+            let root_live = panes
                 .iter()
                 .find(|p| p.id == *pid)
                 .and_then(|p| p.images.get(img))
-                .is_some_and(|i| i.ver == *ver)
+                .is_some_and(|i| i.ver == *ver);
+            root_live && (*fidx == 0 || anim.has_frame(*pid, *img, *ver, *fidx as usize - 1))
         });
     }
 
@@ -628,6 +640,8 @@ impl Renderer {
         active: usize,
         state: Option<&SessionState>,
         session: &str,
+        anim: &mut AnimStore,
+        now: Instant,
     ) -> FrameOut {
         let mut out = FrameOut::default();
         let (w, h) = (self.config.width as f32, self.config.height as f32);
@@ -642,8 +656,8 @@ impl Renderer {
         let mut rects_under: Vec<RectInst> = Vec::new();
         let mut rects_over: Vec<RectInst> = Vec::new();
         // (z, instance, texture key) split around the text pass.
-        let mut imgs_under: Vec<(i32, ImgInst, (u64, u32, u32))> = Vec::new();
-        let mut imgs_over: Vec<(i32, ImgInst, (u64, u32, u32))> = Vec::new();
+        let mut imgs_under: Vec<(i32, ImgInst, TexKey)> = Vec::new();
+        let mut imgs_over: Vec<(i32, ImgInst, TexKey)> = Vec::new();
 
         // ---------------------------------------------------------- chrome
         rects_under.push(RectInst {
@@ -792,6 +806,34 @@ impl Renderer {
                 grid_text_area = true;
                 // kitty placements for the active pty pane
                 let scroll = p.scroll as i32;
+                // Unicode placeholders (4.3): collect the pane's U+10EEEE
+                // cells once — (fg-encoded image id if any, row, col) in
+                // the *displayed* screen (scrollback view included), so
+                // tiles land exactly where their cells are drawn.
+                let virt_count = p.gfx.placements.iter().filter(|v| v.virt).count();
+                let mut ph_cells: Vec<(Option<u32>, u16, u16)> = Vec::new();
+                if virt_count > 0 {
+                    let screen = p.parser.screen();
+                    let (rows, cols) = screen.size();
+                    for row in 0..rows {
+                        for col in 0..cols {
+                            let Some(cell) = screen.cell(row, col) else {
+                                continue;
+                            };
+                            if !cell.contents().starts_with(crate::placeholder::PLACEHOLDER) {
+                                continue;
+                            }
+                            let id = match cell.fgcolor() {
+                                vt100::Color::Rgb(r, g, b) => {
+                                    Some(((r as u32) << 16) | ((g as u32) << 8) | b as u32)
+                                }
+                                vt100::Color::Idx(i) => Some(i as u32),
+                                vt100::Color::Default => None,
+                            };
+                            ph_cells.push((id, row, col));
+                        }
+                    }
+                }
                 for vp in &p.gfx.placements {
                     let Some(img) = p.images.get(&vp.img) else {
                         continue;
@@ -799,8 +841,27 @@ impl Renderer {
                     if img.ver != vp.img_ver {
                         continue;
                     }
-                    self.ensure_texture(p.id, vp.img, img);
-                    let key = (p.id, vp.img, img.ver);
+                    // Animation playhead (4.2): pick the display frame and
+                    // remember the earliest next flip. Stopped/frameless
+                    // images show display frame 0 (the root data).
+                    let (fidx, deadline) = match p.gfx.anim.iter().find(|a| a.img == vp.img) {
+                        Some(sa) => anim.playhead(p.id, vp.img, img.ver, sa, now),
+                        None => (0, None),
+                    };
+                    if let Some(d) = deadline {
+                        out.next_anim = Some(out.next_anim.map_or(d, |x| x.min(d)));
+                    }
+                    let mut key = (p.id, vp.img, img.ver, fidx as u32);
+                    if fidx == 0 {
+                        self.ensure_texture(key, img.format, img.zlib, img.w, img.h, &img.data);
+                    } else if let Some(f) = anim.frame(p.id, vp.img, img.ver, fidx - 1) {
+                        self.ensure_texture(key, f.format, f.zlib, f.w, f.h, &f.data);
+                    }
+                    if !matches!(self.textures.get(&key), Some(Some(_))) {
+                        // Frame missing or failed to decode: root fallback.
+                        key = (p.id, vp.img, img.ver, 0);
+                        self.ensure_texture(key, img.format, img.zlib, img.w, img.h, &img.data);
+                    }
                     let Some(Some(tex)) = self.textures.get(&key) else {
                         continue;
                     };
@@ -815,7 +876,51 @@ impl Renderer {
                     } else {
                         tex.h.saturating_sub(sy)
                     };
-                    if sw == 0 || sh == 0 || vp.cols == 0 || vp.rows == 0 {
+                    if sw == 0 || sh == 0 {
+                        continue;
+                    }
+                    let layer = if vp.z < 0 {
+                        &mut imgs_under
+                    } else {
+                        &mut imgs_over
+                    };
+                    if vp.virt {
+                        // 4.3: blit source tiles at the placeholder cells.
+                        // Cells whose fg carries an id must match this
+                        // image's (lower 24 bits); default-fg cells count
+                        // only when this is the sole virt placement.
+                        let cells: Vec<(u16, u16)> = ph_cells
+                            .iter()
+                            .filter(|(id, ..)| match id {
+                                Some(id) => *id == (vp.img & 0xFF_FFFF),
+                                None => virt_count == 1,
+                            })
+                            .map(|(_, r, c)| (*r, *c))
+                            .collect();
+                        let Some((tc, tr, runs)) = crate::placeholder::runs(&cells) else {
+                            continue;
+                        };
+                        let (tcw, trh) = (sw as f32 / tc as f32, sh as f32 / tr as f32);
+                        for r in runs {
+                            let inst = ImgInst {
+                                rect: [
+                                    r.col as f32 * cw,
+                                    grid_top + r.row as f32 * ch,
+                                    r.len as f32 * cw,
+                                    ch,
+                                ],
+                                uv: [
+                                    (sx as f32 + r.tile_col as f32 * tcw) / tex.w as f32,
+                                    (sy as f32 + r.tile_row as f32 * trh) / tex.h as f32,
+                                    r.len as f32 * tcw / tex.w as f32,
+                                    trh / tex.h as f32,
+                                ],
+                            };
+                            layer.push((vp.z, inst, key));
+                        }
+                        continue;
+                    }
+                    if vp.cols == 0 || vp.rows == 0 {
                         continue;
                     }
                     let inst = ImgInst {
@@ -832,17 +937,13 @@ impl Renderer {
                             sh as f32 / tex.h as f32,
                         ],
                     };
-                    if vp.z < 0 {
-                        imgs_under.push((vp.z, inst, key));
-                    } else {
-                        imgs_over.push((vp.z, inst, key));
-                    }
+                    layer.push((vp.z, inst, key));
                 }
                 imgs_under.sort_by_key(|(z, ..)| *z);
                 imgs_over.sort_by_key(|(z, ..)| *z);
             }
         }
-        self.evict_textures(panes);
+        self.evict_textures(panes, anim);
 
         // ---------------------------------------------------- GPU uploads
         let under_n = rects_under.len();
@@ -1186,7 +1287,9 @@ impl Renderer {
                     bold: cell.bold(),
                     italic: cell.italic(),
                 };
-                if contents.is_empty() {
+                if contents.is_empty() || contents.starts_with(crate::placeholder::PLACEHOLDER) {
+                    // Placeholder cells (4.3) shape as blanks — the image
+                    // tile is blitted over them, never a tofu glyph.
                     rt.push(" ", attr);
                 } else {
                     rt.push(&contents, attr);

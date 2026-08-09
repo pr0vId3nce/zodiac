@@ -27,3 +27,7 @@ bytemuck = { version = "1", features = ["derive"] }
 # 24/32 = raw, optional zlib wrap).
 png = "0.17"
 flate2 = "1"
+# OSC 52 write-through (roadmap 4.7): T_CLIPBOARD -> system clipboard.
+# Text-only (no image-data feature — that drags the whole `image` stack);
+# wayland-data-control keeps the primary path off X11 emulation.
+arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }

@@ -56,8 +56,10 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
 Settings rows (all GUI-only keys the TUI/server ignore):
 
 - **Pane tabs** — `top` (bar across the top) or `side` (left column).
-- **Background** — backdrop preset: `oled` (#000, default), `charcoal`,
-  `midnight`, `slate`.
+- **Background** — pane backdrop preset: `oled` (#000, default),
+  `charcoal`, `midnight`, `slate`.
+- **Tab bar bg** — the chrome behind the tab names + status bar; same
+  presets (default `slate`).
 - **Scale** — font scale 75%–200% (on top of the OS scale factor).
 - **Tab markers** — the glyph before each tab name: `dots`, `arabic`,
   `roman`, or `zodiac` (white/text-presentation sigils, ♈–♓).

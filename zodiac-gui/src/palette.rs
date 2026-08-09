@@ -6,9 +6,9 @@
 /// clear color the S3 prototype settled on).
 pub const DEFAULT_FG: [u8; 3] = [220, 220, 210];
 pub const DEFAULT_BG: [u8; 3] = [13, 13, 18];
-/// Chrome accents.
+/// Chrome accents. (The chrome background is now a setting — see
+/// `BG_PRESETS` / `set_tab_bg`.)
 pub const ACCENT: [u8; 3] = [130, 170, 255];
-pub const CHROME_BG: [u8; 3] = [24, 24, 32];
 pub const CHROME_FG: [u8; 3] = [150, 150, 160];
 
 // --- Named colors (ported from the TUI's COLOR_CHOICES) -------------------

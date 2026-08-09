@@ -27,7 +27,7 @@ use zodiac::protocol::SessionState;
 
 use crate::anim::AnimStore;
 use crate::font::{Fonts, FONT_PX};
-use crate::palette::{self, CellStyle, ACCENT, CHROME_BG, CHROME_FG, DEFAULT_FG};
+use crate::palette::{self, CellStyle, ACCENT, CHROME_FG, DEFAULT_FG};
 
 const RECT_WGSL: &str = r#"
 struct Globals { res: vec2f, _pad: vec2f }
@@ -291,6 +291,8 @@ pub struct Renderer {
     /// Window backdrop (the render-pass clear color); default OLED black.
     /// Default-bg cells emit no quad, so this is the visible pane backdrop.
     bg: [u8; 3],
+    /// Tab-strip / status-bar chrome background (settings); default slate.
+    tab_bg: [u8; 3],
     /// User font-scale multiplier (settings), on top of the OS scale factor.
     user_scale: f32,
     /// Tab marker/spinner/glow styling (settings).
@@ -559,6 +561,7 @@ impl Renderer {
             tab_side: false,
             ox: 0.0,
             bg: [0, 0, 0],
+            tab_bg: [20, 22, 28], // slate default
             user_scale: 1.0,
             tab_style: TabStyle::default(),
             start: Instant::now(),
@@ -611,6 +614,11 @@ impl Renderer {
     /// Set the window backdrop (settings). Cheap — used as the clear color.
     pub fn set_bg(&mut self, bg: [u8; 3]) {
         self.bg = bg;
+    }
+
+    /// Set the tab-strip / status-bar chrome background (settings).
+    pub fn set_tab_bg(&mut self, bg: [u8; 3]) {
+        self.tab_bg = bg;
     }
 
     /// Set tab marker/spinner/glow styling (settings). Invalidates the tab
@@ -793,19 +801,19 @@ impl Renderer {
             rects_under.push(RectInst {
                 pos: [0.0, 0.0],
                 size: [ox, grid_bottom],
-                color: rgba(CHROME_BG, 1.0),
+                color: rgba(self.tab_bg, 1.0),
             });
         } else {
             rects_under.push(RectInst {
                 pos: [0.0, 0.0],
                 size: [w, ch],
-                color: rgba(CHROME_BG, 1.0),
+                color: rgba(self.tab_bg, 1.0),
             });
         }
         rects_under.push(RectInst {
             pos: [0.0, grid_bottom],
             size: [w, ch],
-            color: rgba(CHROME_BG, 1.0),
+            color: rgba(self.tab_bg, 1.0),
         });
 
         // Tabs: " ● name " per pane, active highlighted. Widths are one cell

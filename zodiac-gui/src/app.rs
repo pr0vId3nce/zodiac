@@ -322,6 +322,7 @@ impl GuiApp {
     const SETTING_SPECS: &'static [(&'static str, &'static [&'static str])] = &[
         ("Pane tabs", &["top", "side"]),
         ("Background", &["oled", "charcoal", "midnight", "slate"]),
+        ("Tab bar bg", &["oled", "charcoal", "midnight", "slate"]),
         (
             "Scale",
             &["75%", "90%", "100%", "110%", "125%", "150%", "175%", "200%"],
@@ -347,13 +348,14 @@ impl GuiApp {
         let s = &self.settings;
         match row {
             0 => usize::from(s.gui_tabs() == "side"),
-            1 => Self::spec_idx(1, s.gui_bg(), 0), // oled
-            2 => Self::spec_idx(2, s.gui_scale.as_str(), 2), // 100%
-            3 => Self::spec_idx(3, s.gui_tab_marker(), 0), // dots
-            4 => Self::spec_idx(4, s.gui_spinner_pos(), 0), // replace
-            5 => Self::spec_idx(5, s.spinner_color.as_str(), 0), // orange
-            6 => Self::spec_idx(6, s.shimmer_color.as_str(), 8), // white
-            7 => Self::spec_idx(7, s.shimmer_speed.as_str(), 2), // normal
+            1 => Self::spec_idx(1, s.gui_bg(), 0),     // oled
+            2 => Self::spec_idx(2, s.gui_tab_bg(), 3), // slate
+            3 => Self::spec_idx(3, s.gui_scale.as_str(), 2), // 100%
+            4 => Self::spec_idx(4, s.gui_tab_marker(), 0), // dots
+            5 => Self::spec_idx(5, s.gui_spinner_pos(), 0), // replace
+            6 => Self::spec_idx(6, s.spinner_color.as_str(), 0), // orange
+            7 => Self::spec_idx(7, s.shimmer_color.as_str(), 8), // white
+            8 => Self::spec_idx(8, s.shimmer_speed.as_str(), 2), // normal
             _ => 0,
         }
     }
@@ -365,12 +367,13 @@ impl GuiApp {
         match row {
             0 => s.gui_tabs = val,
             1 => s.gui_bg = val,
-            2 => s.gui_scale = val,
-            3 => s.gui_tab_marker = val,
-            4 => s.gui_spinner_pos = val,
-            5 => s.spinner_color = val,
-            6 => s.shimmer_color = val,
-            7 => s.shimmer_speed = val,
+            2 => s.gui_tab_bg = val,
+            3 => s.gui_scale = val,
+            4 => s.gui_tab_marker = val,
+            5 => s.gui_spinner_pos = val,
+            6 => s.spinner_color = val,
+            7 => s.shimmer_color = val,
+            8 => s.shimmer_speed = val,
             _ => {}
         }
     }
@@ -407,6 +410,7 @@ impl GuiApp {
         let s = &self.settings;
         let side = s.gui_tabs() == "side";
         let bg = crate::palette::bg_color(s.gui_bg());
+        let tab_bg = crate::palette::bg_color(s.gui_tab_bg());
         let scale = s.gui_scale();
         let style = crate::render::TabStyle {
             marker: s.gui_tab_marker().to_string(),
@@ -418,6 +422,7 @@ impl GuiApp {
         if let Some(r) = self.renderer.as_mut() {
             r.set_tab_side(side);
             r.set_bg(bg);
+            r.set_tab_bg(tab_bg);
             r.set_user_scale(scale);
             r.set_tab_style(style);
         }

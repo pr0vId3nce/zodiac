@@ -111,6 +111,10 @@ pub struct Settings {
     /// "slate". GUI-only.
     #[serde(default)]
     pub gui_bg: String,
+    /// GUI tab-strip / status-bar background preset (same choices as
+    /// `gui_bg`); default "slate". GUI-only.
+    #[serde(default)]
+    pub gui_tab_bg: String,
     /// GUI font scale as a percent string ("100%", "125%", …). GUI-only.
     #[serde(default)]
     pub gui_scale: String,
@@ -280,6 +284,16 @@ impl Settings {
             "midnight" => "midnight",
             "slate" => "slate",
             _ => "oled",
+        }
+    }
+
+    /// GUI tab-strip / status-bar background preset (default "slate").
+    pub fn gui_tab_bg(&self) -> &str {
+        match self.gui_tab_bg.as_str() {
+            "oled" => "oled",
+            "charcoal" => "charcoal",
+            "midnight" => "midnight",
+            _ => "slate",
         }
     }
 

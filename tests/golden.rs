@@ -108,7 +108,10 @@ fn compare(name: &str, kind: &str, actual: &str) {
             .map(|i| {
                 let e = expected.lines().nth(i).unwrap_or("");
                 let a = actual.lines().nth(i).unwrap_or("");
-                format!("first differing line {}:\n  golden: {e}\n  actual: {a}", i + 1)
+                format!(
+                    "first differing line {}:\n  golden: {e}\n  actual: {a}",
+                    i + 1
+                )
             })
             .unwrap_or_else(|| "line counts differ".into());
         panic!(

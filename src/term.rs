@@ -214,7 +214,14 @@ pub fn encode_mouse(
         _ => {
             let cb = if release { 3 + mods } else { base + mods };
             let coord = |v: u16| (32 + v + 1).min(255) as u8;
-            vec![0x1b, b'[', b'M', (32 + cb).min(255) as u8, coord(x), coord(y)]
+            vec![
+                0x1b,
+                b'[',
+                b'M',
+                (32 + cb).min(255) as u8,
+                coord(x),
+                coord(y),
+            ]
         }
     })
 }

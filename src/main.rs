@@ -1,19 +1,19 @@
+mod chat;
 mod cli;
+mod client;
 #[cfg(test)]
 mod corpus;
-mod monitor;
 mod gfx;
-mod client;
 mod kitty;
+mod monitor;
 mod pane;
 mod protocol;
 mod query;
 mod server;
 mod settings;
 mod snapshot;
-mod theme;
 mod term;
-mod chat;
+mod theme;
 
 use anyhow::{Context, Result};
 use crossterm::event::{
@@ -53,7 +53,11 @@ fn main() -> Result<()> {
     let mut terminal = ratatui::init();
     let _ = crossterm::execute!(std::io::stdout(), EnableBracketedPaste, EnableMouseCapture);
     let res = client::run(&session, &mut terminal);
-    let _ = crossterm::execute!(std::io::stdout(), DisableMouseCapture, DisableBracketedPaste);
+    let _ = crossterm::execute!(
+        std::io::stdout(),
+        DisableMouseCapture,
+        DisableBracketedPaste
+    );
     ratatui::restore();
     match res {
         Ok(msg) => {
@@ -99,7 +103,10 @@ fn migrate_legacy_dirs() {
         }
     }
     let renamed = [
-        (config.join("zodiac/wizard-policy.md"), config.join("zodiac/monitor-policy.md")),
+        (
+            config.join("zodiac/wizard-policy.md"),
+            config.join("zodiac/monitor-policy.md"),
+        ),
         (state.join("zodiac/wizard"), state.join("zodiac/monitor")),
     ];
     for (old, new) in renamed {

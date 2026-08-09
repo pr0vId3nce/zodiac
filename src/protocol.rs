@@ -84,9 +84,7 @@ impl GfxImgHdr {
         if data.len() < GFX_IMG_HDR {
             return None;
         }
-        let u = |r: std::ops::Range<usize>| {
-            u32::from_le_bytes(data[r].try_into().unwrap())
-        };
+        let u = |r: std::ops::Range<usize>| u32::from_le_bytes(data[r].try_into().unwrap());
         Some(Self {
             img: u(0..4),
             ver: u(4..8),
@@ -135,7 +133,7 @@ pub struct PaneState {
     pub id: u64,
     pub name: String,
     pub title: String,
-    pub status: String, // working | idle | done | needs_input
+    pub status: String,        // working | idle | done | needs_input
     pub agent: Option<String>, // claude | opencode | ... | None = plain shell
     pub cwd: Option<String>,
     pub focused: bool,
@@ -240,7 +238,9 @@ pub fn agent_from_title(title: &str) -> Option<&'static str> {
 /// the session is named. The separator is required: a bare "π" (or a title
 /// that merely opens with the letter) shouldn't claim the pane.
 fn is_pi_title(title: &str) -> bool {
-    title.strip_prefix('π').is_some_and(|rest| rest.starts_with(" - "))
+    title
+        .strip_prefix('π')
+        .is_some_and(|rest| rest.starts_with(" - "))
 }
 
 /// Fire-and-forget desktop notification; silently a no-op without notify-send.
@@ -375,9 +375,23 @@ mod tests {
     #[test]
     fn client_frame_types_are_distinct() {
         let types = [
-            T_INPUT, T_RESIZE, T_NEW_PANE, T_CLOSE_PANE, T_RENAME, T_MOVE, T_FOCUS, T_DETACH,
-            T_SHUTDOWN, T_ATTACH, T_QUERY, T_READ_SCREEN, T_AUTORESUME, T_WATCH, T_RESTORE,
-            T_MOUSE, T_SEEN,
+            T_INPUT,
+            T_RESIZE,
+            T_NEW_PANE,
+            T_CLOSE_PANE,
+            T_RENAME,
+            T_MOVE,
+            T_FOCUS,
+            T_DETACH,
+            T_SHUTDOWN,
+            T_ATTACH,
+            T_QUERY,
+            T_READ_SCREEN,
+            T_AUTORESUME,
+            T_WATCH,
+            T_RESTORE,
+            T_MOUSE,
+            T_SEEN,
         ];
         let mut seen = types.to_vec();
         seen.sort_unstable();

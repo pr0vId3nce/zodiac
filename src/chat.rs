@@ -342,7 +342,10 @@ pub fn spawn(
     cfg: ChatCfg,
     session: String,
     notify: impl Fn(ChatEvent) + Send + 'static,
-) -> (Sender<ChatCmd>, std::sync::Arc<std::sync::atomic::AtomicBool>) {
+) -> (
+    Sender<ChatCmd>,
+    std::sync::Arc<std::sync::atomic::AtomicBool>,
+) {
     let (tx, rx) = channel();
     let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let worker_cancel = cancel.clone();
@@ -406,8 +409,7 @@ fn worker(
             ChatCmd::Wake => {
                 if !cfg.can_wake() {
                     notify(ChatEvent::Error(
-                        "no wake host configured — set Chat ssh and Chat service in Ctrl+S"
-                            .into(),
+                        "no wake host configured — set Chat ssh and Chat service in Ctrl+S".into(),
                     ));
                     continue;
                 }
@@ -425,8 +427,7 @@ fn worker(
             ChatCmd::Sleep => {
                 if !cfg.can_wake() {
                     notify(ChatEvent::Error(
-                        "no wake host configured — set Chat ssh and Chat service in Ctrl+S"
-                            .into(),
+                        "no wake host configured — set Chat ssh and Chat service in Ctrl+S".into(),
                     ));
                     continue;
                 }
@@ -460,8 +461,9 @@ fn worker(
                 let attach = panes.attach(&text, force_panes);
                 history.push(("user", text));
                 let mut acc = String::new();
-                let out =
-                    chat_stream(&cfg, &face, &history, &digest, attach, &cancel, &notify, &mut acc);
+                let out = chat_stream(
+                    &cfg, &face, &history, &digest, attach, &cancel, &notify, &mut acc,
+                );
                 cancel.store(false, std::sync::atomic::Ordering::Relaxed);
                 panes.settle(out.as_ref().copied().unwrap_or(false));
                 let reached_the_end = out.is_ok();
@@ -484,7 +486,9 @@ fn worker(
                             }
                         }
                         NetErr::Unreachable(d) => {
-                            notify(ChatEvent::Error(format!("the endpoint does not answer ({d})")));
+                            notify(ChatEvent::Error(format!(
+                                "the endpoint does not answer ({d})"
+                            )));
                             if status != Some(ChatStatus::Away) {
                                 status = Some(ChatStatus::Away);
                                 notify(ChatEvent::Status(ChatStatus::Away));
@@ -560,7 +564,9 @@ fn save_history(session: &str, history: &[(&'static str, String)]) {
     if std::fs::create_dir_all(dir).is_err() {
         return;
     }
-    let Ok(json) = serde_json::to_vec(history) else { return };
+    let Ok(json) = serde_json::to_vec(history) else {
+        return;
+    };
     let tmp = path.with_extension("json.tmp");
     if std::fs::write(&tmp, &json).is_ok() {
         let _ = std::fs::rename(&tmp, &path);
@@ -578,7 +584,12 @@ fn ssh_service(cfg: &ChatCfg, verb: &str) -> Result<(), String> {
         Ok(())
     } else {
         let err = String::from_utf8_lossy(&out.stderr);
-        Err(err.lines().last().unwrap_or("ssh failed").trim().to_string())
+        Err(err
+            .lines()
+            .last()
+            .unwrap_or("ssh failed")
+            .trim()
+            .to_string())
     }
 }
 
@@ -659,7 +670,8 @@ fn http(
     let (mut chunked, mut length): (bool, Option<usize>) = (false, None);
     loop {
         let mut h = String::new();
-        rd.read_line(&mut h).map_err(|e| NetErr::Bad(format!("headers: {e}")))?;
+        rd.read_line(&mut h)
+            .map_err(|e| NetErr::Bad(format!("headers: {e}")))?;
         let h = h.trim_end();
         if h.is_empty() {
             break;
@@ -678,9 +690,11 @@ fn http(
                 return Err(NetErr::Cancelled);
             }
             let mut sz = String::new();
-            rd.read_line(&mut sz).map_err(|e| NetErr::Bad(format!("chunk: {e}")))?;
+            rd.read_line(&mut sz)
+                .map_err(|e| NetErr::Bad(format!("chunk: {e}")))?;
             let sz = sz.trim().split(';').next().unwrap_or("");
-            let mut n = usize::from_str_radix(sz, 16).map_err(|_| NetErr::Bad("chunk size".into()))?;
+            let mut n =
+                usize::from_str_radix(sz, 16).map_err(|_| NetErr::Bad("chunk size".into()))?;
             if n == 0 {
                 break;
             }
@@ -716,7 +730,15 @@ fn http(
 
 fn health(cfg: &ChatCfg) -> ChatStatus {
     let no_cancel = std::sync::atomic::AtomicBool::new(false);
-    match http(cfg, "GET", "/health", None, Duration::from_secs(3), &no_cancel, |_| {}) {
+    match http(
+        cfg,
+        "GET",
+        "/health",
+        None,
+        Duration::from_secs(3),
+        &no_cancel,
+        |_| {},
+    ) {
         Ok(200) => ChatStatus::Awake,
         Ok(503) => ChatStatus::Waking, // llama-server: model still loading
         Ok(_) => ChatStatus::Away,
@@ -868,10 +890,39 @@ impl PanesPolicy {
 /// Words that make a question about the session rather than the world. Only
 /// a first pass: a miss costs one `read_panes` round-trip, not an answer.
 const SESSION_WORDS: &[&str] = &[
-    "agent", "agents", "aider", "approval", "approve", "blocked", "busy",
-    "card", "cards", "claude", "codex", "crashed", "done", "finished", "hung", "idle",
-    "opencode", "pane", "panes", "pi", "prompt", "running", "session", "sessions", "status",
-    "stuck", "tab", "tabs", "terminal", "terminals", "wedged", "working", "zodiac",
+    "agent",
+    "agents",
+    "aider",
+    "approval",
+    "approve",
+    "blocked",
+    "busy",
+    "card",
+    "cards",
+    "claude",
+    "codex",
+    "crashed",
+    "done",
+    "finished",
+    "hung",
+    "idle",
+    "opencode",
+    "pane",
+    "panes",
+    "pi",
+    "prompt",
+    "running",
+    "session",
+    "sessions",
+    "status",
+    "stuck",
+    "tab",
+    "tabs",
+    "terminal",
+    "terminals",
+    "wedged",
+    "working",
+    "zodiac",
 ];
 
 /// Does this question plausibly concern the panes? Wrong in the generous
@@ -879,9 +930,16 @@ const SESSION_WORDS: &[&str] = &[
 /// negative only costs the model a tool call to fix.
 fn about_session(text: &str) -> bool {
     let lower = text.to_lowercase();
-    if ["need me", "going on", "how are they", "how they", "who needs", "anything up"]
-        .iter()
-        .any(|p| lower.contains(p))
+    if [
+        "need me",
+        "going on",
+        "how are they",
+        "how they",
+        "who needs",
+        "anything up",
+    ]
+    .iter()
+    .any(|p| lower.contains(p))
     {
         return true;
     }
@@ -995,7 +1053,8 @@ fn run_tool(
     asked: &mut Vec<String>,
     notify: &dyn Fn(ChatEvent),
 ) -> String {
-    let args: serde_json::Value = serde_json::from_str(&call.args).unwrap_or(serde_json::Value::Null);
+    let args: serde_json::Value =
+        serde_json::from_str(&call.args).unwrap_or(serde_json::Value::Null);
     match call.name.as_str() {
         "read_panes" => {
             notify(ChatEvent::Note("reading the panes…".into()));
@@ -1061,7 +1120,11 @@ fn run_tool(
 fn request_cast(action: ActionRequest, notify: &dyn Fn(ChatEvent)) -> String {
     let desc = action.describe();
     let (tx, rx) = std::sync::mpsc::channel::<ActionOutcome>();
-    notify(ChatEvent::Cast { desc: desc.clone(), action, decision: tx });
+    notify(ChatEvent::Cast {
+        desc: desc.clone(),
+        action,
+        decision: tx,
+    });
     match rx.recv() {
         Ok(ActionOutcome::Sent) => format!("Des approved it, and it has been sent: {desc}"),
         Ok(ActionOutcome::Declined) => format!("Des declined: {desc}"),
@@ -1344,7 +1407,12 @@ fn curl(args: &[&str]) -> Result<String, String> {
         })?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        return Err(err.lines().last().unwrap_or("curl failed").trim().to_string());
+        return Err(err
+            .lines()
+            .last()
+            .unwrap_or("curl failed")
+            .trim()
+            .to_string());
     }
     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
 }
@@ -1443,7 +1511,9 @@ fn parse_searx(raw: &str, host: &str) -> Result<String, String> {
     let mut out = String::new();
     // SearXNG's own direct answers (calculator, infoboxes) beat any snippet.
     for a in v["answers"].as_array().into_iter().flatten() {
-        let text = a.as_str().unwrap_or_else(|| a["answer"].as_str().unwrap_or(""));
+        let text = a
+            .as_str()
+            .unwrap_or_else(|| a["answer"].as_str().unwrap_or(""));
         if !text.is_empty() {
             out.push_str(&format!("answer: {}\n\n", clip(text, 500)));
         }
@@ -1474,13 +1544,7 @@ fn brave_search(cfg: &ChatCfg, query: &str) -> Result<String, String> {
         urlenc(query)
     );
     let token = format!("X-Subscription-Token: {}", cfg.search_key);
-    let raw = curl(&[
-        "-H",
-        "Accept: application/json",
-        "-H",
-        &token,
-        url.as_str(),
-    ])?;
+    let raw = curl(&["-H", "Accept: application/json", "-H", &token, url.as_str()])?;
     parse_brave(&raw)
 }
 
@@ -1530,10 +1594,12 @@ fn wiki_search(query: &str) -> Result<String, String> {
         })
         .collect();
     if hits.is_empty() {
-        return Ok("no Wikipedia article matched. Wikipedia is the only search backend \
+        return Ok(
+            "no Wikipedia article matched. Wikipedia is the only search backend \
                    configured, so current events, prices and releases are out of reach — say so \
                    rather than searching again."
-            .into());
+                .into(),
+        );
     }
     Ok(format!(
         "(Wikipedia only — no news, prices or current releases. If these extracts do not answer \
@@ -1580,9 +1646,11 @@ fn strip_html(html: &str) -> String {
             continue;
         }
         // Block-level tags are where the line breaks belong.
-        if ["<p", "<br", "<div", "<li", "<tr", "<h1", "<h2", "<h3", "</p", "</div"]
-            .iter()
-            .any(|t| lower.starts_with(t))
+        if [
+            "<p", "<br", "<div", "<li", "<tr", "<h1", "<h2", "<h3", "</p", "</div",
+        ]
+        .iter()
+        .any(|t| lower.starts_with(t))
         {
             out.push('\n');
         }
@@ -1633,7 +1701,10 @@ mod tests {
     fn history_round_trips_through_disk() {
         let session = "chat-persist-roundtrip-test";
         let _ = std::fs::remove_file(history_path(session));
-        assert!(load_history(session).is_empty(), "started with leftover state");
+        assert!(
+            load_history(session).is_empty(),
+            "started with leftover state"
+        );
 
         let history: Vec<(&'static str, String)> =
             vec![("user", "hello".into()), ("assistant", "hi there".into())];
@@ -1669,7 +1740,10 @@ mod tests {
                 p.contains("no hands") || p.contains("cannot act"),
                 "{face} persona should still deny acting when act=false: {p}"
             );
-            assert!(!p.contains("prompt_pane"), "{face} persona leaked act-on text: {p}");
+            assert!(
+                !p.contains("prompt_pane"),
+                "{face} persona leaked act-on text: {p}"
+            );
         }
     }
 
@@ -1680,7 +1754,10 @@ mod tests {
         // place even though the tools are now offered.
         for face in ["assistant", "oracle", "hal"] {
             let p = persona(face, true);
-            assert!(p.contains("prompt_pane"), "{face} persona didn't grant hands: {p}");
+            assert!(
+                p.contains("prompt_pane"),
+                "{face} persona didn't grant hands: {p}"
+            );
             assert!(
                 !p.contains("cannot act") && !p.contains("no hands"),
                 "{face} persona still denies acting even with act=true: {p}"
@@ -1714,9 +1791,15 @@ mod tests {
 
     #[test]
     fn cast_action_describe_matches_the_plan_format() {
-        let a = ActionRequest::SendKeys { pane: 3, keys: "y".into() };
+        let a = ActionRequest::SendKeys {
+            pane: 3,
+            keys: "y".into(),
+        };
         assert_eq!(a.describe(), "send_keys(3, \"y\")");
-        let a = ActionRequest::PromptPane { pane: 2, text: "yes please".into() };
+        let a = ActionRequest::PromptPane {
+            pane: 2,
+            text: "yes please".into(),
+        };
         assert_eq!(a.describe(), "prompt_pane(2, \"yes please\")");
     }
 
@@ -1751,7 +1834,10 @@ mod tests {
     fn strip_html_keeps_utf8_intact() {
         // A byte-wise walk would turn these into mojibake.
         let text = strip_html("<p>\u{6f22}\u{5b57} \u{2014} \u{1f52e}</p>");
-        assert!(text.contains("\u{6f22}\u{5b57}") && text.contains('\u{1f52e}'), "{text:?}");
+        assert!(
+            text.contains("\u{6f22}\u{5b57}") && text.contains('\u{1f52e}'),
+            "{text:?}"
+        );
     }
 
     #[test]
@@ -1874,16 +1960,16 @@ mod tests {
         let raw = r#"{"web":{"results":[
             {"title":"Rust","url":"https://rust-lang.org","description":"a language"}]}}"#;
         let out = parse_brave(raw).unwrap();
-        assert!(out.contains("[1] Rust") && out.contains("a language"), "{out}");
+        assert!(
+            out.contains("[1] Rust") && out.contains("a language"),
+            "{out}"
+        );
     }
 
     #[test]
     fn brave_rejection_surfaces_its_own_words() {
         let raw = r#"{"error":{"detail":"Subscription token invalid"}}"#;
-        assert_eq!(
-            parse_brave(raw).unwrap_err(),
-            "Subscription token invalid"
-        );
+        assert_eq!(parse_brave(raw).unwrap_err(), "Subscription token invalid");
     }
 
     #[test]
@@ -1942,9 +2028,18 @@ mod tests {
     fn momentum_carries_one_follow_up_then_lapses() {
         let mut p = PanesPolicy::default();
         assert!(!turn(&mut p, "why is the sky blue?", false));
-        assert!(turn(&mut p, "anything need me?", false), "named the session");
-        assert!(turn(&mut p, "is that safe?", false), "follow-up rides along");
-        assert!(!turn(&mut p, "how do I braise short ribs?", false), "momentum lapsed");
+        assert!(
+            turn(&mut p, "anything need me?", false),
+            "named the session"
+        );
+        assert!(
+            turn(&mut p, "is that safe?", false),
+            "follow-up rides along"
+        );
+        assert!(
+            !turn(&mut p, "how do I braise short ribs?", false),
+            "momentum lapsed"
+        );
     }
 
     #[test]
@@ -1981,11 +2076,20 @@ mod tests {
                       Bash(rm -rf ./build)\n  Do you want to proceed? (y/n)\n";
         for (label, q) in [
             ("offtopic", "In one sentence: why is the sky blue?"),
-            ("recipe", "How long do I braise short ribs, and at what temperature?"),
+            (
+                "recipe",
+                "How long do I braise short ribs, and at what temperature?",
+            ),
             ("cards", "Anything need me right now?"),
-            ("search", "What is the newest Rust release? Search if you must."),
+            (
+                "search",
+                "What is the newest Rust release? Search if you must.",
+            ),
             ("obscure", "Look up the population of Vaduz, Liechtenstein."),
-            ("fetch", "Read https://example.com and tell me its first sentence."),
+            (
+                "fetch",
+                "Read https://example.com and tell me its first sentence.",
+            ),
             // Carries none of the session words — he has to reach for
             // read_panes himself to answer it.
             ("implicit", "Should I be worried about anything?"),
@@ -1995,11 +2099,20 @@ mod tests {
             let attach = about_session(q);
             println!("[{label}] spread attached: {attach}");
             let no_cancel = std::sync::atomic::AtomicBool::new(false);
-            let r = chat_stream(&cfg, "wizard", &history, digest, attach, &no_cancel, &|ev| {
-                if let ChatEvent::Note(n) = ev {
-                    println!("  note: {n}");
-                }
-            }, &mut acc);
+            let r = chat_stream(
+                &cfg,
+                "wizard",
+                &history,
+                digest,
+                attach,
+                &no_cancel,
+                &|ev| {
+                    if let ChatEvent::Note(n) = ev {
+                        println!("  note: {n}");
+                    }
+                },
+                &mut acc,
+            );
             assert!(r.is_ok(), "{label}: request failed");
             println!("{label}: {acc}\n");
             assert!(!acc.trim().is_empty(), "{label}: empty answer");
@@ -2036,7 +2149,11 @@ mod tests {
             &no_cancel,
             &|ev| match ev {
                 ChatEvent::Note(n) => println!("  note: {n}"),
-                ChatEvent::Cast { desc, action, decision } => {
+                ChatEvent::Cast {
+                    desc,
+                    action,
+                    decision,
+                } => {
                     println!("  cast requested: {desc}");
                     *cast_seen.borrow_mut() = Some((desc, action));
                     // Simulate Des pressing 'y' — the client would execute
@@ -2049,15 +2166,22 @@ mod tests {
         );
         assert!(out.is_ok(), "request failed");
         println!("answer: {acc}\n");
-        let (desc, action) = cast_seen.into_inner().expect("model never called a write-tool");
+        let (desc, action) = cast_seen
+            .into_inner()
+            .expect("model never called a write-tool");
         match action {
             ActionRequest::SendKeys { pane, keys } => {
                 assert_eq!(pane, 1, "wrong card: {desc}");
                 assert!(keys.contains('y'), "keys didn't include y: {desc}");
             }
-            ActionRequest::PromptPane { .. } => panic!("expected send_keys, got prompt_pane: {desc}"),
+            ActionRequest::PromptPane { .. } => {
+                panic!("expected send_keys, got prompt_pane: {desc}")
+            }
         }
-        assert!(!acc.trim().is_empty(), "no final answer after the cast resolved");
+        assert!(
+            !acc.trim().is_empty(),
+            "no final answer after the cast resolved"
+        );
     }
 
     /// A question greedy enough to spend every tool round must still come
@@ -2122,9 +2246,18 @@ mod tests {
             &mut acc,
         );
         let elapsed = start.elapsed();
-        assert!(matches!(out, Err(NetErr::Cancelled)), "expected Cancelled, got Ok/other Err");
-        assert!(!acc.is_empty(), "cancel fired before any tokens arrived — flakier timing needed");
-        assert!(elapsed < Duration::from_secs(10), "took {elapsed:?} — cancel did not cut in");
+        assert!(
+            matches!(out, Err(NetErr::Cancelled)),
+            "expected Cancelled, got Ok/other Err"
+        );
+        assert!(
+            !acc.is_empty(),
+            "cancel fired before any tokens arrived — flakier timing needed"
+        );
+        assert!(
+            elapsed < Duration::from_secs(10),
+            "took {elapsed:?} — cancel did not cut in"
+        );
         println!("cancelled after {elapsed:?}, {} chars captured", acc.len());
     }
 
@@ -2149,11 +2282,20 @@ mod tests {
             history.push(("user", q.to_string()));
             let mut acc = String::new();
             let no_cancel = std::sync::atomic::AtomicBool::new(false);
-            let out = chat_stream(&cfg, "wizard", &history, digest, attach, &no_cancel, &|ev| {
-                if let ChatEvent::Note(n) = ev {
-                    println!("  note: {n}");
-                }
-            }, &mut acc);
+            let out = chat_stream(
+                &cfg,
+                "wizard",
+                &history,
+                digest,
+                attach,
+                &no_cancel,
+                &|ev| {
+                    if let ChatEvent::Note(n) = ev {
+                        println!("  note: {n}");
+                    }
+                },
+                &mut acc,
+            );
             policy.settle(*out.as_ref().unwrap_or(&false));
             assert!(out.is_ok(), "request failed");
             println!("  {acc}\n");

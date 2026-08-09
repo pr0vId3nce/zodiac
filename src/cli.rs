@@ -23,10 +23,7 @@ pub const COMMANDS: &[&str] = &[
 
 pub fn run(mut args: Vec<String>) -> Result<()> {
     let mut session = "main".to_string();
-    if let Some(i) = args
-        .iter()
-        .position(|a| a == "-s" || a == "--session")
-    {
+    if let Some(i) = args.iter().position(|a| a == "-s" || a == "--session") {
         if i + 1 >= args.len() {
             bail!("{} needs a value", args[i]);
         }

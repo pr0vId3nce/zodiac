@@ -59,7 +59,11 @@ pub struct SrvPane {
     /// than describing the previous occupant for a second.
     #[allow(clippy::type_complexity)]
     transcript_memo: std::cell::RefCell<
-        Option<(Instant, (String, String), Option<(PathBuf, std::time::SystemTime)>)>,
+        Option<(
+            Instant,
+            (String, String),
+            Option<(PathBuf, std::time::SystemTime)>,
+        )>,
     >,
     /// Transcript-derived recap, keyed by the transcript's mtime (see
     /// `pi_recap`).
@@ -117,8 +121,7 @@ impl SrvPane {
         })?;
 
         let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-        let name =
-            name.unwrap_or_else(|| shell.rsplit('/').next().unwrap_or("shell").to_string());
+        let name = name.unwrap_or_else(|| shell.rsplit('/').next().unwrap_or("shell").to_string());
         let mut cmd = CommandBuilder::new(&shell);
         // Login shell: rebuilds env/prompt (starship etc.) from profile files
         // even if the long-lived server's inherited env has gone stale.
@@ -310,8 +313,14 @@ impl SrvPane {
     pub fn tail_text(&self, want: usize) -> Option<String> {
         let screen = self.parser.screen();
         let (_, cols) = screen.size();
-        let rows: Vec<String> = screen.rows(0, cols).map(|r| r.trim_end().to_string()).collect();
-        let end = rows.iter().rposition(|r| !r.is_empty()).map_or(0, |i| i + 1);
+        let rows: Vec<String> = screen
+            .rows(0, cols)
+            .map(|r| r.trim_end().to_string())
+            .collect();
+        let end = rows
+            .iter()
+            .rposition(|r| !r.is_empty())
+            .map_or(0, |i| i + 1);
         let start = end.saturating_sub(want);
         let text = rows[start..end].join("\n");
         (!text.trim().is_empty()).then_some(text)
@@ -424,7 +433,9 @@ impl SrvPane {
                 return false;
             }
         } else if since.elapsed() < dwell
-            || self.stall_fired.is_some_and(|t| t.elapsed() < STALL_COOLDOWN)
+            || self
+                .stall_fired
+                .is_some_and(|t| t.elapsed() < STALL_COOLDOWN)
         {
             return false;
         }
@@ -602,9 +613,13 @@ impl SrvPane {
     /// via its on-screen footer.
     fn agent_model(&mut self, agent: &str) -> Option<String> {
         match agent {
-            "claude" | "pi" => self
-                .transcript_model(agent)
-                .or_else(|| if agent == "pi" { self.pi_footer_model() } else { None }),
+            "claude" | "pi" => self.transcript_model(agent).or_else(|| {
+                if agent == "pi" {
+                    self.pi_footer_model()
+                } else {
+                    None
+                }
+            }),
             "opencode" => self.opencode_model(),
             _ => None,
         }
@@ -700,9 +715,9 @@ impl SrvPane {
                 let id = left.split_whitespace().next_back()?;
                 let plausible = id.len() >= 3
                     && id.chars().any(|c| c.is_ascii_digit())
-                    && id.chars().all(|c| {
-                        c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '/')
-                    });
+                    && id
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '.' | '_' | '/'));
                 if plausible {
                     let id = id.rsplit('/').next().unwrap_or(id);
                     return Some(short_model_name(id));
@@ -907,7 +922,9 @@ fn stall_match(screen: &vt100::Screen, conn_watch: bool) -> Option<Duration> {
         let mut text = String::new();
         let mut col_of: Vec<u16> = Vec::new();
         for c in 0..cols {
-            let Some(cell) = screen.cell(r, c) else { continue };
+            let Some(cell) = screen.cell(r, c) else {
+                continue;
+            };
             for ch in cell.contents().chars() {
                 if !ch.is_whitespace() {
                     text.push(ch);
@@ -999,8 +1016,9 @@ const STALL_COOLDOWN: Duration = Duration::from_secs(30);
 /// If the phrase never leaves the screen after an intervention, try again.
 const STALL_RETRY: Duration = Duration::from_secs(90);
 
-const AGENT_BINARIES: &[&str] =
-    &["claude", "pi", "opencode", "codex", "aider", "gemini", "goose"];
+const AGENT_BINARIES: &[&str] = &[
+    "claude", "pi", "opencode", "codex", "aider", "gemini", "goose",
+];
 
 /// Where an agent keeps the session transcripts for a working directory.
 /// `args` is the agent process's argv, for flags that move the directory.
@@ -1021,7 +1039,11 @@ fn claude_project_dir(cwd: &str) -> Option<std::path::PathBuf> {
         .chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect();
-    Some(std::path::Path::new(&home).join(".claude/projects").join(munged))
+    Some(
+        std::path::Path::new(&home)
+            .join(".claude/projects")
+            .join(munged),
+    )
 }
 
 /// pi's session directory for a working directory. Its own rule (from
@@ -1051,10 +1073,19 @@ fn pi_session_dir(cwd: &str, args: Option<&[String]>) -> Option<std::path::PathB
 
 /// The `--home-d3s-claude-zodiac--` directory name pi derives from a cwd.
 fn pi_project_name(cwd: &str) -> String {
-    let trimmed = cwd.strip_prefix('/').or_else(|| cwd.strip_prefix('\\')).unwrap_or(cwd);
+    let trimmed = cwd
+        .strip_prefix('/')
+        .or_else(|| cwd.strip_prefix('\\'))
+        .unwrap_or(cwd);
     let munged: String = trimmed
         .chars()
-        .map(|c| if matches!(c, '/' | '\\' | ':') { '-' } else { c })
+        .map(|c| {
+            if matches!(c, '/' | '\\' | ':') {
+                '-'
+            } else {
+                c
+            }
+        })
         .collect();
     format!("--{munged}--")
 }
@@ -1090,8 +1121,7 @@ fn resume_id(args: &[String]) -> Option<&str> {
     let at = args.iter().position(|a| a == "--resume" || a == "-r")?;
     let id = args.get(at + 1)?;
     // A session id, not a following flag or prompt text.
-    (id.len() >= 8 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-'))
-        .then_some(id.as_str())
+    (id.len() >= 8 && id.chars().all(|c| c.is_ascii_hexdigit() || c == '-')).then_some(id.as_str())
 }
 
 /// The session pi was pointed at: `--session`/`--session-id`/`--fork` take
@@ -1120,7 +1150,11 @@ fn jsonl_matching(dir: &std::path::Path, id: &str) -> Option<std::path::PathBuf>
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
             continue;
         }
-        if !path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.contains(id)) {
+        if !path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.contains(id))
+        {
             continue;
         }
         let Ok(mtime) = entry.metadata().and_then(|m| m.modified()) else {
@@ -1142,7 +1176,11 @@ fn jsonl_created_near(
     started: std::time::SystemTime,
 ) -> Option<(std::path::PathBuf, std::time::SystemTime)> {
     const SLACK: std::time::Duration = std::time::Duration::from_secs(180);
-    let mut best: Option<(std::path::PathBuf, std::time::SystemTime, std::time::Duration)> = None;
+    let mut best: Option<(
+        std::path::PathBuf,
+        std::time::SystemTime,
+        std::time::Duration,
+    )> = None;
     for entry in std::fs::read_dir(dir).ok()?.flatten() {
         let path = entry.path();
         if path.extension().and_then(|e| e.to_str()) != Some("jsonl") {
@@ -1205,7 +1243,10 @@ fn process_start_time(pid: u32) -> Option<std::time::SystemTime> {
 fn process_start_time(pid: u32) -> Option<std::time::SystemTime> {
     // The /proc/<pid> directory is created when the process is — its
     // metadata timestamps are the start time, without jiffies arithmetic.
-    std::fs::metadata(format!("/proc/{pid}")).ok()?.modified().ok()
+    std::fs::metadata(format!("/proc/{pid}"))
+        .ok()?
+        .modified()
+        .ok()
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -1268,8 +1309,7 @@ fn transcript_entries(path: &std::path::Path) -> Option<Vec<TranscriptEntry>> {
                             }
                         }
                         Some("tool_use") => {
-                            let name =
-                                b.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
+                            let name = b.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
                             out.push(TranscriptEntry {
                                 role: "tool",
                                 text: tool_line(name, b.get("input")),
@@ -1324,7 +1364,9 @@ fn pi_entries_in_tail(path: &std::path::Path, tail: u64) -> Option<Vec<Transcrip
         if v.get("type").and_then(|t| t.as_str()) != Some("message") {
             continue;
         }
-        let Some(message) = v.get("message") else { continue };
+        let Some(message) = v.get("message") else {
+            continue;
+        };
         // "toolResult" is the third role pi uses; like claude's tool_result
         // blocks it isn't part of the readable conversation flow.
         let role: &'static str = match message.get("role").and_then(|r| r.as_str()) {
@@ -1343,8 +1385,7 @@ fn pi_entries_in_tail(path: &std::path::Path, tail: u64) -> Option<Vec<Transcrip
                             }
                         }
                         Some("toolCall") => {
-                            let name =
-                                b.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
+                            let name = b.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
                             out.push(TranscriptEntry {
                                 role: "tool",
                                 text: tool_line(name, b.get("arguments")),
@@ -1396,8 +1437,16 @@ fn tool_line(name: &str, input: Option<&serde_json::Value>) -> String {
     let arg = input
         .and_then(|i| {
             [
-                "command", "file_path", "path", "pattern", "url", "query", "prompt",
-                "description", "skill", "subject",
+                "command",
+                "file_path",
+                "path",
+                "pattern",
+                "url",
+                "query",
+                "prompt",
+                "description",
+                "skill",
+                "subject",
             ]
             .iter()
             .find_map(|k| i.get(k).and_then(|v| v.as_str()))
@@ -1423,7 +1472,8 @@ fn model_from_transcript(path: &std::path::Path) -> Option<String> {
     use std::io::{Read, Seek, SeekFrom};
     let mut file = std::fs::File::open(path).ok()?;
     let len = file.metadata().ok()?.len();
-    file.seek(SeekFrom::Start(len.saturating_sub(64 * 1024))).ok()?;
+    file.seek(SeekFrom::Start(len.saturating_sub(64 * 1024)))
+        .ok()?;
     let mut bytes = Vec::new();
     file.read_to_end(&mut bytes).ok()?;
     let text = String::from_utf8_lossy(&bytes);
@@ -1457,8 +1507,7 @@ fn short_model_name(id: &str) -> String {
     let id = id.strip_prefix("claude-").unwrap_or(id);
     let id = match id.len().checked_sub(9) {
         Some(cut)
-            if id.as_bytes()[cut] == b'-'
-                && id[cut + 1..].chars().all(|c| c.is_ascii_digit()) =>
+            if id.as_bytes()[cut] == b'-' && id[cut + 1..].chars().all(|c| c.is_ascii_digit()) =>
         {
             &id[..cut]
         }
@@ -1492,13 +1541,20 @@ fn process_name(pid: u32) -> Option<String> {
 fn process_name(pid: u32) -> Option<String> {
     let mut buf = [0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
     let n = unsafe {
-        libc::proc_pidpath(pid as libc::c_int, buf.as_mut_ptr() as *mut libc::c_void, buf.len() as u32)
+        libc::proc_pidpath(
+            pid as libc::c_int,
+            buf.as_mut_ptr() as *mut libc::c_void,
+            buf.len() as u32,
+        )
     };
     if n <= 0 {
         return None;
     }
     let path = String::from_utf8_lossy(&buf[..n as usize]).into_owned();
-    path.rsplit('/').next().filter(|s| !s.is_empty()).map(str::to_string)
+    path.rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
@@ -1773,9 +1829,7 @@ fn detect_agent_process(root: u32) -> Option<String> {
 /// process — returns the destination host it's connecting to.
 fn detect_ssh_process(root: u32) -> Option<String> {
     for (_, args) in descendant_procs(root) {
-        let base = args
-            .first()
-            .map(|a| a.rsplit('/').next().unwrap_or(a));
+        let base = args.first().map(|a| a.rsplit('/').next().unwrap_or(a));
         if base == Some("ssh") {
             if let Some(dest) = ssh_destination(&args[1..]) {
                 return Some(dest);
@@ -1799,8 +1853,14 @@ fn ssh_destination(args: &[String]) -> Option<String> {
             i += 1;
             break;
         }
-        let Some(flag) = arg.strip_prefix('-') else { break };
-        i += if flag.len() == 1 && VALUE_FLAGS.contains(flag) { 2 } else { 1 };
+        let Some(flag) = arg.strip_prefix('-') else {
+            break;
+        };
+        i += if flag.len() == 1 && VALUE_FLAGS.contains(flag) {
+            2
+        } else {
+            1
+        };
     }
     let dest = args.get(i)?;
     let dest = dest.strip_prefix("ssh://").unwrap_or(dest);
@@ -1848,7 +1908,10 @@ mod tests {
 
     #[test]
     fn ssh_destination_skips_flag_only_options() {
-        assert_eq!(ssh_destination(&args("-tt -v des@bigbox")), Some("bigbox".into()));
+        assert_eq!(
+            ssh_destination(&args("-tt -v des@bigbox")),
+            Some("bigbox".into())
+        );
     }
 
     #[test]
@@ -2004,8 +2067,14 @@ mod pi_session_tests {
             pi_session_arg(&args("pi --session 019fe295-3523-7d14")),
             Some("019fe295-3523-7d14")
         );
-        assert_eq!(pi_session_arg(&args("pi --session-id abcd1234")), Some("abcd1234"));
-        assert_eq!(pi_session_arg(&args("pi --fork abcd1234")), Some("abcd1234"));
+        assert_eq!(
+            pi_session_arg(&args("pi --session-id abcd1234")),
+            Some("abcd1234")
+        );
+        assert_eq!(
+            pi_session_arg(&args("pi --fork abcd1234")),
+            Some("abcd1234")
+        );
         assert_eq!(
             pi_session_arg(&args("pi --session /tmp/s/019f.jsonl")),
             Some("/tmp/s/019f.jsonl")
@@ -2043,8 +2112,7 @@ mod transcript_entry_tests {
         )
         .unwrap();
         let e = transcript_entries(&path).unwrap();
-        let flat: Vec<(&str, &str)> =
-            e.iter().map(|x| (x.role, x.text.as_str())).collect();
+        let flat: Vec<(&str, &str)> = e.iter().map(|x| (x.role, x.text.as_str())).collect();
         assert_eq!(
             flat,
             vec![
@@ -2077,8 +2145,7 @@ mod transcript_entry_tests {
         )
         .unwrap();
         let e = pi_transcript_entries(&path).unwrap();
-        let flat: Vec<(&str, &str)> =
-            e.iter().map(|x| (x.role, x.text.as_str())).collect();
+        let flat: Vec<(&str, &str)> = e.iter().map(|x| (x.role, x.text.as_str())).collect();
         assert_eq!(
             flat,
             vec![
@@ -2105,7 +2172,9 @@ mod transcript_pick_tests {
     #[test]
     fn resume_id_from_argv() {
         assert_eq!(
-            resume_id(&args("claude --resume 7e32fca3-76ed-4878-861f-396bcfb7071f")),
+            resume_id(&args(
+                "claude --resume 7e32fca3-76ed-4878-861f-396bcfb7071f"
+            )),
             Some("7e32fca3-76ed-4878-861f-396bcfb7071f")
         );
         assert_eq!(resume_id(&args("claude -r deadbeef01")), Some("deadbeef01"));

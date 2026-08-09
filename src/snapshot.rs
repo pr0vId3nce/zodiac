@@ -145,12 +145,19 @@ mod tests {
     #[test]
     fn no_cd_when_the_pane_is_already_there() {
         let p = pane(Some("claude"), Some("abc"), Some("/src"));
-        assert_eq!(p.restore_command(Some("/src")).unwrap(), "claude --resume abc");
+        assert_eq!(
+            p.restore_command(Some("/src")).unwrap(),
+            "claude --resume abc"
+        );
     }
 
     #[test]
     fn pi_resumes_its_session() {
-        let p = pane(Some("pi"), Some("019fe295-3523-7d14-8293-6db6edbacb02"), Some("/src"));
+        let p = pane(
+            Some("pi"),
+            Some("019fe295-3523-7d14-8293-6db6edbacb02"),
+            Some("/src"),
+        );
         assert_eq!(
             p.restore_command(None).unwrap(),
             "cd '/src' && pi --session 019fe295-3523-7d14-8293-6db6edbacb02"
@@ -159,7 +166,10 @@ mod tests {
 
     #[test]
     fn an_agent_without_a_session_still_just_launches() {
-        assert_eq!(pane(Some("pi"), None, None).restore_command(None).unwrap(), "pi");
+        assert_eq!(
+            pane(Some("pi"), None, None).restore_command(None).unwrap(),
+            "pi"
+        );
     }
 
     #[test]
@@ -170,12 +180,17 @@ mod tests {
 
     #[test]
     fn a_shell_pane_has_nothing_to_restore() {
-        assert!(pane(None, None, Some("/src")).restore_command(None).is_none());
+        assert!(pane(None, None, Some("/src"))
+            .restore_command(None)
+            .is_none());
     }
 
     #[test]
     fn quoting_survives_spaces_and_quotes() {
         let p = pane(Some("claude"), None, Some("/a dir/o'brien"));
-        assert_eq!(p.restore_command(None).unwrap(), "cd '/a dir/o'\\''brien' && claude");
+        assert_eq!(
+            p.restore_command(None).unwrap(),
+            "cd '/a dir/o'\\''brien' && claude"
+        );
     }
 }

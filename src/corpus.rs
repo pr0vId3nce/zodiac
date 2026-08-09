@@ -63,7 +63,10 @@ impl<W: Write> Writer<W> {
         out.write_all(MAGIC)?;
         out.write_all(&rows.to_le_bytes())?;
         out.write_all(&cols.to_le_bytes())?;
-        Ok(Self { out, start: Instant::now() })
+        Ok(Self {
+            out,
+            start: Instant::now(),
+        })
     }
 
     fn chunk(&mut self, kind: u8, payload: &[u8]) -> io::Result<()> {
@@ -94,7 +97,10 @@ pub fn read(mut r: impl Read) -> io::Result<Recording> {
     let mut magic = [0u8; 8];
     r.read_exact(&mut magic)?;
     if &magic != MAGIC {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "not a PTYREC1 file"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "not a PTYREC1 file",
+        ));
     }
     let mut sz = [0u8; 4];
     r.read_exact(&mut sz)?;
@@ -122,7 +128,11 @@ pub fn read(mut r: impl Read) -> io::Result<Recording> {
         let len = u32::from_le_bytes([hdr[5], hdr[6], hdr[7], hdr[8]]) as usize;
         let mut payload = vec![0u8; len];
         r.read_exact(&mut payload)?;
-        chunks.push(Chunk { millis, kind, payload });
+        chunks.push(Chunk {
+            millis,
+            kind,
+            payload,
+        });
     }
     Ok(Recording { rows, cols, chunks })
 }
@@ -152,7 +162,10 @@ mod tests {
     fn truncated_or_foreign_files_are_rejected() {
         assert!(read(&b"CASTv2\n\x00\x00\x00"[..]).is_err());
         let mut buf = Vec::new();
-        Writer::new(&mut buf, 10, 10).unwrap().output(b"abc").unwrap();
+        Writer::new(&mut buf, 10, 10)
+            .unwrap()
+            .output(b"abc")
+            .unwrap();
         buf.truncate(buf.len() - 1);
         assert!(read(&buf[..]).is_err());
     }

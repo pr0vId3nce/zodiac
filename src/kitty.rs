@@ -74,7 +74,15 @@ fn seg(px: &mut [u8], w: u32, h: u32, a: (f32, f32), b: (f32, f32), th: f32, col
     let steps = (len * 2.0).ceil().max(1.0) as u32;
     for i in 0..=steps {
         let t = i as f32 / steps as f32;
-        stamp(px, w, h, a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t, th, col);
+        stamp(
+            px,
+            w,
+            h,
+            a.0 + (b.0 - a.0) * t,
+            a.1 + (b.1 - a.1) * t,
+            th,
+            col,
+        );
     }
 }
 
@@ -227,10 +235,26 @@ pub fn orrery_rgba(
             for dx in -1..=1i64 {
                 let d = ((dx * dx + dy * dy) as f32).sqrt();
                 let a = (1.0 - d * 0.55).max(0.0);
-                put_a(&mut px, w, h, x as i64 + dx, y as i64 + dy, accent, a * 0.30);
+                put_a(
+                    &mut px,
+                    w,
+                    h,
+                    x as i64 + dx,
+                    y as i64 + dy,
+                    accent,
+                    a * 0.30,
+                );
                 if (k / 9) % 2 == 0 {
                     let (ix, iy) = (cx - rx * 0.84 * t.cos(), cy - ry * 0.80 * t.sin());
-                    put_a(&mut px, w, h, ix as i64 + dx, iy as i64 + dy, accent, a * 0.12);
+                    put_a(
+                        &mut px,
+                        w,
+                        h,
+                        ix as i64 + dx,
+                        iy as i64 + dy,
+                        accent,
+                        a * 0.12,
+                    );
                 }
             }
         }
@@ -255,7 +279,15 @@ pub fn orrery_rgba(
                 } else {
                     0.0
                 };
-                put_a(&mut px, w, h, x as i64 + dx, y as i64 + dy, col, core.max(glow));
+                put_a(
+                    &mut px,
+                    w,
+                    h,
+                    x as i64 + dx,
+                    y as i64 + dy,
+                    col,
+                    core.max(glow),
+                );
             }
         }
     }
@@ -438,16 +470,14 @@ pub fn orb_rgba(w: u32, h: u32, col: (u8, u8, u8), shape: OrbShape, phase: f32) 
                     // Specular glint, upper left — glass catching the light.
                     let sx = dx + r * 0.35;
                     let sy = dy + r * 0.40;
-                    let spec =
-                        (-((sx * sx + sy * sy) / (r * r * 0.06))).exp() * 0.85;
+                    let spec = (-((sx * sx + sy * sy) / (r * r * 0.06))).exp() * 0.85;
                     rr += (255.0 - rr) * spec;
                     gg += (255.0 - gg) * spec;
                     bb += (255.0 - bb) * spec;
                     a = (a + spec * 0.4).min(0.95);
                 } else {
                     // Soft halo bleeding past the sphere, pulsing.
-                    let halo =
-                        glow * (-((d - r) / (r * 0.55)).powi(2)).exp() * 0.35;
+                    let halo = glow * (-((d - r) / (r * 0.55)).powi(2)).exp() * 0.35;
                     rr = cr;
                     gg = cg;
                     bb = cb;
@@ -476,8 +506,17 @@ pub fn orb_rgba(w: u32, h: u32, col: (u8, u8, u8), shape: OrbShape, phase: f32) 
 /// used by the blocks home view — every write also raises alpha so it
 /// composites cleanly over the terminal background.
 #[allow(clippy::too_many_arguments)]
-fn draw_clawd(px: &mut [u8], w: u32, h: u32, mx: f32, my: f32, s: f32, fh: f32, frame: u8, soft: bool) {
-
+fn draw_clawd(
+    px: &mut [u8],
+    w: u32,
+    h: u32,
+    mx: f32,
+    my: f32,
+    s: f32,
+    fh: f32,
+    frame: u8,
+    soft: bool,
+) {
     // Clawd mid-bounce: coral rounded blob, dark eyes, ground
     // shadow. phase 0 = top of the arc, 1 = squashed on the ground.
     let coral = (222.0f32, 122.0f32, 88.0f32);
@@ -514,16 +553,22 @@ fn draw_clawd(px: &mut [u8], w: u32, h: u32, mx: f32, my: f32, s: f32, fh: f32, 
     for side in [-1.0f32, 1.0] {
         let x0 = mx + side * bw2 * 0.45;
         let y0 = cy + bh2 * 0.85;
-        seg(px, w, h, (x0, y0), (x0, y0 + leg_l + bh2 * 0.15), limb_th, coral8);
+        seg(
+            px,
+            w,
+            h,
+            (x0, y0),
+            (x0, y0 + leg_l + bh2 * 0.15),
+            limb_th,
+            coral8,
+        );
     }
     let rad = bh2 * if soft { 0.55 } else { 0.20 };
     for y in (cy - bh2 - 2.0).max(0.0) as u32..((cy + bh2 + 2.0) as u32).min(h) {
         for x in (mx - bw2 - 2.0).max(0.0) as u32..((mx + bw2 + 2.0) as u32).min(w) {
             let qx = (x as f32 - mx).abs() - (bw2 - rad);
             let qy = (y as f32 - cy).abs() - (bh2 - rad);
-            let d = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt()
-                + qx.max(qy).min(0.0)
-                - rad;
+            let d = (qx.max(0.0).powi(2) + qy.max(0.0).powi(2)).sqrt() + qx.max(qy).min(0.0) - rad;
             let a = (-d + 0.7).clamp(0.0, 1.0);
             if a > 0.01 {
                 let o = ((y * w + x) * 4) as usize;
@@ -612,7 +657,15 @@ fn draw_pi_mascot(px: &mut [u8], w: u32, h: u32, mx: f32, my: f32, s: f32, fh: f
     // The bar, overhanging both legs, with a small downward flick on the
     // left end — what makes the shape read as π and not as Н.
     seg(px, w, h, (mx - bw2, top), (mx + bw2, top), th, teal);
-    seg(px, w, h, (mx - bw2, top), (mx - bw2, top + bh2 * 0.28), th * 0.8, teal);
+    seg(
+        px,
+        w,
+        h,
+        (mx - bw2, top),
+        (mx - bw2, top + bh2 * 0.28),
+        th * 0.8,
+        teal,
+    );
     // Legs: the left one near-upright, the right one curling outward, both
     // splaying a little further as the landing squashes the glyph.
     let splay = 0.10 + 0.10 * phase;
@@ -697,8 +750,7 @@ pub fn hal_rgba(w: u32, h: u32, status_idx: usize, open: f32) -> Vec<u8> {
                 bb = m + 6.0;
             } else if d < bez_in {
                 // Eyelid: a dark shutter closing in from above and below.
-                let lid =
-                    1.0 - ((dy.abs() - open * bez_in) / (r * 0.10)).clamp(0.0, 1.0) * 0.95;
+                let lid = 1.0 - ((dy.abs() - open * bez_in) / (r * 0.10)).clamp(0.0, 1.0) * 0.95;
                 let glow = (-(d / (r * 0.62)).powi(2) * 1.8).exp();
                 let core = (-(d / (r * 0.15)).powi(2)).exp();
                 rr = 10.0 + (225.0 * glow * lvl + 45.0 * core) * lid;
@@ -749,7 +801,10 @@ pub fn transmit(out: &mut impl Write, id: u32, w: u32, h: u32, rgba: &[u8]) -> s
 /// to cols×rows cells, under the text layer. `C=1` leaves the cursor put.
 /// Re-placing the same (id, pid) replaces that placement atomically.
 pub fn place(out: &mut impl Write, id: u32, pid: u32, cols: u16, rows: u16) -> std::io::Result<()> {
-    write!(out, "\x1b_Ga=p,i={id},p={pid},c={cols},r={rows},z=-1,C=1,q=2\x1b\\")
+    write!(
+        out,
+        "\x1b_Ga=p,i={id},p={pid},c={cols},r={rows},z=-1,C=1,q=2\x1b\\"
+    )
 }
 
 /// Delete one placement of one image (data stays cached).

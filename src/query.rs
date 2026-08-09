@@ -259,7 +259,10 @@ mod tests {
         chunk.extend(std::iter::repeat_n(b'x', CARRY_MAX + 10));
         assert!(q.scan(&chunk, p.screen(), (0, 0)).is_empty());
         // the dangling title set was dropped, not carried into the next chunk
-        assert_eq!(q.scan(b"more\x07\x1b[c", p.screen(), (0, 0)), b"\x1b[?62;22c");
+        assert_eq!(
+            q.scan(b"more\x07\x1b[c", p.screen(), (0, 0)),
+            b"\x1b[?62;22c"
+        );
     }
 
     /// One row per query the scanner answers (or deliberately ignores) on a

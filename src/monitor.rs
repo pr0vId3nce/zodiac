@@ -69,7 +69,10 @@ mod cfg_tests {
     fn blank_endpoint_disables_the_monitor() {
         let s = crate::settings::Settings::default();
         assert!(s.monitor_endpoint.is_empty(), "fresh settings start blank");
-        assert!(cfg_from_settings(&s).is_none(), "blank must mean no network");
+        assert!(
+            cfg_from_settings(&s).is_none(),
+            "blank must mean no network"
+        );
     }
 
     #[test]
@@ -180,7 +183,10 @@ fn classify(cfg: &MonitorCfg, screen: &str, policy: &str) -> Option<Verdict> {
 }
 
 fn post(cfg: &MonitorCfg, body: &str) -> Option<String> {
-    let addr = (cfg.host.as_str(), cfg.port).to_socket_addrs().ok()?.next()?;
+    let addr = (cfg.host.as_str(), cfg.port)
+        .to_socket_addrs()
+        .ok()?
+        .next()?;
     let mut sock = TcpStream::connect_timeout(&addr, Duration::from_secs(4)).ok()?;
     let _ = sock.set_read_timeout(Some(Duration::from_secs(60)));
     let _ = sock.set_write_timeout(Some(Duration::from_secs(6)));
@@ -201,10 +207,16 @@ fn post(cfg: &MonitorCfg, body: &str) -> Option<String> {
     let chunked = String::from_utf8_lossy(headers)
         .to_ascii_lowercase()
         .contains("transfer-encoding: chunked");
-    let payload = if chunked { dechunk(rest) } else { rest.to_vec() };
+    let payload = if chunked {
+        dechunk(rest)
+    } else {
+        rest.to_vec()
+    };
 
     let v: serde_json::Value = serde_json::from_slice(&payload).ok()?;
-    v["choices"][0]["message"]["content"].as_str().map(str::to_string)
+    v["choices"][0]["message"]["content"]
+        .as_str()
+        .map(str::to_string)
 }
 
 const SUBTITLE_SYSTEM: &str = "You are summarizing one terminal pane in a coding-agent \
@@ -269,7 +281,8 @@ fn dechunk(mut s: &[u8]) -> Vec<u8> {
     let mut out = Vec::new();
     while let Some(nl) = find_bytes(s, b"\r\n") {
         let size_hex = std::str::from_utf8(&s[..nl]).unwrap_or("0").trim();
-        let size = usize::from_str_radix(size_hex.split(';').next().unwrap_or("0"), 16).unwrap_or(0);
+        let size =
+            usize::from_str_radix(size_hex.split(';').next().unwrap_or("0"), 16).unwrap_or(0);
         if size == 0 {
             break;
         }
@@ -372,7 +385,11 @@ fn log_decision(session: &str, pane: &str, v: &Verdict) {
         return;
     }
     use std::fs::OpenOptions;
-    if let Ok(mut f) = OpenOptions::new().create(true).append(true).open(dir.join("decisions.log")) {
+    if let Ok(mut f) = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("decisions.log"))
+    {
         let _ = writeln!(f, "{line}");
     }
 }

@@ -60,7 +60,12 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     let rec = Arc::new(Mutex::new(corpus::Writer::new(file, rows, cols)?));
 
     let pty = native_pty_system();
-    let pair = pty.openpty(PtySize { rows, cols, pixel_width: 0, pixel_height: 0 })?;
+    let pair = pty.openpty(PtySize {
+        rows,
+        cols,
+        pixel_width: 0,
+        pixel_height: 0,
+    })?;
     let mut cmd = CommandBuilder::new(&cmd_args[0]);
     cmd.args(&cmd_args[1..]);
     cmd.env("TERM", "xterm-256color");
@@ -114,5 +119,9 @@ fn run() -> Result<ExitCode, Box<dyn std::error::Error>> {
     }
     eprintln!("\r\nptyrec: wrote {out_path}");
     // The stdin thread may still be blocked on read; exiting reaps it.
-    Ok(if status.success() { ExitCode::SUCCESS } else { ExitCode::FAILURE })
+    Ok(if status.success() {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    })
 }

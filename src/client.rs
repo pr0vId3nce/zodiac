@@ -83,8 +83,15 @@ const CHAT_ERROR: u8 = 3;
 /// A pending prompt_pane/send_keys consent chip — "▸ run: ... [y/n]".
 const CHAT_ACTION: u8 = 4;
 
-const CURSOR_TYPES: &[&str] =
-    &["auto", "block", "underline", "bar", "orb", "circle", "aleph"];
+const CURSOR_TYPES: &[&str] = &[
+    "auto",
+    "block",
+    "underline",
+    "bar",
+    "orb",
+    "circle",
+    "aleph",
+];
 const CURSOR_BLINKS: &[&str] = &["auto", "on", "off"];
 /// Orb pulse period; frames are quantized so they can be pre-transmitted.
 const ORB_PERIOD_MS: u64 = 1400;
@@ -128,7 +135,9 @@ impl Mascot {
         }
     }
 }
-const ZODIAC: &[&str] = &["♈", "♉", "♊", "♋", "♌", "♍", "♎", "♏", "♐", "♑", "♒", "♓"];
+const ZODIAC: &[&str] = &[
+    "♈", "♉", "♊", "♋", "♌", "♍", "♎", "♏", "♐", "♑", "♒", "♓",
+];
 
 /// Selected-card outline thickness as a fraction of card pixel height.
 const SELECT_WEIGHTS: &[(&str, f32)] = &[
@@ -279,15 +288,51 @@ struct EyeDef {
 }
 
 const EYES: &[EyeDef] = &[
-    EyeDef { name: "eye", open: 'ಠ', closed: '‿' },
-    EyeDef { name: "dot", open: '◉', closed: '─' },
-    EyeDef { name: "star", open: '✦', closed: '✧' },
-    EyeDef { name: "heart", open: '♥', closed: '♡' },
-    EyeDef { name: "diamond", open: '◆', closed: '◇' },
-    EyeDef { name: "pulse", open: '●', closed: '○' },
-    EyeDef { name: "flower", open: '✿', closed: '❀' },
-    EyeDef { name: "note", open: '♪', closed: '♫' },
-    EyeDef { name: "arrow", open: '▶', closed: '▷' },
+    EyeDef {
+        name: "eye",
+        open: 'ಠ',
+        closed: '‿',
+    },
+    EyeDef {
+        name: "dot",
+        open: '◉',
+        closed: '─',
+    },
+    EyeDef {
+        name: "star",
+        open: '✦',
+        closed: '✧',
+    },
+    EyeDef {
+        name: "heart",
+        open: '♥',
+        closed: '♡',
+    },
+    EyeDef {
+        name: "diamond",
+        open: '◆',
+        closed: '◇',
+    },
+    EyeDef {
+        name: "pulse",
+        open: '●',
+        closed: '○',
+    },
+    EyeDef {
+        name: "flower",
+        open: '✿',
+        closed: '❀',
+    },
+    EyeDef {
+        name: "note",
+        open: '♪',
+        closed: '♫',
+    },
+    EyeDef {
+        name: "arrow",
+        open: '▶',
+        closed: '▷',
+    },
 ];
 
 use crate::settings::Settings;
@@ -304,18 +349,28 @@ enum AppEvent {
 
 enum Mode {
     Normal,
-    Rename { buf: String },
+    Rename {
+        buf: String,
+    },
     Settings,
     /// Editing one free-text field on the Settings page (chat endpoint,
     /// model, ssh destination, or service name); `row` is the
     /// `settings_row` it was opened from, so Enter/Esc return there.
-    SettingsEdit { row: usize, buf: String },
+    SettingsEdit {
+        row: usize,
+        buf: String,
+    },
     /// Fuzzy-find a pane by name (Alt+/); `jump_sel` on `App` tracks which
     /// of the live-filtered matches is highlighted.
-    Jump { buf: String },
+    Jump {
+        buf: String,
+    },
     /// Alt+⇧R: what the last snapshot would raise, awaiting confirmation.
     /// One line per agent pane; empty when there's nothing to restore.
-    Restore { lines: Vec<String>, age: String },
+    Restore {
+        lines: Vec<String>,
+        age: String,
+    },
 }
 
 /// A mouse selection in the pane area, in pane-relative (row, col) cells.
@@ -579,7 +634,10 @@ struct App {
     chat_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     /// A prompt_pane/send_keys call awaiting a y/n — the worker is blocked
     /// on the sender's paired receiver until one arrives.
-    chat_action: Option<(crate::chat::ActionRequest, std::sync::mpsc::Sender<crate::chat::ActionOutcome>)>,
+    chat_action: Option<(
+        crate::chat::ActionRequest,
+        std::sync::mpsc::Sender<crate::chat::ActionOutcome>,
+    )>,
     chat_status: Option<crate::chat::ChatStatus>,
     /// Transcript: (role, text) — see the WIZ_* role constants.
     chat_log: Vec<(u8, String)>,
@@ -788,8 +846,11 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         // Refresh pane metadata ~1/s while the home page is open (it wants
         // to feel live), and a slow trickle otherwise — just enough that
         // the sidebar's ssh tag doesn't sit stale for minutes on end.
-        let query_every =
-            if app.home { Duration::from_secs(1) } else { Duration::from_secs(4) };
+        let query_every = if app.home {
+            Duration::from_secs(1)
+        } else {
+            Duration::from_secs(4)
+        };
         if app.home_queried.is_none_or(|t| t.elapsed() > query_every) {
             app.send(T_QUERY, 0, &[]);
             app.home_queried = Some(Instant::now());
@@ -804,7 +865,9 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
             } else {
                 250
             }
-        } else if app.any_working() || matches!(app.mode, Mode::Settings | Mode::SettingsEdit { .. }) {
+        } else if app.any_working()
+            || matches!(app.mode, Mode::Settings | Mode::SettingsEdit { .. })
+        {
             50
         } else if app.orb_active() && app.orb_blinking() {
             80 // keep the palantir breathing
@@ -912,7 +975,9 @@ fn read_bridge_endpoint() -> Option<(String, String, String)> {
 /// check before offering it. 400 ms: a tailnet round trip, not a stall.
 fn endpoint_alive(url: &str) -> bool {
     use std::net::{TcpStream, ToSocketAddrs};
-    let rest = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://"));
+    let rest = url
+        .strip_prefix("http://")
+        .or_else(|| url.strip_prefix("https://"));
     let Some(hostport) = rest.map(|r| r.split('/').next().unwrap_or(r)) else {
         return true; // unparseable — say nothing rather than cry wolf
     };
@@ -1236,7 +1301,10 @@ impl App {
         };
         let ((sr, sc), (er, ec)) = sel.normalized();
         let cols = p.parser.screen().size().1;
-        let text = p.parser.screen().contents_between(sr, sc, er, (ec + 1).min(cols));
+        let text = p
+            .parser
+            .screen()
+            .contents_between(sr, sc, er, (ec + 1).min(cols));
         if text.chars().all(char::is_whitespace) {
             self.selection = None;
             return;
@@ -1267,9 +1335,9 @@ impl App {
                             let mut p = CPane::new(hp.id, hp.name, rows, cols);
                             p.activity = hp.activity;
                             p.attention = hp.attention;
-                            p.last_output = hp
-                                .last_ms
-                                .and_then(|ms| Instant::now().checked_sub(Duration::from_millis(ms)));
+                            p.last_output = hp.last_ms.and_then(|ms| {
+                                Instant::now().checked_sub(Duration::from_millis(ms))
+                            });
                             p
                         })
                         .collect();
@@ -1516,10 +1584,12 @@ impl App {
                 KeyCode::Backspace => {
                     buf.pop();
                 }
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL)
-                    && buf.chars().count() < 40 => {
-                        buf.push(c);
-                    }
+                KeyCode::Char(c)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && buf.chars().count() < 40 =>
+                {
+                    buf.push(c);
+                }
                 _ => {}
             }
             return;
@@ -1584,10 +1654,12 @@ impl App {
                 KeyCode::Backspace => {
                     buf.pop();
                 }
-                KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL)
-                    && buf.chars().count() < 200 => {
-                        buf.push(c);
-                    }
+                KeyCode::Char(c)
+                    if !key.modifiers.contains(KeyModifiers::CONTROL)
+                        && buf.chars().count() < 200 =>
+                {
+                    buf.push(c);
+                }
                 _ => {}
             }
             return;
@@ -1711,10 +1783,9 @@ impl App {
                 KeyCode::Down => self.chat_scroll_by(-1),
                 KeyCode::PageUp => self.chat_scroll_by(10),
                 KeyCode::PageDown => self.chat_scroll_by(-10),
-                KeyCode::Char(c) if !ctrl
-                    && self.chat_input.chars().count() < 500 => {
-                        self.chat_input.push(c);
-                    }
+                KeyCode::Char(c) if !ctrl && self.chat_input.chars().count() < 500 => {
+                    self.chat_input.push(c);
+                }
                 _ => {}
             }
             return;
@@ -1873,7 +1944,9 @@ impl App {
     fn working(&self, i: usize) -> bool {
         let p = &self.panes[i];
         let title = p.parser.screen().title();
-        let recent = p.last_output.is_some_and(|t| t.elapsed() < IN_PROGRESS_WINDOW);
+        let recent = p
+            .last_output
+            .is_some_and(|t| t.elapsed() < IN_PROGRESS_WINDOW);
         match title_state(title) {
             TitleState::Working => true,
             TitleState::Idle => {
@@ -2124,11 +2197,19 @@ impl App {
             }
             E::Restored(turns) => {
                 for (role, text) in turns {
-                    let wiz_role = if role == "user" { CHAT_USER } else { CHAT_REPLY };
+                    let wiz_role = if role == "user" {
+                        CHAT_USER
+                    } else {
+                        CHAT_REPLY
+                    };
                     self.chat_note(wiz_role, text);
                 }
             }
-            E::Cast { desc, action, decision } => {
+            E::Cast {
+                desc,
+                action,
+                decision,
+            } => {
                 self.chat_action = Some((action, decision));
                 self.chat_note(CHAT_ACTION, format!("▸ run: {desc}  [y/n]"));
             }
@@ -2146,7 +2227,10 @@ impl App {
             .rows(0, cols)
             .map(|r| r.trim_end().to_string())
             .collect();
-        let end = rows.iter().rposition(|r| !r.is_empty()).map_or(0, |i| i + 1);
+        let end = rows
+            .iter()
+            .rposition(|r| !r.is_empty())
+            .map_or(0, |i| i + 1);
         let start = end.saturating_sub(want);
         let text = rows[start..end].join("\n");
         (!text.trim().is_empty()).then_some(text)
@@ -2181,11 +2265,7 @@ impl App {
         let Some(state) = &self.home_state else {
             return "(no card data yet)".into();
         };
-        let mut s = format!(
-            "session '{}': {} cards\n",
-            state.session,
-            state.panes.len()
-        );
+        let mut s = format!("session '{}': {} cards\n", state.session, state.panes.len());
         for p in &state.panes {
             let agent = match (&p.agent, &p.version) {
                 (Some(a), Some(v)) => format!("{a} {}", version_token(v)),
@@ -2262,7 +2342,7 @@ impl App {
     /// resolved to a pane id here, since the worker has no socket of its
     /// own to send `T_INPUT` with.
     fn chat_decide(&mut self, yes: bool) {
-        use crate::chat::{ActionRequest, ActionOutcome};
+        use crate::chat::{ActionOutcome, ActionRequest};
         let Some((action, decision)) = self.chat_action.take() else {
             return;
         };
@@ -2557,11 +2637,9 @@ impl App {
     /// (sigil + roman) in zodiac styles, plain roman or arabic otherwise.
     fn pane_label(&self, n: usize) -> String {
         match self.card_numeral_style() {
-            "zodiac" | "zodiac-white" => format!(
-                "{}\u{FE0E} {}",
-                ZODIAC[(n - 1) % ZODIAC.len()],
-                roman(n)
-            ),
+            "zodiac" | "zodiac-white" => {
+                format!("{}\u{FE0E} {}", ZODIAC[(n - 1) % ZODIAC.len()], roman(n))
+            }
             "arabic" => n.to_string(),
             _ => roman(n),
         }
@@ -2578,9 +2656,7 @@ impl App {
     /// Returns (text, width in cells).
     fn pane_badge(&self, n: usize) -> (String, usize) {
         match self.card_numeral_style() {
-            "zodiac" | "zodiac-white" => {
-                (format!("{}\u{FE0E}", ZODIAC[(n - 1) % ZODIAC.len()]), 1)
-            }
+            "zodiac" | "zodiac-white" => (format!("{}\u{FE0E}", ZODIAC[(n - 1) % ZODIAC.len()]), 1),
             "arabic" => {
                 let w = if self.panes.len() >= 10 { 2 } else { 1 };
                 (format!("{n:>w$}"), w)
@@ -2756,8 +2832,7 @@ impl App {
             }
             4 => return self.cycle_eye(dir),
             5 => {
-                self.settings.sidebar_frame =
-                    cycle_pick(SIDEBAR_FRAMES, self.sidebar_frame(), dir);
+                self.settings.sidebar_frame = cycle_pick(SIDEBAR_FRAMES, self.sidebar_frame(), dir);
             }
             6 => {
                 self.settings.sidebar_weight =
@@ -2793,8 +2868,7 @@ impl App {
                     .to_string();
             }
             13 => {
-                self.settings.card_outline =
-                    cycle_pick(CARD_OUTLINES, self.card_outline(), dir);
+                self.settings.card_outline = cycle_pick(CARD_OUTLINES, self.card_outline(), dir);
             }
             14 => {
                 let cur = color_by_name(&self.settings.select_color, "gold").0;
@@ -2808,16 +2882,14 @@ impl App {
                     .to_string();
             }
             16 => {
-                self.settings.select_style =
-                    cycle_pick(SELECT_STYLES, self.select_style(), dir);
+                self.settings.select_style = cycle_pick(SELECT_STYLES, self.select_style(), dir);
             }
             17 => {
                 self.settings.card_numeral =
                     cycle_pick(CARD_NUMERALS, self.card_numeral_style(), dir);
             }
             18 => {
-                self.settings.claude_style =
-                    cycle_pick(CLAUDE_STYLES, self.claude_style(), dir);
+                self.settings.claude_style = cycle_pick(CLAUDE_STYLES, self.claude_style(), dir);
             }
             19 => return self.cycle_finish_sound(dir),
             20 => self.settings.connection_watch = !self.settings.connection_watch,
@@ -2825,22 +2897,19 @@ impl App {
                 self.settings.cursor_style = cycle_pick(CURSOR_TYPES, self.cursor_type(), dir);
             }
             22 => {
-                self.settings.cursor_blink =
-                    cycle_pick(CURSOR_BLINKS, self.cursor_blink(), dir);
+                self.settings.cursor_blink = cycle_pick(CURSOR_BLINKS, self.cursor_blink(), dir);
             }
             23 => {
                 let mut choices: Vec<&str> = vec!["off"];
                 choices.extend(COLOR_CHOICES.iter().map(|(n, _, _)| *n));
-                self.settings.cursor_color =
-                    cycle_pick(&choices, self.cursor_color_name(), dir);
+                self.settings.cursor_color = cycle_pick(&choices, self.cursor_color_name(), dir);
             }
             24 => self.settings.hide_controls = !self.settings.hide_controls,
             25 => {
                 self.settings.chat_face = cycle_pick(CHAT_FACES, self.chat_face(), dir);
             }
             26 => {
-                self.settings.theme =
-                    cycle_pick(crate::theme::THEMES, self.theme_name(), dir);
+                self.settings.theme = cycle_pick(crate::theme::THEMES, self.theme_name(), dir);
             }
             _ => {}
         }
@@ -2978,7 +3047,11 @@ impl App {
             Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(area);
         // A surround frame spends two extra columns on borders; widen so
         // the usable inner width stays the same as with the separator.
-        let extra = if self.sidebar_frame() == "separator" { 0 } else { 2 };
+        let extra = if self.sidebar_frame() == "separator" {
+            0
+        } else {
+            2
+        };
         let sb_w = if self.zoom {
             0
         } else if self.collapsed {
@@ -3019,11 +3092,7 @@ impl App {
             // docked column, so the observatory keeps its full width. The
             // chat_width setting still steers how wide it opens.
             let pref: u16 = self.settings.chat_width.parse().unwrap_or(40).clamp(28, 70);
-            if self.chat_open
-                && self.chat_tx.is_some()
-                && body.width >= 30
-                && body.height >= 12
-            {
+            if self.chat_open && self.chat_tx.is_some() && body.width >= 30 && body.height >= 12 {
                 // Roomy now that nothing sits beside it: ~70% of the page,
                 // never narrower than the old docked width nor absurdly
                 // wide on a huge monitor.
@@ -3219,7 +3288,9 @@ impl App {
     /// highlighted. Sits in the upper third so it doesn't cover whatever
     /// the pane you're about to jump to is showing.
     fn draw_jump(&self, f: &mut Frame, area: Rect) {
-        let Mode::Jump { buf } = &self.mode else { return };
+        let Mode::Jump { buf } = &self.mode else {
+            return;
+        };
         let matches = self.jump_matches(buf);
         let w = 50.min(area.width.saturating_sub(4)).max(20);
         let list_h = matches.len().min(10) as u16;
@@ -3243,7 +3314,12 @@ impl App {
         let mut lines = vec![Line::from(vec![
             Span::styled("🔎 ", Style::default().fg(Color::Cyan)),
             Span::styled(buf.clone(), Style::default().fg(Color::Yellow)),
-            Span::styled("▏", Style::default().fg(Color::Yellow).add_modifier(Modifier::SLOW_BLINK)),
+            Span::styled(
+                "▏",
+                Style::default()
+                    .fg(Color::Yellow)
+                    .add_modifier(Modifier::SLOW_BLINK),
+            ),
         ])];
         if matches.is_empty() && !buf.is_empty() {
             lines.push(Line::from(Span::styled(
@@ -3260,7 +3336,10 @@ impl App {
                 Style::default().fg(Color::Gray)
             };
             let name = truncate(&p.name, inner.width.saturating_sub(4) as usize);
-            lines.push(Line::from(Span::styled(format!(" {:>2} {name}", idx + 1), style)));
+            lines.push(Line::from(Span::styled(
+                format!(" {:>2} {name}", idx + 1),
+                style,
+            )));
         }
         f.render_widget(Paragraph::new(lines), inner);
     }
@@ -3285,8 +3364,8 @@ impl App {
         let outer = block.inner(rect);
         f.render_widget(block, rect);
         let (inner, controls) = if two_col {
-            let [l, r] = Layout::horizontal([Constraint::Length(58), Constraint::Min(1)])
-                .areas(outer);
+            let [l, r] =
+                Layout::horizontal([Constraint::Length(58), Constraint::Min(1)]).areas(outer);
             (l, Some(r))
         } else {
             (outer, None)
@@ -3347,10 +3426,7 @@ impl App {
                 Style::default().bold()
             };
             let (shown, val_style) = match editing {
-                Some(buf) => (
-                    format!("{buf}▏"),
-                    Style::default().fg(Color::White).bold(),
-                ),
+                Some(buf) => (format!("{buf}▏"), Style::default().fg(Color::White).bold()),
                 None if value.is_empty() => (
                     placeholder.to_string(),
                     Style::default().fg(Color::DarkGray),
@@ -3540,7 +3616,12 @@ impl App {
                 "Select style",
                 self.select_style(),
                 vec![Span::styled(
-                    if self.select_style() == "glow" { "◜◝" } else { "┌┐" }.to_string(),
+                    if self.select_style() == "glow" {
+                        "◜◝"
+                    } else {
+                        "┌┐"
+                    }
+                    .to_string(),
                     Style::default().fg(self.select_color()),
                 )],
             ),
@@ -3564,7 +3645,12 @@ impl App {
                 "Claude style",
                 self.claude_style(),
                 vec![Span::styled(
-                    if self.claude_style() == "soft" { "●" } else { "■" }.to_string(),
+                    if self.claude_style() == "soft" {
+                        "●"
+                    } else {
+                        "■"
+                    }
+                    .to_string(),
                     Style::default().fg(Color::Indexed(209)),
                 )],
             ),
@@ -3573,7 +3659,12 @@ impl App {
                 "Finish sound",
                 &self.finish_sound_name(),
                 vec![Span::styled(
-                    if self.settings.finish_sound_path().is_some() { "♪" } else { "✗" }.to_string(),
+                    if self.settings.finish_sound_path().is_some() {
+                        "♪"
+                    } else {
+                        "✗"
+                    }
+                    .to_string(),
                     Style::default()
                         .fg(if self.settings.finish_sound_path().is_some() {
                             Color::Green
@@ -3586,9 +3677,18 @@ impl App {
             row(
                 20,
                 "Conn-error resume",
-                if self.settings.connection_watch { "on" } else { "off" },
+                if self.settings.connection_watch {
+                    "on"
+                } else {
+                    "off"
+                },
                 vec![Span::styled(
-                    if self.settings.connection_watch { "✓" } else { "✗" }.to_string(),
+                    if self.settings.connection_watch {
+                        "✓"
+                    } else {
+                        "✗"
+                    }
+                    .to_string(),
                     Style::default()
                         .fg(if self.settings.connection_watch {
                             Color::Green
@@ -3635,22 +3735,29 @@ impl App {
                 "Cursor color",
                 self.cursor_color_name(),
                 vec![match self.cursor_rgb() {
-                    Some((r, g, b)) => Span::styled(
-                        "▆▆▆".to_string(),
-                        Style::default().fg(Color::Rgb(r, g, b)),
-                    ),
-                    None => Span::styled(
-                        "✗".to_string(),
-                        Style::default().fg(Color::DarkGray).bold(),
-                    ),
+                    Some((r, g, b)) => {
+                        Span::styled("▆▆▆".to_string(), Style::default().fg(Color::Rgb(r, g, b)))
+                    }
+                    None => {
+                        Span::styled("✗".to_string(), Style::default().fg(Color::DarkGray).bold())
+                    }
                 }],
             ),
             row(
                 24,
                 "Bottom controls",
-                if self.settings.hide_controls { "hidden" } else { "shown" },
+                if self.settings.hide_controls {
+                    "hidden"
+                } else {
+                    "shown"
+                },
                 vec![Span::styled(
-                    if self.settings.hide_controls { "✗" } else { "✓" }.to_string(),
+                    if self.settings.hide_controls {
+                        "✗"
+                    } else {
+                        "✓"
+                    }
+                    .to_string(),
                     Style::default()
                         .fg(if self.settings.hide_controls {
                             Color::DarkGray
@@ -3673,10 +3780,7 @@ impl App {
                         "◉".to_string(),
                         Style::default().fg(Color::Indexed(196)).bold(),
                     ),
-                    _ => Span::styled(
-                        "🧙".to_string(),
-                        Style::default().fg(Color::Indexed(135)),
-                    ),
+                    _ => Span::styled("🧙".to_string(), Style::default().fg(Color::Indexed(135))),
                 }],
             ),
             row(
@@ -3790,7 +3894,9 @@ impl App {
             }
             let mut right: Vec<Span> = Vec::new();
             if let Some(hv) = &state.host {
-                let up = fmt_uptime(hv.uptime_ms).trim_start_matches("up ").to_string();
+                let up = fmt_uptime(hv.uptime_ms)
+                    .trim_start_matches("up ")
+                    .to_string();
                 right.push(Span::styled("up ", label));
                 right.push(Span::styled(up, value));
                 right.push(Span::styled(" · cpu ", label));
@@ -3888,17 +3994,23 @@ impl App {
                         roman(n),
                         Style::default().fg(crate::theme::color(pal.fg)).bold(),
                     ),
-                    Span::styled(
-                        " panes",
-                        Style::default().fg(crate::theme::color(pal.dim)),
-                    ),
+                    Span::styled(" panes", Style::default().fg(crate::theme::color(pal.dim))),
                 ]))
                 .alignment(Alignment::Center),
                 mid(3),
             );
             let mut parts: Vec<Span> = Vec::new();
-            for (accent, word) in [(0usize, "need you"), (2, "working"), (3, "finished"), (4, "idle")] {
-                let c = if accent == 2 { counts[1] + counts[2] } else { counts[accent] };
+            for (accent, word) in [
+                (0usize, "need you"),
+                (2, "working"),
+                (3, "finished"),
+                (4, "idle"),
+            ] {
+                let c = if accent == 2 {
+                    counts[1] + counts[2]
+                } else {
+                    counts[accent]
+                };
                 if c == 0 {
                     continue;
                 }
@@ -3935,8 +4047,8 @@ impl App {
         }
         self.home_cols = cols;
         let rows = n.div_ceil(cols);
-        let vis_rows = (((area.height.saturating_sub(1) + HOME_GAP_Y)
-            / (card_h + HOME_GAP_Y)) as usize)
+        let vis_rows = (((area.height.saturating_sub(1) + HOME_GAP_Y) / (card_h + HOME_GAP_Y))
+            as usize)
             .max(1);
         let sel_row = self.home_sel / cols;
         let row_off = sel_row.saturating_sub(vis_rows - 1);
@@ -4101,7 +4213,9 @@ impl App {
             center_msg(f, "terminal didn't report a cell pixel size");
             return;
         };
-        let side_rows = qr_area.height.min(((qr_area.width as u32 * cw as u32) / ch as u32) as u16);
+        let side_rows = qr_area
+            .height
+            .min(((qr_area.width as u32 * cw as u32) / ch as u32) as u16);
         let side_cols = ((side_rows as u32 * ch as u32) / cw as u32) as u16;
         let rect = Rect {
             x: qr_area.x + qr_area.width.saturating_sub(side_cols) / 2,
@@ -4183,7 +4297,14 @@ impl App {
         }
     }
 
-    fn draw_list_block(&self, f: &mut Frame, rect: Rect, num: usize, p: &PaneState, selected: bool) {
+    fn draw_list_block(
+        &self,
+        f: &mut Frame,
+        rect: Rect,
+        num: usize,
+        p: &PaneState,
+        selected: bool,
+    ) {
         let pal = self.palette();
         let (_, _, _, accent) = card_status(p);
         f.render_widget(Clear, rect);
@@ -4218,7 +4339,9 @@ impl App {
             row1.push(Span::styled(name.clone(), title_style));
         }
         let used = 3 + label_w + name.chars().count();
-        row1.push(Span::raw(" ".repeat(iw.saturating_sub(used + status.chars().count() + 1))));
+        row1.push(Span::raw(
+            " ".repeat(iw.saturating_sub(used + status.chars().count() + 1)),
+        ));
         row1.push(Span::styled(
             status,
             base(crate::theme::STATUS_TEXT[accent]),
@@ -4247,9 +4370,9 @@ impl App {
         let up = format!("↑{}", fmt_uptime(p.uptime_ms).trim_start_matches("up "));
         let meta = truncate(&meta, iw.saturating_sub(10 + up.chars().count()));
         let mut row3 = vec![Span::styled(format!("       {meta}"), base(pal.faint))];
-        row3.push(Span::raw(" ".repeat(
-            iw.saturating_sub(7 + meta.chars().count() + up.chars().count() + 2),
-        )));
+        row3.push(Span::raw(" ".repeat(iw.saturating_sub(
+            7 + meta.chars().count() + up.chars().count() + 2,
+        ))));
         row3.push(Span::styled(up, base(pal.faint)));
         row3.push(Span::styled(
             if selected { " ⌟" } else { "  " },
@@ -4306,9 +4429,7 @@ impl App {
             .collect();
         self.home_order = self.home_block_nav.iter().map(|&(id, _, _)| id).collect();
         // Column headers + the rule under them.
-        let hdr = Style::default()
-            .fg(crate::theme::color(pal.faint))
-            .bold();
+        let hdr = Style::default().fg(crate::theme::color(pal.faint)).bold();
         let buf = f.buffer_mut();
         buf.set_string(lx, area.y, "S H E L L S", hdr);
         buf.set_string(rx, area.y, "A G E N T S", hdr);
@@ -4347,7 +4468,11 @@ impl App {
             let (_, _, _, accent) = card_status(p);
             let mascot = Mascot::for_agent(p.agent.as_deref());
             let active = mascot.is_some() && (accent == 1 || accent == 2);
-            let mascot_w: u16 = if active && self.kitty_on && col_w > 40 { 6 } else { 0 };
+            let mascot_w: u16 = if active && self.kitty_on && col_w > 40 {
+                6
+            } else {
+                0
+            };
             self.draw_block(f, rect, pi + 1, p, selected, mascot_w);
             if let (Some(mascot), true) = (mascot, mascot_w > 0) {
                 self.home_mascots.push((
@@ -4590,7 +4715,10 @@ impl App {
                 Span::raw(" ")
             } else {
                 // Text fallback for the painted status rail.
-                Span::styled("▎", Style::default().fg(tone(crate::theme::STATUS_RAIL[accent])))
+                Span::styled(
+                    "▎",
+                    Style::default().fg(tone(crate::theme::STATUS_RAIL[accent])),
+                )
             },
             Span::styled(badge, Style::default().fg(acc)),
             Span::raw("  "),
@@ -4616,7 +4744,10 @@ impl App {
         }
         lines.push(Line::from(vec![
             Span::raw("    "),
-            Span::styled(truncate(&status, iw.saturating_sub(4)), Style::default().fg(stext)),
+            Span::styled(
+                truncate(&status, iw.saturating_sub(4)),
+                Style::default().fg(stext),
+            ),
         ]));
         let agent = match (&p.agent, &p.version) {
             (Some(a), Some(v)) => format!("{a} {}", version_token(v)),
@@ -4649,7 +4780,9 @@ impl App {
                     Span::raw(" "),
                     Span::styled(
                         truncate(sub, iw.saturating_sub(2)),
-                        Style::default().fg(tone(pal.dim)).add_modifier(Modifier::ITALIC),
+                        Style::default()
+                            .fg(tone(pal.dim))
+                            .add_modifier(Modifier::ITALIC),
                     ),
                 ]));
             }
@@ -4703,7 +4836,9 @@ impl App {
             Style::default().fg(crate::theme::color(pal.edge))
         };
         let title_style = if self.chat_status == Some(S::Awake) {
-            Style::default().fg(crate::theme::color(pal.gold_soft)).bold()
+            Style::default()
+                .fg(crate::theme::color(pal.gold_soft))
+                .bold()
         } else {
             Style::default().fg(crate::theme::color(pal.dim)).bold()
         };
@@ -4732,7 +4867,10 @@ impl App {
             // background, which reads as grey next to true black. Rgb(0,0,0)
             // rather than the named Black: that's ANSI color 0, which most
             // terminal themes tint dark grey rather than true black.
-            f.render_widget(Block::default().style(Style::default().bg(OLED_BLACK)), inner);
+            f.render_widget(
+                Block::default().style(Style::default().bg(OLED_BLACK)),
+                inner,
+            );
         } else {
             // The sanctum's own ground for the other faces — a shade
             // deeper than the page so the panel reads as an inset room.
@@ -4745,13 +4883,12 @@ impl App {
         // Portrait zone — HAL's image is painted by chat_overlay; the
         // oracle's orb is pure text and needs no kitty; the plain assistant
         // gets the one-line status glyph below instead.
-        let art_h: u16 = if inner.height >= 20
-            && ((self.kitty_on && face == "hal") || face == "oracle")
-        {
-            9
-        } else {
-            0
-        };
+        let art_h: u16 =
+            if inner.height >= 20 && ((self.kitty_on && face == "hal") || face == "oracle") {
+                9
+            } else {
+                0
+            };
         if art_h > 0 {
             self.chat_art_rect = Rect {
                 x: inner.x + 1,
@@ -4776,7 +4913,12 @@ impl App {
                 Paragraph::new(glyph)
                     .alignment(Alignment::Center)
                     .style(Style::default().fg(violet)),
-                Rect { x: inner.x, y, width: inner.width, height: 1 },
+                Rect {
+                    x: inner.x,
+                    y,
+                    width: inner.width,
+                    height: 1,
+                },
             );
             y += 1;
         }
@@ -4824,13 +4966,23 @@ impl App {
                 Span::styled(mline, Style::default().fg(crate::theme::color(pal.faint))),
             ]))
             .alignment(Alignment::Center),
-            Rect { x: inner.x, y, width: inner.width, height: 1 },
+            Rect {
+                x: inner.x,
+                y,
+                width: inner.width,
+                height: 1,
+            },
         );
         y += 1;
         f.render_widget(
             Paragraph::new("─".repeat(inner.width as usize))
                 .style(Style::default().fg(crate::theme::color(pal.edge))),
-            Rect { x: inner.x, y, width: inner.width, height: 1 },
+            Rect {
+                x: inner.x,
+                y,
+                width: inner.width,
+                height: 1,
+            },
         );
         y += 1;
 
@@ -4863,9 +5015,7 @@ impl App {
                         Style::default().fg(Color::Indexed(245)).italic()
                     };
                     for l in wrap_text(text, wrapw) {
-                        lines.push(
-                            Line::from(Span::styled(l, st)).alignment(Alignment::Center),
-                        );
+                        lines.push(Line::from(Span::styled(l, st)).alignment(Alignment::Center));
                     }
                 }
                 CHAT_ACTION => {
@@ -4875,7 +5025,10 @@ impl App {
                     let st = Style::default()
                         .fg(crate::theme::color(pal.gold_soft))
                         .bold();
-                    for (i, l) in wrap_text(text, wrapw.saturating_sub(2)).into_iter().enumerate() {
+                    for (i, l) in wrap_text(text, wrapw.saturating_sub(2))
+                        .into_iter()
+                        .enumerate()
+                    {
                         let head = if i == 0 {
                             Span::styled("▸ ", Style::default().fg(gold).bold())
                         } else {
@@ -4887,8 +5040,9 @@ impl App {
                 r => {
                     let (pfx, pst, st) = msg_styles(r);
                     let runs = parse_md(text);
-                    for (i, line) in
-                        wrap_md_runs(&runs, wrapw.saturating_sub(2)).into_iter().enumerate()
+                    for (i, line) in wrap_md_runs(&runs, wrapw.saturating_sub(2))
+                        .into_iter()
+                        .enumerate()
                     {
                         let mut spans = if i == 0 {
                             vec![Span::styled(pfx, pst)]
@@ -4896,7 +5050,8 @@ impl App {
                             vec![Span::raw("  ")]
                         };
                         spans.extend(
-                            line.into_iter().map(|(t, s)| Span::styled(t, apply_md(st, s))),
+                            line.into_iter()
+                                .map(|(t, s)| Span::styled(t, apply_md(st, s))),
                         );
                         lines.push(Line::from(spans));
                     }
@@ -4921,13 +5076,19 @@ impl App {
                 // The cursor block always renders plain — an unterminated
                 // bold/code marker still streaming in shouldn't catch it.
                 runs.push(("▌".to_string(), MdStyle::default()));
-                for (i, line) in
-                    wrap_md_runs(&runs, wrapw.saturating_sub(2)).into_iter().enumerate()
+                for (i, line) in wrap_md_runs(&runs, wrapw.saturating_sub(2))
+                    .into_iter()
+                    .enumerate()
                 {
-                    let head = if i == 0 { Span::styled(pfx, pst) } else { Span::raw("  ") };
+                    let head = if i == 0 {
+                        Span::styled(pfx, pst)
+                    } else {
+                        Span::raw("  ")
+                    };
                     let mut spans = vec![head];
                     spans.extend(
-                        line.into_iter().map(|(t, s)| Span::styled(t, apply_md(st, s))),
+                        line.into_iter()
+                            .map(|(t, s)| Span::styled(t, apply_md(st, s))),
                     );
                     lines.push(Line::from(spans));
                 }
@@ -4965,8 +5126,8 @@ impl App {
         } else {
             let ask = format!("❯ ask {who}… ");
             let hint = "alt+o · /why · /wake · /sleep ";
-            let pad = (inner.width as usize)
-                .saturating_sub(ask.chars().count() + hint.chars().count());
+            let pad =
+                (inner.width as usize).saturating_sub(ask.chars().count() + hint.chars().count());
             Line::from(vec![
                 Span::styled("❯ ", Style::default().fg(phosphor)),
                 Span::styled(
@@ -4979,7 +5140,12 @@ impl App {
         };
         f.render_widget(
             Paragraph::new(input_line),
-            Rect { x: inner.x, y: input_y, width: inner.width, height: 1 },
+            Rect {
+                x: inner.x,
+                y: input_y,
+                width: inner.width,
+                height: 1,
+            },
         );
     }
 
@@ -5062,7 +5228,9 @@ impl App {
         // view, otherwise one painted card per pane.
         let desired: Vec<(Rect, u32)> = if self.pair_open {
             match &self.pair_qr {
-                Some((pw, ph, rgba, id)) if self.pair_rect.width > 0 && self.pair_rect.height > 0 => {
+                Some((pw, ph, rgba, id))
+                    if self.pair_rect.width > 0 && self.pair_rect.height > 0 =>
+                {
                     if !self.kitty_sent.contains(&(*pw, *ph, *id)) {
                         self.kitty_sent.retain(|&(_, _, i2)| i2 != *id);
                         let _ = crate::kitty::transmit(&mut out, *id, *pw, *ph, rgba);
@@ -5083,7 +5251,10 @@ impl App {
             let rect = self.main_rect;
             let mut v: Vec<(Rect, u32)> = Vec::new();
             if rect.width > 6 && rect.height > 3 {
-                let (pw, ph) = (rect.width as u32 * cw as u32, rect.height as u32 * ch as u32);
+                let (pw, ph) = (
+                    rect.width as u32 * cw as u32,
+                    rect.height as u32 * ch as u32,
+                );
                 let id = crate::kitty::reticle_id(pw, ph, theme_idx);
                 if !self.kitty_sent.contains(&(pw, ph, id)) {
                     self.kitty_sent.retain(|&(_, _, i2)| i2 != id);
@@ -5107,12 +5278,8 @@ impl App {
                     let sid = crate::kitty::scrollbar_id(sh, theme_idx, bucket);
                     if !self.kitty_sent.contains(&(sw, sh, sid)) {
                         self.kitty_sent.retain(|&(_, _, i2)| i2 != sid);
-                        let rgba = crate::kitty::scrollbar_rgba(
-                            sw,
-                            sh,
-                            pal.accent,
-                            bucket as f32 / 15.0,
-                        );
+                        let rgba =
+                            crate::kitty::scrollbar_rgba(sw, sh, pal.accent, bucket as f32 / 15.0);
                         let _ = crate::kitty::transmit(&mut out, sid, sw, sh, &rgba);
                         self.kitty_sent.insert((sw, sh, sid));
                     }
@@ -5129,7 +5296,10 @@ impl App {
                     Mascot::Clawd => crate::kitty::clawd_id(frame, soft),
                     Mascot::Pi => crate::kitty::pi_mascot_id(frame),
                 };
-                let (pw, ph) = (rect.width as u32 * cw as u32, rect.height as u32 * ch as u32);
+                let (pw, ph) = (
+                    rect.width as u32 * cw as u32,
+                    rect.height as u32 * ch as u32,
+                );
                 if !self.kitty_sent.contains(&(pw, ph, id)) {
                     self.kitty_sent.retain(|&(_, _, i2)| i2 != id);
                     let rgba = match mascot {
@@ -5157,7 +5327,10 @@ impl App {
             for &(rect, id, accent, _mascot) in cards.iter() {
                 let selected = Some(id) == sel_id;
                 let id = crate::kitty::flat_card_id(accent, size_idx, selected, theme_idx);
-                let (pw, ph) = (rect.width as u32 * cw as u32, rect.height as u32 * ch as u32);
+                let (pw, ph) = (
+                    rect.width as u32 * cw as u32,
+                    rect.height as u32 * ch as u32,
+                );
                 // Transmit up front so placement swaps below are instant.
                 if !self.kitty_sent.contains(&(pw, ph, id)) {
                     self.kitty_sent.retain(|&(_, _, i2)| i2 != id);
@@ -5211,7 +5384,10 @@ impl App {
             // The orrery arc above the grid; its id changes with the dot
             // layout, and the two low bits carry the needs-input pulse frame.
             if let Some((rect, dots)) = self.orrery.clone() {
-                let (pw, ph) = (rect.width as u32 * cw as u32, rect.height as u32 * ch as u32);
+                let (pw, ph) = (
+                    rect.width as u32 * cw as u32,
+                    rect.height as u32 * ch as u32,
+                );
                 let frame = if dots.iter().any(|d| d.2 == 0) {
                     ((self.anim_start.elapsed().as_millis() / 300) % 4) as u8
                 } else {
@@ -5249,7 +5425,9 @@ impl App {
             // rolls the image version and frees the stale image.
             for (rect, pane_id, accent) in self.home_sparks.clone() {
                 let snapshot = {
-                    let Some(p) = self.pane_by_id(pane_id) else { continue };
+                    let Some(p) = self.pane_by_id(pane_id) else {
+                        continue;
+                    };
                     p.rate_tick();
                     if p.rate.iter().all(|&b| b == 0) {
                         continue;
@@ -5341,13 +5519,12 @@ impl App {
             return;
         }
         use std::io::Write as _;
-        let target: Option<u64> = if self.home
-            || matches!(self.mode, Mode::Settings | Mode::SettingsEdit { .. })
-        {
-            None
-        } else {
-            self.active_id()
-        };
+        let target: Option<u64> =
+            if self.home || matches!(self.mode, Mode::Settings | Mode::SettingsEdit { .. }) {
+                None
+            } else {
+                self.active_id()
+            };
         let view = self.main_rect;
         let mut buf: Vec<u8> = Vec::new();
         let mut desired: Vec<(u64, OuterGeom)> = Vec::new();
@@ -5380,19 +5557,25 @@ impl App {
                     if img.outer.is_none() {
                         next_outer += 1;
                         let _ = crate::kitty::transmit_data(
-                            &mut buf, next_outer, img.format, img.zlib, img.w, img.h,
-                            &img.data,
+                            &mut buf, next_outer, img.format, img.zlib, img.w, img.h, &img.data,
                         );
                         img.outer = Some(next_outer);
                     }
                     let outer = img.outer.unwrap();
                     // proportional source-rect crop for partial visibility
                     let (sx, sy, sw0, sh0) = vp.src;
-                    let sw = if sw0 > 0 { sw0 } else { img.w.saturating_sub(sx) };
-                    let sh = if sh0 > 0 { sh0 } else { img.h.saturating_sub(sy) };
-                    let full = top_clip == 0
-                        && vis_rows == vp.rows as i32
-                        && vis_cols == vp.cols as i32;
+                    let sw = if sw0 > 0 {
+                        sw0
+                    } else {
+                        img.w.saturating_sub(sx)
+                    };
+                    let sh = if sh0 > 0 {
+                        sh0
+                    } else {
+                        img.h.saturating_sub(sy)
+                    };
+                    let full =
+                        top_clip == 0 && vis_rows == vp.rows as i32 && vis_cols == vp.cols as i32;
                     let src = if full {
                         vp.src
                     } else {
@@ -5446,16 +5629,12 @@ impl App {
                 old => {
                     if let Some(old) = old {
                         if old.geom.img != geom.img {
-                            let _ = crate::kitty::delete_placement(
-                                &mut buf,
-                                old.geom.img,
-                                old.pid,
-                            );
+                            let _ = crate::kitty::delete_placement(&mut buf, old.geom.img, old.pid);
                         }
                     }
                     let _ = crate::kitty::place_at(
-                        &mut buf, geom.y, geom.x, geom.img, pid, geom.src, geom.c,
-                        geom.r, geom.z, geom.offx, geom.offy,
+                        &mut buf, geom.y, geom.x, geom.img, pid, geom.src, geom.c, geom.r, geom.z,
+                        geom.offx, geom.offy,
                     );
                     new_placed.push(OuterPlaced {
                         pane,
@@ -5620,7 +5799,10 @@ impl App {
                 } else if v > 0.96 {
                     ('✦', 1.0) // a glint in the depths
                 } else {
-                    (ramp[((v * ramp.len() as f32) as usize).min(ramp.len() - 1)], v)
+                    (
+                        ramp[((v * ramp.len() as f32) as usize).min(ramp.len() - 1)],
+                        v,
+                    )
                 };
                 // Hue rides the same brightness swirl but on its own drift,
                 // so color and light shift independently — a fusion of
@@ -5677,12 +5859,19 @@ impl App {
             Some(S::Sleeping) => 2,
             Some(S::Away) | None => 3,
         };
-        let (pw, ph) = (rect.width as u32 * cw as u32, rect.height as u32 * ch as u32);
+        let (pw, ph) = (
+            rect.width as u32 * cw as u32,
+            rect.height as u32 * ch as u32,
+        );
         let mut buf: Vec<u8> = Vec::new();
         // HAL idles with a slow blink: ~3.2s of steady red, then a 400ms
         // shutter sweep (close, shut, open).
         let t = self.anim_start.elapsed().as_millis() as u64 % 3600;
-        let frame = if t < 3200 { 0 } else { (((t - 3200) / 100) % 4).min(3) as u32 };
+        let frame = if t < 3200 {
+            0
+        } else {
+            (((t - 3200) / 100) % 4).min(3) as u32
+        };
         let open = [1.0f32, 0.45, 0.05, 0.45][frame as usize];
         let id = crate::kitty::hal_id(sidx, frame);
         if !self.chat_sent.contains(&(pw, ph, id)) {
@@ -5728,22 +5917,20 @@ impl App {
         let mut buf: Vec<u8> = Vec::new();
 
         // Where the orb should be right now, if anywhere.
-        let want: Option<(u16, u16)> = if self.orb_active()
-            && !self.home
-            && matches!(self.mode, Mode::Normal)
-        {
-            self.panes.get(self.active).and_then(|p| {
-                let screen = p.parser.screen();
-                let (r, c) = screen.cursor_position();
-                (p.scroll == 0
-                    && !screen.hide_cursor()
-                    && r < self.main_rect.height
-                    && c < self.main_rect.width)
-                    .then(|| (self.main_rect.x + c + 1, self.main_rect.y + r + 1))
-            })
-        } else {
-            None
-        };
+        let want: Option<(u16, u16)> =
+            if self.orb_active() && !self.home && matches!(self.mode, Mode::Normal) {
+                self.panes.get(self.active).and_then(|p| {
+                    let screen = p.parser.screen();
+                    let (r, c) = screen.cursor_position();
+                    (p.scroll == 0
+                        && !screen.hide_cursor()
+                        && r < self.main_rect.height
+                        && c < self.main_rect.width)
+                        .then(|| (self.main_rect.x + c + 1, self.main_rect.y + r + 1))
+                })
+            } else {
+                None
+            };
 
         match want {
             None => {
@@ -5767,24 +5954,20 @@ impl App {
                 // The halo spans 3x3 cells so the glow can bleed past the
                 // glyph; the other shapes stay cell-sized.
                 let span: u16 = if halo { 3 } else { 1 };
-                let (img_w, img_h) =
-                    (cell.0 as u32 * span as u32, cell.1 as u32 * span as u32);
+                let (img_w, img_h) = (cell.0 as u32 * span as u32, cell.1 as u32 * span as u32);
                 let cfg = (shape, col, cell.0, cell.1);
                 if self.orb_cfg != Some(cfg) {
                     // Config changed: replace the whole frame set.
                     if self.orb_cfg.is_some() {
                         for i in 0..crate::kitty::ORB_FRAMES {
-                            let _ = crate::kitty::delete_image(
-                                &mut buf,
-                                crate::kitty::ORB_BASE + i,
-                            );
+                            let _ =
+                                crate::kitty::delete_image(&mut buf, crate::kitty::ORB_BASE + i);
                         }
                         self.orb_placed = None;
                     }
                     for i in 0..crate::kitty::ORB_FRAMES {
                         let phase = i as f32 / crate::kitty::ORB_FRAMES as f32;
-                        let rgba =
-                            crate::kitty::orb_rgba(img_w, img_h, col, shape, phase);
+                        let rgba = crate::kitty::orb_rgba(img_w, img_h, col, shape, phase);
                         let _ = crate::kitty::transmit(
                             &mut buf,
                             crate::kitty::ORB_BASE + i,
@@ -5827,22 +6010,11 @@ impl App {
                     };
                     if self.orb_placed != Some((px, py, id, vc as u16, vr as u16)) {
                         let _ = crate::kitty::place_at(
-                            &mut buf,
-                            py,
-                            px,
-                            id,
-                            1,
-                            src,
-                            vc as u16,
-                            vr as u16,
-                            z,
-                            0,
-                            0,
+                            &mut buf, py, px, id, 1, src, vc as u16, vr as u16, z, 0, 0,
                         );
                         if let Some((_, _, old, _, _)) = self.orb_placed {
                             if old != id {
-                                let _ =
-                                    crate::kitty::delete_placement(&mut buf, old, 1);
+                                let _ = crate::kitty::delete_placement(&mut buf, old, 1);
                             }
                         }
                         self.orb_placed = Some((px, py, id, vc as u16, vr as u16));
@@ -5893,7 +6065,9 @@ impl App {
     /// (refreshed every few seconds while attached), so it may trail
     /// reality by a beat — identity, not telemetry.
     fn draw_pane_header(&self, f: &mut Frame, area: Rect) {
-        let Some(p) = self.panes.get(self.active) else { return };
+        let Some(p) = self.panes.get(self.active) else {
+            return;
+        };
         let pal = self.palette();
         let acc = crate::theme::color(pal.accent);
         let dim = Style::default().fg(crate::theme::color(pal.dim));
@@ -5959,7 +6133,11 @@ impl App {
         }
         let used: usize = left_cells
             + name.chars().count()
-            + if info.is_empty() { 0 } else { 2 + info.chars().count() };
+            + if info.is_empty() {
+                0
+            } else {
+                2 + info.chars().count()
+            };
         let pad = iw.saturating_sub(used + word.chars().count() + 1);
         spans.push(Span::raw(" ".repeat(pad)));
         spans.push(Span::styled(word, wstyle));
@@ -5989,7 +6167,9 @@ impl App {
         vec![
             Span::styled(
                 " ❯ ",
-                Style::default().fg(crate::theme::color(pal.phosphor)).bold(),
+                Style::default()
+                    .fg(crate::theme::color(pal.phosphor))
+                    .bold(),
             ),
             Span::styled(
                 "zodiac",
@@ -6013,8 +6193,9 @@ impl App {
             vec![
                 Span::styled(
                     "▎",
-                    Style::default()
-                        .fg(crate::theme::color(crate::theme::STATUS_RAIL[self.pane_accent(i)])),
+                    Style::default().fg(crate::theme::color(
+                        crate::theme::STATUS_RAIL[self.pane_accent(i)],
+                    )),
                 ),
                 Span::styled(
                     format!("{badge} "),
@@ -6103,10 +6284,7 @@ impl App {
                 if let Mode::Rename { buf } = &self.mode {
                     Line::from(vec![
                         Span::styled(format!(" {} ", self.eye()), style),
-                        Span::styled(
-                            format!("{buf}\u{2588}"),
-                            Style::default().fg(Color::Yellow),
-                        ),
+                        Span::styled(format!("{buf}\u{2588}"), Style::default().fg(Color::Yellow)),
                     ])
                 } else {
                     // Underline covers only the name, not the eye or the
@@ -6154,13 +6332,17 @@ impl App {
                 if ssh.is_some() {
                     spans.push(Span::styled("-SSH", ssh_tag_style));
                 }
-                spans.push(Span::raw(" ".repeat(w.saturating_sub(name.chars().count()))));
+                spans.push(Span::raw(
+                    " ".repeat(w.saturating_sub(name.chars().count())),
+                ));
                 spans.push(Span::styled(anim, anim_style));
                 Line::from(spans)
             } else {
                 let (prefix, pw) = self.sidebar_prefix(i);
-                let name =
-                    truncate(&p.name, inner.width.saturating_sub(pw + 1 + ssh_len as u16) as usize);
+                let name = truncate(
+                    &p.name,
+                    inner.width.saturating_sub(pw + 1 + ssh_len as u16) as usize,
+                );
                 let mut spans = prefix;
                 spans.push(Span::styled(name, style));
                 if ssh.is_some() {
@@ -6273,7 +6455,10 @@ impl App {
             if !self.settings.hide_controls {
                 let hints =
                     "alt+n/w new/close · alt+r rename · alt+↑↓/1-9 switch · alt+z zoom · ⇧pgup scroll · alt+q detach ";
-                let used: usize = spans.iter().map(|s| s.content.chars().count()).sum::<usize>()
+                let used: usize = spans
+                    .iter()
+                    .map(|s| s.content.chars().count())
+                    .sum::<usize>()
                     + hints.chars().count();
                 spans.push(Span::raw(
                     " ".repeat((area.width as usize).saturating_sub(used)),
@@ -6324,7 +6509,8 @@ fn hostname() -> &'static str {
     static HOST: std::sync::OnceLock<String> = std::sync::OnceLock::new();
     HOST.get_or_init(|| {
         let mut buf = [0u8; 256];
-        let ok = unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) } == 0;
+        let ok =
+            unsafe { libc::gethostname(buf.as_mut_ptr() as *mut libc::c_char, buf.len()) } == 0;
         if !ok {
             return String::new();
         }
@@ -6426,8 +6612,16 @@ pub fn b64(data: &[u8]) -> String {
         let n = u32::from_be_bytes([0, b[0], b[1], b[2]]);
         s.push(T[(n >> 18 & 63) as usize] as char);
         s.push(T[(n >> 12 & 63) as usize] as char);
-        s.push(if chunk.len() > 1 { T[(n >> 6 & 63) as usize] as char } else { '=' });
-        s.push(if chunk.len() > 2 { T[(n & 63) as usize] as char } else { '=' });
+        s.push(if chunk.len() > 1 {
+            T[(n >> 6 & 63) as usize] as char
+        } else {
+            '='
+        });
+        s.push(if chunk.len() > 2 {
+            T[(n & 63) as usize] as char
+        } else {
+            '='
+        });
     }
     s
 }
@@ -6519,7 +6713,13 @@ fn parse_md(text: &str) -> Vec<(String, MdStyle)> {
                 if !plain.is_empty() {
                     out.push((std::mem::take(&mut plain), MdStyle::default()));
                 }
-                out.push((chars[i + 1..end].iter().collect(), MdStyle { code: true, ..Default::default() }));
+                out.push((
+                    chars[i + 1..end].iter().collect(),
+                    MdStyle {
+                        code: true,
+                        ..Default::default()
+                    },
+                ));
                 i = end + 1;
                 continue;
             }
@@ -6529,7 +6729,13 @@ fn parse_md(text: &str) -> Vec<(String, MdStyle)> {
                 if !plain.is_empty() {
                     out.push((std::mem::take(&mut plain), MdStyle::default()));
                 }
-                out.push((chars[i + 2..end].iter().collect(), MdStyle { bold: true, ..Default::default() }));
+                out.push((
+                    chars[i + 2..end].iter().collect(),
+                    MdStyle {
+                        bold: true,
+                        ..Default::default()
+                    },
+                ));
                 i = end + 2;
                 continue;
             }
@@ -6697,9 +6903,21 @@ mod md_tests {
             runs,
             vec![
                 plain("say "),
-                ("hello".into(), MdStyle { bold: true, code: false }),
+                (
+                    "hello".into(),
+                    MdStyle {
+                        bold: true,
+                        code: false
+                    }
+                ),
                 plain(" then "),
-                ("run it".into(), MdStyle { bold: false, code: true }),
+                (
+                    "run it".into(),
+                    MdStyle {
+                        bold: false,
+                        code: true
+                    }
+                ),
             ]
         );
     }
@@ -6707,7 +6925,16 @@ mod md_tests {
     #[test]
     fn underscores_bold_too() {
         let runs = parse_md("__loud__");
-        assert_eq!(runs, vec![("loud".into(), MdStyle { bold: true, code: false })]);
+        assert_eq!(
+            runs,
+            vec![(
+                "loud".into(),
+                MdStyle {
+                    bold: true,
+                    code: false
+                }
+            )]
+        );
     }
 
     #[test]
@@ -6745,7 +6972,10 @@ mod md_tests {
             .flatten()
             .find(|(t, _)| t.contains("bold"))
             .expect("bold word survived wrapping");
-        assert!(bold_word.1.bold, "bold flag lost across the wrap: {bold_word:?}");
+        assert!(
+            bold_word.1.bold,
+            "bold flag lost across the wrap: {bold_word:?}"
+        );
     }
 
     #[test]
@@ -6753,7 +6983,11 @@ mod md_tests {
         let runs = parse_md("plain plain plain");
         let lines = wrap_md_runs(&runs, 80);
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].len(), 1, "same-style words should merge into one span");
+        assert_eq!(
+            lines[0].len(),
+            1,
+            "same-style words should merge into one span"
+        );
         assert_eq!(lines[0][0].0, "plain plain plain");
     }
 }
@@ -6765,7 +6999,10 @@ mod jump_tests {
     #[test]
     fn matches_a_subsequence_in_order() {
         assert!(fuzzy_score("zodiac dev", "zdv").is_some());
-        assert!(fuzzy_score("zodiac dev", "vdz").is_none(), "out-of-order must not match");
+        assert!(
+            fuzzy_score("zodiac dev", "vdz").is_none(),
+            "out-of-order must not match"
+        );
     }
 
     #[test]
@@ -6841,5 +7078,4 @@ mod cast_tests {
             v
         });
     }
-
 }

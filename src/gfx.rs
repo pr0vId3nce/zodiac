@@ -13,7 +13,6 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use vt100::TermEvent;
 
-
 /// Placements whose anchor line falls more than this many lines above the
 /// live screen are dropped — matches the client's scrollback depth.
 pub const SCROLLBACK_KEEP: i64 = 10_000;
@@ -174,8 +173,7 @@ impl GfxCmd {
 
     /// A chunk continuation carries only m (and possibly q).
     fn is_continuation(&self) -> bool {
-        self.keys.keys().all(|k| matches!(k, b'm' | b'q'))
-            && self.keys.contains_key(&b'm')
+        self.keys.keys().all(|k| matches!(k, b'm' | b'q')) && self.keys.contains_key(&b'm')
     }
 }
 
@@ -245,8 +243,8 @@ struct Pending {
 
 pub struct GfxEngine {
     images: HashMap<u32, Img>,
-    numbers: HashMap<u32, u32>, // I= number → id
-    placements: Vec<Placement>, // main screen, absolute rows
+    numbers: HashMap<u32, u32>,     // I= number → id
+    placements: Vec<Placement>,     // main screen, absolute rows
     alt_placements: Vec<Placement>, // alt screen, screen rows
     total_scrolled: i64,
     in_alt: bool,
@@ -355,12 +353,7 @@ impl GfxEngine {
         self.dispatch(cmd, None, cursor)
     }
 
-    fn dispatch(
-        &mut self,
-        cmd: GfxCmd,
-        joined: Option<Vec<u8>>,
-        cursor: (u16, u16),
-    ) -> CmdResult {
+    fn dispatch(&mut self, cmd: GfxCmd, joined: Option<Vec<u8>>, cursor: (u16, u16)) -> CmdResult {
         let payload = joined.unwrap_or_else(|| cmd.payload.clone());
         match cmd.action() {
             b'q' => self.cmd_query(&cmd, &payload),
@@ -484,8 +477,16 @@ impl GfxEngine {
             cmd.num(b'h').unwrap_or(0).max(0) as u32,
         );
         let (sw, sh) = (
-            if src.2 > 0 { src.2 } else { iw.saturating_sub(src.0) },
-            if src.3 > 0 { src.3 } else { ih.saturating_sub(src.1) },
+            if src.2 > 0 {
+                src.2
+            } else {
+                iw.saturating_sub(src.0)
+            },
+            if src.3 > 0 {
+                src.3
+            } else {
+                ih.saturating_sub(src.1)
+            },
         );
         let (cw, ch) = if self.cell.0 > 0 && self.cell.1 > 0 {
             (self.cell.0 as u32, self.cell.1 as u32)
@@ -607,9 +608,7 @@ impl GfxEngine {
             }
             b'p' => Box::new(move |p| hits_cell(p, x, y)),
             b'q' => Box::new(move |p| hits_cell(p, x, y) && p.z == z),
-            b'x' => Box::new(move |p| {
-                x > p.col as i64 && x - 1 < (p.col + p.cols) as i64
-            }),
+            b'x' => Box::new(move |p| x > p.col as i64 && x - 1 < (p.col + p.cols) as i64),
             b'y' => Box::new(move |p| {
                 let r = srow(p);
                 y > r && y - 1 < r + p.rows as i64
@@ -640,10 +639,12 @@ impl GfxEngine {
             match spec {
                 b'I' => affected.push(id),
                 b'N' => affected.extend(nid),
-                b'R' => affected
-                    .extend(self.images.keys().copied().filter(|k| {
-                        (*k as i64) >= x && (*k as i64) <= y
-                    })),
+                b'R' => affected.extend(
+                    self.images
+                        .keys()
+                        .copied()
+                        .filter(|k| (*k as i64) >= x && (*k as i64) <= y),
+                ),
                 _ => {}
             }
             for img in affected.iter() {
@@ -690,11 +691,7 @@ impl GfxEngine {
 
     /// Fetch and validate payload data per the transmission medium.
     /// Returns (bytes, width, height).
-    fn load_data(
-        &mut self,
-        cmd: &GfxCmd,
-        payload: &[u8],
-    ) -> Result<(Vec<u8>, u32, u32), String> {
+    fn load_data(&mut self, cmd: &GfxCmd, payload: &[u8]) -> Result<(Vec<u8>, u32, u32), String> {
         let format = cmd.num(b'f').unwrap_or(32);
         let zlib = cmd.ch(b'o') == Some(b'z');
         let medium = cmd.ch(b't').unwrap_or(b'd');
@@ -757,9 +754,7 @@ impl GfxEngine {
     pub fn apply_event(&mut self, ev: TermEvent) {
         match ev {
             TermEvent::ScrollUp { top, bottom, n } => self.scroll(top, bottom, n as i64),
-            TermEvent::ScrollDown { top, bottom, n } => {
-                self.scroll(top, bottom, -(n as i64))
-            }
+            TermEvent::ScrollDown { top, bottom, n } => self.scroll(top, bottom, -(n as i64)),
             TermEvent::EraseScreen => {
                 let rows = self.rows as i64;
                 let total = self.total_scrolled;
@@ -874,10 +869,7 @@ impl GfxEngine {
                 offy: p.offy,
             })
             .collect();
-        let mut images: Vec<(u32, u32)> = layer
-            .iter()
-            .map(|p| (p.img, p.img_ver))
-            .collect();
+        let mut images: Vec<(u32, u32)> = layer.iter().map(|p| (p.img, p.img_ver)).collect();
         images.sort_unstable();
         images.dedup();
         GfxSnapshot { placements, images }
@@ -1077,7 +1069,10 @@ mod tests {
     #[test]
     fn splitter_carry_split_at_esc_boundary() {
         let mut sp = GfxSplitter::new();
-        assert!(sp.split(b"ab\x1b").iter().all(|s| matches!(s, Seg::Text(t) if t == b"ab")));
+        assert!(sp
+            .split(b"ab\x1b")
+            .iter()
+            .all(|s| matches!(s, Seg::Text(t) if t == b"ab")));
         let segs = sp.split(b"_Ga=q,i=5,s=1,v=1;AAAA\x1b\\");
         assert!(matches!(&segs[0], Seg::Cmd(c) if c.num(b'i') == Some(5)));
     }
@@ -1131,7 +1126,11 @@ mod tests {
         let px = rgba(10, 20);
         e.handle(cmd(&format!("a=T,i=1,s=10,v=20,f=32;{px}")), (10, 0));
         for _ in 0..12 {
-            e.apply_event(TermEvent::ScrollUp { top: 0, bottom: 23, n: 1 });
+            e.apply_event(TermEvent::ScrollUp {
+                top: 0,
+                bottom: 23,
+                n: 1,
+            });
         }
         let p = &e.snapshot().placements[0];
         assert_eq!(p.row, -2); // 2 lines into scrollback, still alive
@@ -1143,13 +1142,25 @@ mod tests {
         let px = rgba(10, 20);
         e.handle(cmd(&format!("a=T,i=1,s=10,v=20,f=32;{px}")), (5, 0));
         // region 3..=10 scrolls up 1: anchor 5 -> 4
-        e.apply_event(TermEvent::ScrollUp { top: 3, bottom: 10, n: 1 });
+        e.apply_event(TermEvent::ScrollUp {
+            top: 3,
+            bottom: 10,
+            n: 1,
+        });
         assert_eq!(e.snapshot().placements[0].row, 4);
         // outside-region placements don't move
-        e.apply_event(TermEvent::ScrollUp { top: 8, bottom: 10, n: 3 });
+        e.apply_event(TermEvent::ScrollUp {
+            top: 8,
+            bottom: 10,
+            n: 3,
+        });
         assert_eq!(e.snapshot().placements[0].row, 4);
         // scrolling it past the region top deletes it
-        e.apply_event(TermEvent::ScrollUp { top: 3, bottom: 10, n: 2 });
+        e.apply_event(TermEvent::ScrollUp {
+            top: 3,
+            bottom: 10,
+            n: 2,
+        });
         assert!(e.snapshot().placements.is_empty());
     }
 
@@ -1160,7 +1171,11 @@ mod tests {
         e.handle(cmd(&format!("a=T,i=1,s=10,v=20,f=32;{px}")), (0, 0));
         e.handle(cmd(&format!("a=T,i=2,s=10,v=20,f=32;{px}")), (20, 0));
         for _ in 0..5 {
-            e.apply_event(TermEvent::ScrollUp { top: 0, bottom: 23, n: 1 });
+            e.apply_event(TermEvent::ScrollUp {
+                top: 0,
+                bottom: 23,
+                n: 1,
+            });
         }
         // image 1 now fully in scrollback (row -5+1<=0), image 2 on screen
         e.apply_event(TermEvent::EraseScreen);
@@ -1328,14 +1343,16 @@ mod tests {
     fn end_to_end_strip_anchor_and_scroll() {
         let mut sim = PaneSim::new(5, 40);
         let px = rgba(20, 40); // 2x2 cells
-        // two lines of text, then an inline image, then more text
-        let (out, replies) = sim.feed(
-            format!("one\r\ntwo \x1b_Ga=T,i=3,s=20,v=40,f=32;{px}\x1b\\done\r\n").as_bytes(),
-        );
+                               // two lines of text, then an inline image, then more text
+        let (out, replies) = sim
+            .feed(format!("one\r\ntwo \x1b_Ga=T,i=3,s=20,v=40,f=32;{px}\x1b\\done\r\n").as_bytes());
         // graphics stripped from the forwarded stream, cursor move injected
         let s = String::from_utf8_lossy(&out);
         assert!(!s.contains("\x1b_G"), "graphics bytes leaked: {s:?}");
-        assert!(s.contains("\x1b[1B\x1b[2C"), "cursor advance missing: {s:?}");
+        assert!(
+            s.contains("\x1b[1B\x1b[2C"),
+            "cursor advance missing: {s:?}"
+        );
         assert_eq!(replies, b"\x1b_Gi=3;OK\x1b\\");
         // anchored at the cursor cell (row 1, col 4)
         let snap = sim.engine.snapshot();
@@ -1345,7 +1362,11 @@ mod tests {
         // stream 5 more lines: the image scrolls into scrollback with text
         sim.feed(b"a\r\nb\r\nc\r\nd\r\ne\r\nf");
         let snap = sim.engine.snapshot();
-        assert!(snap.placements[0].row < 0, "row: {}", snap.placements[0].row);
+        assert!(
+            snap.placements[0].row < 0,
+            "row: {}",
+            snap.placements[0].row
+        );
         // and the text the image was anchored to agrees: scrollback holds it
         assert_eq!(snap.placements.len(), 1);
     }

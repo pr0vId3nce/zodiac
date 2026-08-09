@@ -671,7 +671,8 @@ impl Server {
                 }
             };
             let stalled_working = status == "working"
-                && stable_since.is_some_and(|t| now.duration_since(t) >= crate::monitor::STALL_WORKING_AFTER);
+                && stable_since
+                    .is_some_and(|t| now.duration_since(t) >= crate::monitor::STALL_WORKING_AFTER);
             if status != "needs_input" && !stalled_working {
                 continue;
             }
@@ -680,7 +681,9 @@ impl Server {
             {
                 continue;
             }
-            let Some(screen) = p.tail_text(20) else { continue };
+            let Some(screen) = p.tail_text(20) else {
+                continue;
+            };
             p.monitor_checked_at = Some(now);
             crate::monitor::classify_async(
                 cfg.clone(),
@@ -776,7 +779,9 @@ impl Server {
                 continue;
             }
             p.subtitle_hash = Some(hash);
-            let Some(screen) = p.tail_text(20) else { continue };
+            let Some(screen) = p.tail_text(20) else {
+                continue;
+            };
             crate::monitor::summarize_async(cfg.clone(), tx.clone(), p.id, screen);
         }
     }
@@ -844,9 +849,7 @@ impl Server {
         let Some(p) = self.panes.iter().find(|p| p.id == id) else {
             return;
         };
-        if p.gfx.version == p.gfx_pushed
-            || (p.gfx_pushed == u64::MAX && p.gfx.version == 0)
-        {
+        if p.gfx.version == p.gfx_pushed || (p.gfx_pushed == u64::MAX && p.gfx.version == 0) {
             if p.gfx.version == 0 {
                 if let Some(p) = self.pane_mut(id) {
                     p.gfx_pushed = 0;
@@ -869,7 +872,9 @@ impl Server {
                 let Some(p) = self.panes.iter().find(|p| p.id == id) else {
                     return;
                 };
-                let Some(img) = p.gfx.image(img_id) else { break };
+                let Some(img) = p.gfx.image(img_id) else {
+                    break;
+                };
                 let total = img.data.len();
                 let end = (off + GFX_CHUNK).min(total);
                 let hdr = GfxImgHdr {
@@ -1015,8 +1020,8 @@ impl Server {
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or_default();
         for (i, sp) in meta.panes.iter().enumerate() {
-            let mut preload = std::fs::read(dir.join("scrollback").join(format!("{i}.bin")))
-                .unwrap_or_default();
+            let mut preload =
+                std::fs::read(dir.join("scrollback").join(format!("{i}.bin"))).unwrap_or_default();
             if !preload.is_empty() {
                 preload.extend_from_slice(RESTORE_RESET);
                 if let Some(agent) = sp.agent.as_deref() {
@@ -1130,18 +1135,17 @@ impl Server {
             // prompt; an existing one is already at it.
             let (id, delay) = match self.panes.get(sp.index.saturating_sub(1)) {
                 Some(p) => (p.id, 0),
-                None => match self.new_pane(
-                    None,
-                    sp.cwd.clone().map(PathBuf::from),
-                    Vec::new(),
-                    true,
-                ) {
-                    Ok(id) => (id, 900),
-                    Err(_) => continue,
-                },
+                None => {
+                    match self.new_pane(None, sp.cwd.clone().map(PathBuf::from), Vec::new(), true) {
+                        Ok(id) => (id, 900),
+                        Err(_) => continue,
+                    }
+                }
             };
             let tx = self.tx.clone();
-            let Some(pane) = self.pane_mut(id) else { continue };
+            let Some(pane) = self.pane_mut(id) else {
+                continue;
+            };
             if pane.agent().is_some() || pane.fg_app().is_some() {
                 continue;
             }
@@ -1204,7 +1208,10 @@ fn host_uptime_ms() -> Option<u64> {
 #[cfg(not(target_os = "linux"))]
 fn host_uptime_ms() -> Option<u64> {
     // sysctl kern.boottime — a timeval of when the machine came up.
-    let mut tv = libc::timeval { tv_sec: 0, tv_usec: 0 };
+    let mut tv = libc::timeval {
+        tv_sec: 0,
+        tv_usec: 0,
+    };
     let mut len = std::mem::size_of::<libc::timeval>();
     let name = std::ffi::CString::new("kern.boottime").ok()?;
     let ok = unsafe {
@@ -1234,7 +1241,9 @@ fn host_cpu_pct() -> Option<u8> {
     if unsafe { libc::getloadavg(loads.as_mut_ptr(), 3) } < 1 {
         return None;
     }
-    let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1);
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
     Some(((loads[0] / cores as f64) * 100.0).clamp(0.0, 100.0) as u8)
 }
 
@@ -1291,6 +1300,8 @@ fn host_mem_pct() -> Option<u8> {
             .and_then(|(_, n)| n.trim_end_matches('.').parse().ok())
             .unwrap_or(0)
     };
-    let used = (count("Pages active") + count("Pages wired down") + count("Pages occupied by compressor")) * page;
+    let used =
+        (count("Pages active") + count("Pages wired down") + count("Pages occupied by compressor"))
+            * page;
     Some(((used as f64 / memsize as f64) * 100.0).clamp(0.0, 100.0) as u8)
 }

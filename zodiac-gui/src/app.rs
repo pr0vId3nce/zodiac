@@ -21,6 +21,11 @@ use crate::anim::AnimStore;
 use crate::font::Fonts;
 use crate::render::Renderer;
 
+/// How often the GUI polls the server for pane state (status/titles). The
+/// server only sends `T_STATE` in reply to `T_QUERY`; this cadence sets how
+/// quickly the tab spinner/glow reflect an agent starting or stopping work.
+const QUERY_INTERVAL: Duration = Duration::from_millis(600);
+
 /// Events injected into the winit loop from outside: server frames read on
 /// the socket thread.
 pub enum UserEvent {
@@ -58,6 +63,10 @@ pub struct GuiApp {
     /// Next animation frame-flip deadline from the last redraw; drives the
     /// WaitUntil timer — absent when nothing visible animates.
     next_anim: Option<Instant>,
+    /// Next `T_QUERY` state poll. The server only sends `T_STATE` in reply
+    /// to a query, so this steady poll is how the GUI learns a pane's
+    /// status (working/idle) for the tab spinner + glow.
+    next_query: Option<Instant>,
     /// System clipboard handle for OSC 52 write-through (roadmap 4.7),
     /// opened lazily on the first T_CLIPBOARD.
     clipboard: Option<arboard::Clipboard>,
@@ -91,6 +100,7 @@ impl GuiApp {
             exit_at,
             anim: AnimStore::default(),
             next_anim: None,
+            next_query: Some(Instant::now()), // poll state right away
             clipboard: None,
         }
     }
@@ -1010,13 +1020,20 @@ impl ApplicationHandler<UserEvent> for GuiApp {
         }
     }
 
-    /// A WaitUntil deadline fired: if it was the animation timer, redraw —
-    /// the render pass picks the new frame and re-arms the timer.
+    /// A WaitUntil deadline fired: redraw if it was the animation timer, and
+    /// poll `T_QUERY` if the state-poll deadline elapsed.
     fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
-        if matches!(cause, StartCause::ResumeTimeReached { .. })
-            && self.next_anim.is_some_and(|t| Instant::now() >= t)
-        {
+        if !matches!(cause, StartCause::ResumeTimeReached { .. }) {
+            return;
+        }
+        let now = Instant::now();
+        if self.next_anim.is_some_and(|t| now >= t) {
             self.request_redraw();
+        }
+        if self.next_query.is_some_and(|t| now >= t) {
+            // The T_STATE reply arrives as a Srv frame and triggers a redraw.
+            self.send(T_QUERY, 0, &[]);
+            self.next_query = Some(now + QUERY_INTERVAL);
         }
     }
 
@@ -1028,12 +1045,13 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 return;
             }
         }
-        // Sleep until the earliest deadline (test-exit or animation frame
-        // flip); plain Wait when neither is armed — no idle wakeups.
-        let next = match (self.exit_at, self.next_anim) {
-            (Some(a), Some(b)) => Some(a.min(b)),
-            (a, b) => a.or(b),
-        };
+        // Sleep until the earliest armed deadline: test-exit, animation
+        // frame flip, or the next state poll. (The poll is always armed, so
+        // this is effectively WaitUntil at the poll cadence.)
+        let next = [self.exit_at, self.next_anim, self.next_query]
+            .into_iter()
+            .flatten()
+            .min();
         event_loop.set_control_flow(match next {
             Some(t) => ControlFlow::WaitUntil(t),
             None => ControlFlow::Wait,

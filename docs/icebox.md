@@ -11,5 +11,11 @@ roadmap task in a future phase — never slipping it into the current one.
 - MCP management UI.
 - Kitty file-transfer and desktop-notification protocol extensions.
 - ACP (Agent Client Protocol) support as an alternative structured-agent transport.
-- Resize reflow in the VT engine (note if the Phase 1 engine provides it free).
-- vt100 gaps found during Phase 0 corpus recording (list them here as discovered).
+- Resize reflow in the VT engine (kept vt100, which has none; alacritty_terminal
+  has it always-on — relevant if the escape hatch is ever taken).
+- OSC 8 hyperlink storage per cell (currently parse+drop; GUI hover/click era).
+- Undercurl / underline-style / underline-color (58/59) rendering — parsed and
+  consumed since Phase 1; storage + rendering is GUI-era work.
+- IRM insert mode (CSI 4 h) — reset is consumed, set still logs as unhandled.
+- Focus reporting (DECSET 1004) passthrough to clients.
+- DECALN (ESC # 8) screen alignment test.

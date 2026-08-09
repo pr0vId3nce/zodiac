@@ -119,21 +119,25 @@ default = extend vt100.
       with attrs, cursor, modes, title, `drain_events()`, `resize`. *(src/engine.rs)*
 - [x] **1.2 Implement trait for vendored vt100**; port `pane.rs`/`gfx.rs`/`query.rs`
       to the trait. Mechanical, move-only. Gate: all goldens byte-identical. *(72a6719)*
-- [ ] **1.3 Run Spike S1 → ADR 0001.**
-- [ ] **1.4A (switch)** Adapter for chosen engine behind a cargo feature; dual-run
-      differential mode diffing full screens per chunk between engines. Zero cell
-      diffs on corpus, or each diff class documented as benign in the ADR.
-      **— or 1.4B (extend)** in `vendor/vt100/`: DCS tolerance (consume cleanly),
-      OSC 8 (parse+store or parse+drop, decided in ADR), OSC 52 (surface as a new
-      `TermEvent::Clipboard` for the server to gate), OSC 10/11 replies, DECSET audit
-      driven by the corpus debug-log offender list, SGR gaps (4:x underline styles,
-      58/59 underline colors).
-- [ ] **1.5 TermEvent parity** — golden event logs match; re-baselines carry a
-      `REBASELINE:` commit note.
-- [ ] **1.6 Child-side 2026** — honor a child's `?2026h/l` by coalescing that pane's
-      output flush; report `?2026;1$y` once honored.
-- [ ] **1.7 Shrink `QueryScanner`** to whatever the engine doesn't answer; update its
-      table tests.
+- [x] **1.3 Run Spike S1 → ADR 0001.** *(decisions/0001-vt-engine.md: extend
+      vt100; both candidates measured at 100% corpus text fidelity but neither
+      has semantic scroll events — the fork is unavoidable in every future.)*
+- [x] **1.4B (extend)** in `vendor/vt100/`: DCS tolerance (consume cleanly),
+      OSC 8 (parse+drop per ADR), OSC 52 (surfaced as `TermEvent::Clipboard` for
+      the server to gate), OSC 10/11 replies (QueryScanner remains reply owner),
+      DECSET audit driven by the corpus debug-log offender list (DECAWM now
+      implemented; 12/1004/2031 consumed), SGR gaps (2/22 intensity, 4:x underline
+      styles, 58/59 consumed). *(1.4A switch path not taken — see ADR 0001.)*
+- [x] **1.5 TermEvent parity** — golden event logs match; re-baselines carry a
+      `REBASELINE:` commit note. *(All gap-closure landed with goldens
+      byte-identical — zero re-baselines needed.)*
+- [x] **1.6 Child-side 2026** — honor a child's `?2026h/l` by coalescing that pane's
+      output flush; report `?2026;1$y` once honored. *(294478a: pane sync_buf +
+      150 ms deadline valve, DECRQM live report, sync_2026_coalesces_output)*
+- [x] **1.7 `QueryScanner` scope settled** — with the extend-vt100 decision the
+      engine answers nothing by design, so the scanner stays the single reply
+      owner; it *gained* DECRQSS invalid-replies, and the table tests grew the
+      row (25 cases).
 
 ### Exit criteria
 

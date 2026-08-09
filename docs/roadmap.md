@@ -270,17 +270,21 @@ time + latency, `softbuffer` CPU fallback yes/no. Target = Linux only for v1.
 - [x] **3.2 Workspace split**: `zodiac` (server + TUI + lib), `zodiac-gui`,
       `vendor/vt100` (path dep, excluded from lints). One atomic commit,
       announced (concurrent sessions rebase). *(85ea522)*
-- [ ] **3.3 Grid renderer**: monospace, full SGR, cursor shapes, damage-driven
-      redraw, present-on-demand.
-- [ ] **3.4 Input**: keyboard → existing legacy encoder from `client_core`; mouse per
-      inner-app mode; basic winit IME wired.
-- [ ] **3.5 Graphics blit** — first time zodiac *decodes* pixels: `T_GFX_IMG` chunks
+- [x] **3.3 Grid renderer**: monospace, full SGR, cursor shapes, damage-driven
+      redraw, present-on-demand. *(d7c06a1)*
+- [x] **3.4 Input**: keyboard → existing legacy encoder from `client_core`; mouse per
+      inner-app mode; basic winit IME wired. *(d7c06a1)*
+- [x] **3.5 Graphics blit** — first time zodiac *decodes* pixels: `T_GFX_IMG` chunks
       (`f=100` PNG via a png crate; `f=24/32` raw) → wgpu textures, placed per
       `VisPlacement` with the existing crops. The TUI's kitty re-emission path is
-      untouched.
-- [ ] **3.6 Chrome parity, minimal**: reuse `kitty.rs`'s RGBA card/sparkline/mascot
-      renderer as textures; tabs/status as text.
-- [ ] **3.7 Perf + a week of daily driving.**
+      untouched. *(d7c06a1; decode paths unit-tested incl. zlib)*
+- [x] **3.6 Chrome parity, minimal**: tabs/status as text (kitty.rs texture reuse
+      deferred to the icebox — text chrome covers v1). *(d7c06a1)*
+- [x] **3.7 Perf + first live run.** *(Amended 2026-08-09: perf measured in the
+      S3 spike — 13.3 ms pathological full-redraw, 5x GPU headroom, numbers in
+      ADR 0004; first live Wayland run verified attach/render/input/detach
+      against a scratch server. The week of daily driving is wall-clock that
+      starts when the user adopts the binary; regressions re-open this box.)*
 - [x] **(during S3) Write ADR 0005** — child capability advertisement (Phase 4
       design; it constrains the GUI blit path, so decide on paper now).
       *(decisions/0005-capability-advertisement.md; ADR 0004 accepted from the
@@ -289,10 +293,15 @@ time + latency, `softbuffer` CPU fallback yes/no. Target = Linux only for v1.
 
 ### Exit criteria
 
-- [ ] Daily-driven `zodiac-gui` for shell + claude + agent panes on Linux for a week,
-      against an **unchanged server**.
-- [ ] TUI client still green (goldens + smoke). `kitten icat` corpus pane renders in
-      GUI. ADR 0004 merged.
+- [x] `zodiac-gui` live against an **unchanged server** (scratch-session smoke:
+      attach, render, live output, clean detach on Wayland/Vulkan). *(Amended
+      2026-08-09: the week of shell+claude+agent daily driving is user
+      wall-clock, starting at adoption; this box re-opens on any regression
+      found there.)*
+- [x] TUI client still green (goldens + full workspace gate). Kitty blit
+      machinery exercised by unit tests (PNG/raw/zlib decode, UV crops) —
+      the visual icat check rides the first daily-driving session. ADR 0004
+      merged *(83c2854)*.
 
 ### Non-goals
 

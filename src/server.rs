@@ -29,6 +29,12 @@ pub enum SrvEvent {
     /// ≤6-word summary). See `monitor.rs`.
     MonitorSubtitle(u64, String),
     Exited(u64),
+    /// One NDJSON line from an agent pane's stdout (pane, generation, line).
+    AgentLine(u64, u64, Vec<u8>),
+    /// A line from an agent pane's stderr (kept as a diagnostics tail).
+    AgentStderr(u64, u64, String),
+    /// An agent pane's stdout closed — the process is gone.
+    AgentGone(u64, u64),
 }
 
 #[derive(Serialize, Deserialize, Default)]
@@ -262,6 +268,7 @@ pub fn run(session: &str) -> Result<()> {
         if last_stall_check.elapsed() >= Duration::from_secs(1) {
             last_stall_check = Instant::now();
             srv.autoresume_tick();
+            srv.agent_tick();
             srv.finish_tick();
             srv.monitor_tick();
             srv.subtitle_tick();
@@ -439,6 +446,22 @@ impl Server {
                 }
             }
             SrvEvent::Exited(id) => self.remove_pane(id),
+            SrvEvent::AgentLine(id, gen, line) => self.agent_line(id, gen, line),
+            SrvEvent::AgentStderr(id, gen, line) => {
+                if let Some(rt) = self
+                    .pane_mut(id)
+                    .filter(|p| p.agent_rt().is_some_and(|r| r.generation == gen))
+                    .and_then(|p| p.agent_rt_mut())
+                {
+                    // Keep a short stderr tail for failure display.
+                    let f = rt.failed.get_or_insert_with(String::new);
+                    if f.len() < 2048 {
+                        f.push_str(&line);
+                        f.push('\n');
+                    }
+                }
+            }
+            SrvEvent::AgentGone(id, gen) => self.agent_gone(id, gen),
         }
     }
 
@@ -473,6 +496,7 @@ impl Server {
                 for (id, ring) in rings {
                     self.reply(gen, T_REPLAY, id, &ring);
                 }
+                self.agent_replay(gen);
             }
             T_READ_SCREEN => {
                 let text = self
@@ -497,6 +521,16 @@ impl Server {
             T_INPUT => {
                 if let Some(p) = self.pane_mut(f.id) {
                     p.write_input(&f.data);
+                }
+            }
+            T_AGENT_INPUT => {
+                if let Ok(text) = String::from_utf8(f.data.clone()) {
+                    self.agent_input(f.id, &text);
+                }
+            }
+            T_PERM_RESP => {
+                if let Ok(resp) = serde_json::from_slice::<crate::protocol::PermResponse>(&f.data) {
+                    self.perm_response(f.id, &resp);
                 }
             }
             T_RESTORE => self.restore_agents(),
@@ -536,7 +570,30 @@ impl Server {
                 }
             }
             T_NEW_PANE => {
-                let _ = self.new_pane(None, None, Vec::new(), true);
+                // Optional JSON payload (new clients): agent-pane request.
+                // Empty/unparseable payload = classic pty shell pane.
+                #[derive(serde::Deserialize)]
+                struct NewPane {
+                    kind: String,
+                    #[serde(default)]
+                    agent: Option<String>,
+                    #[serde(default)]
+                    cwd: Option<String>,
+                }
+                let req: Option<NewPane> = serde_json::from_slice(&f.data).ok();
+                match req {
+                    Some(r) if r.kind == "agent" => {
+                        let kind = r
+                            .agent
+                            .as_deref()
+                            .and_then(crate::agent::AgentKind::parse)
+                            .unwrap_or(crate::agent::AgentKind::Claude);
+                        let _ = self.new_agent_pane(kind, r.cwd.map(PathBuf::from));
+                    }
+                    _ => {
+                        let _ = self.new_pane(None, None, Vec::new(), true);
+                    }
+                }
             }
             T_CLOSE_PANE => {
                 if let Some(p) = self.pane_mut(f.id) {
@@ -617,6 +674,11 @@ impl Server {
         // Re-read each tick so a settings-page toggle applies live.
         let conn_watch = crate::settings::Settings::cached().connection_watch;
         for p in &mut self.panes {
+            // Agent panes retry structurally (2.7) — the keystroke
+            // watchdog is pty-only.
+            if p.agent_rt().is_some() {
+                continue;
+            }
             if p.stall_due(conn_watch) {
                 notify(
                     &format!("auto-resumed '{}'", p.name),
@@ -653,6 +715,326 @@ impl Server {
     /// kick off a background classification for each. Advisory only — this
     /// never writes to a pane, only logs and notifies. Re-read from settings
     /// every tick so the on/off toggle applies live.
+    /// One NDJSON line from an agent pane: parse the little we must
+    /// (session id, status transitions, permission requests), append to the
+    /// transcript ring, and relay verbatim (ADR 0002).
+    fn agent_line(&mut self, id: u64, gen: u64, line: Vec<u8>) {
+        let mut perm: Option<crate::protocol::PermRequest> = None;
+        let mut dirty = false;
+        {
+            let Some(rt) = self
+                .pane_mut(id)
+                .filter(|p| p.agent_rt().is_some_and(|r| r.generation == gen))
+                .and_then(|p| p.agent_rt_mut())
+            else {
+                return;
+            };
+            if let Ok(ev) = serde_json::from_slice::<serde_json::Value>(&line) {
+                let typ = ev.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                match typ {
+                    // claude session id (init) — pi's comes as "session".
+                    "system" => {
+                        if let Some(sid) = ev.get("session_id").and_then(|v| v.as_str()) {
+                            rt.session_id = Some(sid.to_string());
+                        }
+                    }
+                    "session" => {
+                        if let Some(sid) = ev.get("id").and_then(|v| v.as_str()) {
+                            rt.session_id = Some(sid.to_string());
+                        }
+                    }
+                    // Working / idle edges.
+                    "stream_event" | "turn_start" | "agent_start" => {
+                        dirty = !rt.working;
+                        rt.working = true;
+                    }
+                    "agent_end" | "turn_end" => {
+                        dirty = rt.working;
+                        rt.working = false;
+                    }
+                    "result" => {
+                        dirty = true;
+                        rt.working = false;
+                        if let Some(sid) = ev.get("session_id").and_then(|v| v.as_str()) {
+                            rt.session_id = Some(sid.to_string());
+                        }
+                        if ev.get("is_error").and_then(|v| v.as_bool()) == Some(true) {
+                            rt.failed = Some(
+                                ev.get("result")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("agent error")
+                                    .to_string(),
+                            );
+                        } else {
+                            rt.failed = None;
+                            rt.retries = 0;
+                        }
+                    }
+                    // Permission request (claude control protocol, 2.5).
+                    "control_request" => {
+                        let req = ev.get("request").cloned().unwrap_or_default();
+                        if req.get("subtype").and_then(|v| v.as_str()) == Some("can_use_tool") {
+                            let pr = crate::protocol::PermRequest {
+                                request_id: ev
+                                    .get("request_id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                tool_name: req
+                                    .get("tool_name")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or_default()
+                                    .to_string(),
+                                display_name: req
+                                    .get("display_name")
+                                    .and_then(|v| v.as_str())
+                                    .map(String::from),
+                                input: req.get("input").cloned().unwrap_or_default(),
+                                age_ms: 0,
+                            };
+                            rt.pending.push((pr.clone(), Instant::now()));
+                            perm = Some(pr);
+                            dirty = true;
+                        }
+                        // Control requests aren't transcript content.
+                        return self.after_agent_line(id, None, perm, dirty);
+                    }
+                    _ => {}
+                }
+            }
+            rt.ring_push(&line);
+        }
+        self.after_agent_line(id, Some(line), perm, dirty);
+    }
+
+    fn after_agent_line(
+        &mut self,
+        id: u64,
+        line: Option<Vec<u8>>,
+        perm: Option<crate::protocol::PermRequest>,
+        dirty: bool,
+    ) {
+        if let Some(line) = line {
+            self.send_ui(T_AGENT_EVENT, id, &line);
+            self.send_watchers(T_AGENT_EVENT, id, &line);
+        }
+        if let Some(pr) = perm {
+            let data = serde_json::to_vec(&pr).unwrap_or_default();
+            self.send_ui(T_PERM_REQ, id, &data);
+            self.send_watchers(T_PERM_REQ, id, &data);
+            let (watched, detached) = (self.ui.is_some() && self.active == id, self.ui.is_none());
+            if let Some(p) = self.pane_mut(id) {
+                if !watched {
+                    p.attention = true;
+                    if detached {
+                        notify(
+                            &format!("{} asks: {}", p.name, pr.tool_name),
+                            "zodiac permission request",
+                        );
+                    }
+                }
+            }
+        }
+        if dirty {
+            self.dirty = true;
+        }
+    }
+
+    /// An agent pane's process ended. Mid-work exits get a structured
+    /// retry: relaunch with --resume and re-send the last input (2.7).
+    fn agent_gone(&mut self, id: u64, gen: u64) {
+        let Some(rt) = self
+            .pane_mut(id)
+            .filter(|p| p.agent_rt().is_some_and(|r| r.generation == gen))
+            .and_then(|p| p.agent_rt_mut())
+        else {
+            return;
+        };
+        let mid_work = rt.working;
+        rt.working = false;
+        self.dirty = true;
+        if mid_work {
+            let Some(rt) = self.pane_mut(id).and_then(|p| p.agent_rt_mut()) else {
+                return;
+            };
+            if rt.retries < crate::agent::RETRY_MAX {
+                let backoff = std::time::Duration::from_secs(1 << rt.retries.min(5));
+                rt.retries += 1;
+                rt.retry_at = Some(Instant::now() + backoff);
+                rt.failed = Some(format!(
+                    "agent process died mid-task — resuming (attempt {}/{})",
+                    rt.retries,
+                    crate::agent::RETRY_MAX
+                ));
+            } else {
+                rt.failed = Some("agent process died mid-task — retry limit reached".to_string());
+            }
+        }
+    }
+
+    /// Fire due structured retries and expire stale permission requests.
+    fn agent_tick(&mut self) {
+        let tx = self.tx.clone();
+        let mut resolved: Vec<(u64, String)> = Vec::new();
+        for p in &mut self.panes {
+            let id = p.id;
+            let Some(rt) = p.agent_rt_mut() else { continue };
+            // 2.7: due retry — respawn resuming the session, re-send input.
+            if rt.retry_at.is_some_and(|t| t <= Instant::now()) {
+                rt.retry_at = None;
+                if rt.spawn_process(id, &tx).is_ok() {
+                    if let Some(input) = rt.last_input.clone() {
+                        rt.send_user_text(&input);
+                        rt.working = true;
+                    }
+                } else if rt.retries < crate::agent::RETRY_MAX {
+                    let backoff = std::time::Duration::from_secs(1 << rt.retries.min(5));
+                    rt.retries += 1;
+                    rt.retry_at = Some(Instant::now() + backoff);
+                }
+            }
+            // 2.5: explicit timeout policy — 10 min pending → deny.
+            let expired: Vec<String> = rt
+                .pending
+                .iter()
+                .filter(|(_, since)| since.elapsed() > std::time::Duration::from_secs(600))
+                .map(|(pr, _)| pr.request_id.clone())
+                .collect();
+            for rid in expired {
+                rt.send_perm_response(&rid, false, Some("timed out after 10 minutes"));
+                rt.pending.retain(|(pr, _)| pr.request_id != rid);
+                resolved.push((id, rid));
+            }
+        }
+        for (id, rid) in resolved {
+            self.broadcast_perm_resolved(id, &rid, "timeout");
+            self.dirty = true;
+        }
+    }
+
+    /// Tell every client a permission request is settled (answered or
+    /// expired) so open dialogs dismiss — a synthetic transcript event.
+    fn broadcast_perm_resolved(&mut self, id: u64, request_id: &str, how: &str) {
+        let line = serde_json::json!({
+            "type": "zodiac_perm_resolved",
+            "request_id": request_id,
+            "how": how,
+        })
+        .to_string()
+        .into_bytes();
+        if let Some(rt) = self.pane_mut(id).and_then(|p| p.agent_rt_mut()) {
+            rt.ring_push(&line);
+        }
+        self.send_ui(T_AGENT_EVENT, id, &line);
+        self.send_watchers(T_AGENT_EVENT, id, &line);
+    }
+
+    /// T_AGENT_INPUT: deliver one user prompt to an agent pane, reviving
+    /// the process (resuming its session) if it has exited.
+    fn agent_input(&mut self, id: u64, text: &str) {
+        let tx = self.tx.clone();
+        let mut echo: Option<Vec<u8>> = None;
+        if let Some(rt) = self.pane_mut(id).and_then(|p| p.agent_rt_mut()) {
+            rt.last_input = Some(text.to_string());
+            rt.failed = None;
+            if !rt.alive() {
+                let _ = rt.spawn_process(id, &tx);
+            }
+            if rt.send_user_text(text) {
+                rt.working = true;
+                // The agent doesn't echo the prompt back — synthesize a
+                // transcript line so every client renders it.
+                let line = serde_json::json!({
+                    "type": "zodiac_user",
+                    "text": text,
+                })
+                .to_string()
+                .into_bytes();
+                rt.ring_push(&line);
+                echo = Some(line);
+            } else {
+                rt.failed = Some("could not reach the agent process".to_string());
+            }
+            self.dirty = true;
+        }
+        if let Some(line) = echo {
+            self.send_ui(T_AGENT_EVENT, id, &line);
+            self.send_watchers(T_AGENT_EVENT, id, &line);
+        }
+    }
+
+    /// T_PERM_RESP: answer a pending permission request.
+    fn perm_response(&mut self, id: u64, resp: &crate::protocol::PermResponse) {
+        let allow = resp.behavior == "allow";
+        let mut settled = false;
+        if let Some(rt) = self.pane_mut(id).and_then(|p| p.agent_rt_mut()) {
+            if rt
+                .pending
+                .iter()
+                .any(|(pr, _)| pr.request_id == resp.request_id)
+            {
+                rt.send_perm_response(&resp.request_id, allow, resp.message.as_deref());
+                rt.pending
+                    .retain(|(pr, _)| pr.request_id != resp.request_id);
+                settled = true;
+            }
+        }
+        if settled {
+            self.broadcast_perm_resolved(id, &resp.request_id, resp.behavior.as_str());
+            if let Some(p) = self.pane_mut(id) {
+                p.attention = false;
+            }
+            self.dirty = true;
+        }
+    }
+
+    /// Attach/watch replay for agent panes (2.3): the whole transcript ring
+    /// as one newline-joined T_AGENT_EVENT, then every pending permission.
+    fn agent_replay(&mut self, gen: u64) {
+        let payloads: Vec<(u64, Vec<u8>, Vec<Vec<u8>>)> = self
+            .panes
+            .iter()
+            .filter_map(|p| {
+                let rt = p.agent_rt()?;
+                let perms: Vec<Vec<u8>> = rt
+                    .pending
+                    .iter()
+                    .map(|(pr, since)| {
+                        let mut pr = pr.clone();
+                        pr.age_ms = since.elapsed().as_millis() as u64;
+                        serde_json::to_vec(&pr).unwrap_or_default()
+                    })
+                    .collect();
+                Some((p.id, rt.ring_joined(), perms))
+            })
+            .collect();
+        for (id, ring, perms) in payloads {
+            if !ring.is_empty() {
+                self.reply(gen, T_AGENT_EVENT, id, &ring);
+            }
+            for pr in perms {
+                self.reply(gen, T_PERM_REQ, id, &pr);
+            }
+        }
+    }
+
+    fn new_agent_pane(
+        &mut self,
+        kind: crate::agent::AgentKind,
+        cwd: Option<PathBuf>,
+    ) -> Result<u64> {
+        let id = self.next_id;
+        self.next_id += 1;
+        let pane = SrvPane::spawn_agent(id, None, kind, cwd, self.tx.clone())?;
+        let pname = pane.name.clone();
+        self.panes.push(pane);
+        self.dirty = true;
+        self.active = id;
+        self.send_ui(T_PANE_OPENED, id, pname.as_bytes());
+        self.send_watchers(T_PANE_OPENED, id, &pname.into_bytes());
+        Ok(id)
+    }
+
     /// Flush panes whose DECSET 2026 hold exceeded its deadline (1.6).
     fn sync_flush_tick(&mut self) {
         let due: Vec<(u64, Vec<u8>)> = self
@@ -684,6 +1066,11 @@ impl Server {
         let session = self.session.clone();
         let tx = self.tx.clone();
         for p in &mut self.panes {
+            // 2.6: agent panes report structured status — no LLM
+            // classification of (empty) screens.
+            if p.agent_rt().is_some() {
+                continue;
+            }
             let status = p.status();
             let hash = p.screen_hash();
             let stable_since = match p.monitor_screen_hash {
@@ -760,7 +1147,7 @@ impl Server {
     fn auto_name_tick(&mut self) {
         let mut announce: Vec<(u64, String)> = Vec::new();
         for p in &mut self.panes {
-            if p.renamed {
+            if p.renamed || p.agent_rt().is_some() {
                 continue;
             }
             let Some(name) = p.auto_name() else { continue };
@@ -789,6 +1176,9 @@ impl Server {
         let now = Instant::now();
         let tx = self.tx.clone();
         for p in &mut self.panes {
+            if p.agent_rt().is_some() {
+                continue;
+            }
             if p.agent().is_none() {
                 continue;
             }
@@ -841,6 +1231,7 @@ impl Server {
         for (id, ring) in rings {
             self.reply(gen, T_REPLAY, id, &ring);
         }
+        self.agent_replay(gen);
         // Fresh client: propagate its cell size / capability and resend
         // graphics state from scratch (image payloads + snapshots).
         self.gfx_sent.clear();

@@ -26,6 +26,18 @@ pub const RING_CAP: usize = 6 * 1024 * 1024;
 const SYNC_BUF_MAX: usize = 2 * 1024 * 1024;
 const SYNC_DEADLINE: Duration = Duration::from_millis(150);
 
+/// What sits behind a pane: a PTY child (shell/TUI, the default) or a
+/// structured agent process on pipes (roadmap Phase 2, ADR 0002).
+pub enum PaneIo {
+    Pty {
+        master: Box<dyn MasterPty + Send>,
+        writer: Box<dyn Write + Send>,
+        killer: Box<dyn ChildKiller + Send + Sync>,
+        pid: Option<u32>,
+    },
+    Agent(crate::agent::AgentRuntime),
+}
+
 pub struct SrvPane {
     pub id: u64,
     pub name: String,
@@ -101,10 +113,7 @@ pub struct SrvPane {
     pub subtitle: Option<String>,
     pub subtitle_hash: Option<u64>,
     pub subtitle_checked_at: Option<Instant>,
-    master: Box<dyn MasterPty + Send>,
-    writer: Box<dyn Write + Send>,
-    killer: Box<dyn ChildKiller + Send + Sync>,
-    pid: Option<u32>,
+    io: PaneIo,
     size: (u16, u16),
     /// Outer terminal cell size in px — reported to the inner PTY so apps
     /// compute image geometry that maps 1:1 onto the outer terminal.
@@ -232,11 +241,74 @@ impl SrvPane {
             subtitle: None,
             subtitle_hash: None,
             subtitle_checked_at: None,
-            master: pair.master,
-            writer,
-            killer,
-            pid,
+            io: PaneIo::Pty {
+                master: pair.master,
+                writer,
+                killer,
+                pid,
+            },
             size: (rows, cols),
+            cell: (0, 0),
+        })
+    }
+
+    /// Spawn a structured agent pane (roadmap 2.2, ADR 0002): the agent
+    /// process on pipes, its NDJSON relayed as `T_AGENT_EVENT`. The VT
+    /// engine fields stay allocated (tiny) but idle — no bytes ever reach
+    /// them.
+    pub fn spawn_agent(
+        id: u64,
+        name: Option<String>,
+        kind: crate::agent::AgentKind,
+        cwd: Option<PathBuf>,
+        tx: Sender<SrvEvent>,
+    ) -> Result<Self> {
+        let mut rt = crate::agent::AgentRuntime::new(
+            kind,
+            cwd.filter(|d| d.is_dir())
+                .or_else(|| std::env::current_dir().ok()),
+        );
+        rt.spawn_process(id, &tx)?;
+        Ok(Self {
+            id,
+            name: name.unwrap_or_else(|| kind.name().to_string()),
+            renamed: false,
+            model_mtime: None,
+            model_name: None,
+            ring: Vec::new(),
+            term: crate::engine::ActiveEngine::new(2, 10, 0),
+            splitter: GfxSplitter::new(),
+            gfx: GfxEngine::new(2, 10),
+            gfx_pushed: 0,
+            queries: QueryScanner::new(),
+            bell_count: 0,
+            last_output: None,
+            last_title_working: None,
+            agent_memo: std::cell::RefCell::new(None),
+            ssh_memo: std::cell::RefCell::new(None),
+            busy_memo: std::cell::RefCell::new(None),
+            transcript_memo: std::cell::RefCell::new(None),
+            recap_mtime: std::cell::RefCell::new(None),
+            recap_cache: std::cell::RefCell::new(None),
+            activity: false,
+            attention: false,
+            auto_resume: true,
+            prev_status: "idle",
+            created_at: Instant::now(),
+            stall_since: None,
+            stall_fired: None,
+            stall_latched: false,
+            sync_buf: Vec::new(),
+            sync_since: None,
+            monitor_screen_hash: None,
+            monitor_screen_since: None,
+            monitor_checked_at: None,
+            monitor_last_reason: None,
+            subtitle: None,
+            subtitle_hash: None,
+            subtitle_checked_at: None,
+            io: PaneIo::Agent(rt),
+            size: (2, 10),
             cell: (0, 0),
         })
     }
@@ -351,22 +423,35 @@ impl SrvPane {
         self.cell = cell;
         self.gfx.cell = cell;
         let (rows, cols) = self.size;
-        let _ = self.master.resize(PtySize {
-            rows,
-            cols,
-            pixel_width: cols.saturating_mul(cell.0),
-            pixel_height: rows.saturating_mul(cell.1),
-        });
+        if let PaneIo::Pty { master, .. } = &self.io {
+            let _ = master.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: cols.saturating_mul(cell.0),
+                pixel_height: rows.saturating_mul(cell.1),
+            });
+        }
     }
 
-    /// Wire value for `PaneState.kind` — "pty" until the agent-pane
-    /// runtime lands (roadmap 2.2).
+    /// Wire value for `PaneState.kind`.
     pub fn kind_str(&self) -> &'static str {
-        "pty"
+        match &self.io {
+            PaneIo::Pty { .. } => "pty",
+            PaneIo::Agent(_) => "agent",
+        }
     }
 
     pub fn title(&self) -> String {
-        self.term.screen().title()
+        match &self.io {
+            PaneIo::Pty { .. } => self.term.screen().title(),
+            PaneIo::Agent(rt) => {
+                if rt.working {
+                    format!("⠿ {}", rt.kind.name())
+                } else {
+                    rt.kind.name().to_string()
+                }
+            }
+        }
     }
 
     pub fn screen_text(&self) -> String {
@@ -415,6 +500,19 @@ impl SrvPane {
     /// forever and would otherwise read as permanently working.
     pub fn status(&self) -> &'static str {
         use crate::protocol::{title_state, TitleState};
+        // Agent panes (2.6): status derives from structured events — no
+        // titles, spinners, or output recency involved.
+        if let PaneIo::Agent(rt) = &self.io {
+            return if !rt.pending.is_empty() {
+                "needs_input"
+            } else if rt.working {
+                "working"
+            } else if self.activity {
+                "done"
+            } else {
+                "idle"
+            };
+        }
         if self.attention {
             return "needs_input";
         }
@@ -451,6 +549,9 @@ impl SrvPane {
     /// Which agent runs in this pane: title patterns first (cheap, always
     /// fresh), then a process-tree walk memoized for a couple of seconds.
     pub fn agent(&self) -> Option<String> {
+        if let PaneIo::Agent(rt) = &self.io {
+            return Some(rt.kind.name().to_string());
+        }
         if let Some(a) = crate::protocol::agent_from_title(&self.title()) {
             return Some(a.to_string());
         }
@@ -459,7 +560,7 @@ impl SrvPane {
                 return v;
             }
         }
-        let v = self.pid.and_then(detect_agent_process);
+        let v = self.shell_pid().and_then(detect_agent_process);
         *self.agent_memo.borrow_mut() = Some((Instant::now(), v.clone()));
         v
     }
@@ -472,7 +573,7 @@ impl SrvPane {
                 return v;
             }
         }
-        let v = self.pid.and_then(detect_ssh_process);
+        let v = self.shell_pid().and_then(detect_ssh_process);
         *self.ssh_memo.borrow_mut() = Some((Instant::now(), v.clone()));
         v
     }
@@ -561,7 +662,12 @@ impl SrvPane {
     }
 
     pub fn cwd(&self) -> Option<String> {
-        let pid = self.pid?;
+        if let PaneIo::Agent(rt) = &self.io {
+            if let Some(dir) = &rt.cwd {
+                return Some(dir.to_string_lossy().into_owned());
+            }
+        }
+        let pid = self.shell_pid()?;
         #[cfg(target_os = "linux")]
         {
             std::fs::read_link(format!("/proc/{pid}/cwd"))
@@ -606,6 +712,11 @@ impl SrvPane {
     /// and tool calls as one-liners. Empty when the pane's agent keeps no
     /// transcript we can read, or hasn't written one yet.
     pub fn transcript_json(&self) -> Vec<u8> {
+        // Agent panes (2.3): entries come from the server-side event ring —
+        // no JSONL scraping (that path stays for pty panes).
+        if let PaneIo::Agent(rt) = &self.io {
+            return serde_json::to_vec(&agent_ring_entries(rt)).unwrap_or_default();
+        }
         let Some(agent) = self.agent() else {
             return Vec::new();
         };
@@ -715,7 +826,7 @@ impl SrvPane {
     /// The agent process serving this pane, with its argv — found among
     /// the shell's descendants, same match as agent detection.
     fn agent_proc(&self, agent: &str) -> Option<(u32, Vec<String>)> {
-        let root = self.pid?;
+        let root = self.shell_pid()?;
         descendant_procs(root).into_iter().find(|(_, args)| {
             args.iter()
                 .take(2)
@@ -824,12 +935,15 @@ impl SrvPane {
     /// answer is unknowable). Asks the PTY who owns the terminal
     /// (`tcgetpgrp`), which is exactly the "an app is open here" signal.
     pub fn fg_app(&self) -> Option<String> {
-        let fd = self.master.as_raw_fd()?;
+        let PaneIo::Pty { master, pid, .. } = &self.io else {
+            return None;
+        };
+        let fd = master.as_raw_fd()?;
         let pgid = unsafe { libc::tcgetpgrp(fd) };
         if pgid <= 0 {
             return None;
         }
-        if Some(pgid as u32) == self.pid {
+        if Some(pgid as u32) == *pid {
             return None; // the login shell itself is foreground
         }
         let name = process_name(pgid as u32)?;
@@ -936,12 +1050,14 @@ impl SrvPane {
             return;
         }
         self.size = (rows, cols);
-        let _ = self.master.resize(PtySize {
-            rows,
-            cols,
-            pixel_width: cols.saturating_mul(self.cell.0),
-            pixel_height: rows.saturating_mul(self.cell.1),
-        });
+        if let PaneIo::Pty { master, .. } = &self.io {
+            let _ = master.resize(PtySize {
+                rows,
+                cols,
+                pixel_width: cols.saturating_mul(self.cell.0),
+                pixel_height: rows.saturating_mul(self.cell.1),
+            });
+        }
         self.term.resize(rows, cols);
         for ev in self.term.drain_events() {
             self.gfx.apply_event(ev);
@@ -949,8 +1065,12 @@ impl SrvPane {
     }
 
     pub fn write_input(&mut self, bytes: &[u8]) {
-        let _ = self.writer.write_all(bytes);
-        let _ = self.writer.flush();
+        // Raw pty bytes are meaningless to an agent process — its input
+        // arrives structured via T_AGENT_INPUT (see Server::agent_input).
+        if let PaneIo::Pty { writer, .. } = &mut self.io {
+            let _ = writer.write_all(bytes);
+            let _ = writer.flush();
+        }
     }
 
     pub fn clear_flags(&mut self) {
@@ -959,7 +1079,34 @@ impl SrvPane {
     }
 
     pub fn kill(&mut self) {
-        let _ = self.killer.kill();
+        match &mut self.io {
+            PaneIo::Pty { killer, .. } => {
+                let _ = killer.kill();
+            }
+            PaneIo::Agent(rt) => rt.kill(),
+        }
+    }
+
+    /// The pane's root process: the login shell (pty) or the agent itself.
+    fn shell_pid(&self) -> Option<u32> {
+        match &self.io {
+            PaneIo::Pty { pid, .. } => *pid,
+            PaneIo::Agent(rt) => rt.pid,
+        }
+    }
+
+    pub fn agent_rt(&self) -> Option<&crate::agent::AgentRuntime> {
+        match &self.io {
+            PaneIo::Agent(rt) => Some(rt),
+            PaneIo::Pty { .. } => None,
+        }
+    }
+
+    pub fn agent_rt_mut(&mut self) -> Option<&mut crate::agent::AgentRuntime> {
+        match &mut self.io {
+            PaneIo::Agent(rt) => Some(rt),
+            PaneIo::Pty { .. } => None,
+        }
     }
 }
 
@@ -1321,6 +1468,71 @@ fn process_start_time(pid: u32) -> Option<std::time::SystemTime> {
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
 fn process_start_time(_pid: u32) -> Option<std::time::SystemTime> {
     None
+}
+
+/// Render an agent pane's event ring into read-mode entries: synthetic
+/// user prompts, assistant text blocks, and tool calls as one-liners
+/// (the same shapes `transcript_entries` distills from disk JSONL).
+fn agent_ring_entries(rt: &crate::agent::AgentRuntime) -> Vec<TranscriptEntry> {
+    let mut out = Vec::new();
+    for line in rt.ring_lines() {
+        let Ok(v) = serde_json::from_slice::<serde_json::Value>(line) else {
+            continue;
+        };
+        match v.get("type").and_then(|t| t.as_str()) {
+            Some("zodiac_user") => {
+                if let Some(s) = v.get("text").and_then(|t| t.as_str()) {
+                    push_entry(&mut out, "user", s);
+                }
+            }
+            Some("assistant") => {
+                if let Some(serde_json::Value::Array(blocks)) =
+                    v.get("message").and_then(|m| m.get("content"))
+                {
+                    for b in blocks {
+                        match b.get("type").and_then(|t| t.as_str()) {
+                            Some("text") => {
+                                if let Some(s) = b.get("text").and_then(|t| t.as_str()) {
+                                    push_entry(&mut out, "assistant", s);
+                                }
+                            }
+                            Some("tool_use") => {
+                                let name = b.get("name").and_then(|n| n.as_str()).unwrap_or("tool");
+                                out.push(TranscriptEntry {
+                                    role: "tool",
+                                    text: tool_line(name, b.get("input")),
+                                });
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            // pi: complete assistant messages arrive as message_end.
+            Some("message_end") => {
+                let Some(m) = v.get("message") else { continue };
+                let role = m.get("role").and_then(|r| r.as_str()).unwrap_or("");
+                if role != "assistant" {
+                    continue;
+                }
+                if let Some(serde_json::Value::Array(blocks)) = m.get("content") {
+                    for b in blocks {
+                        if b.get("type").and_then(|t| t.as_str()) == Some("text") {
+                            if let Some(s) = b.get("text").and_then(|t| t.as_str()) {
+                                push_entry(&mut out, "assistant", s);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if out.len() > TRANSCRIPT_MAX_ENTRIES {
+        let cut = out.len() - TRANSCRIPT_MAX_ENTRIES;
+        out.drain(..cut);
+    }
+    out
 }
 
 /// One rendered conversation entry for the phone's read mode.

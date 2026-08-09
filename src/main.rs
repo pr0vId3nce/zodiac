@@ -1,3 +1,4 @@
+mod agent;
 mod chat;
 mod cli;
 mod client;

@@ -34,6 +34,14 @@ pub const T_SEEN: u8 = 17;
 /// history (agent TUIs repaint in place, so scrollback never forms);
 /// the session transcript on disk is the real record.
 pub const T_TRANSCRIPT_REQ: u8 = 18;
+/// Text input for an agent pane (`kind == "agent"`): the server wraps the
+/// utf8 payload into the agent's native prompt message (ADR 0002). Sent to
+/// a pty pane it is ignored (T_INPUT keeps carrying raw pty bytes).
+#[allow(dead_code)] // wired by the 2.2 agent-pane runtime
+pub const T_AGENT_INPUT: u8 = 19;
+/// Answer to a `T_PERM_REQ`: PermResponse JSON for pane f.id.
+#[allow(dead_code)] // wired by the 2.2 agent-pane runtime
+pub const T_PERM_RESP: u8 = 34;
 
 // server -> client
 pub const T_HELLO: u8 = 20; // payload: Hello JSON
@@ -48,6 +56,14 @@ pub const T_GFX_STATE: u8 = 28; // payload: GfxSnapshot JSON for pane f.id
 pub const T_GFX_IMG: u8 = 29; // payload: image data chunk, see gfx_img_*
 pub const T_PANE_RENAMED: u8 = 30; // payload: utf8 name (auto-naming, see pane.rs)
 pub const T_TRANSCRIPT: u8 = 31; // payload: transcript entries JSON (empty when unavailable)
+/// One agent-native NDJSON line from pane f.id (claude stream-json / pi
+/// json-rpc — ADR 0002). Relayed verbatim; clients parse what they need.
+#[allow(dead_code)] // wired by the 2.2 agent-pane runtime
+pub const T_AGENT_EVENT: u8 = 32;
+/// A pending permission request for pane f.id: PermRequest JSON. Replayed
+/// on attach while unanswered (the server-side inbox is authoritative).
+#[allow(dead_code)] // wired by the 2.2 agent-pane runtime
+pub const T_PERM_REQ: u8 = 33;
 
 /// T_GFX_IMG payload: 26-byte header + data chunk. Images larger than
 /// GFX_CHUNK arrive as several frames distinguished by `off`; the client
@@ -100,6 +116,37 @@ impl GfxImgHdr {
 
 const MAX_FRAME: usize = 8 * 1024 * 1024;
 
+/// T_PERM_REQ payload: one pending tool-permission request from an agent
+/// pane, produced by claude's `control_request`/`can_use_tool` (ADR 0002).
+/// The server-side inbox is authoritative: requests persist until answered
+/// or timed out, and are re-broadcast on attach.
+#[allow(dead_code)] // wired by the 2.2 agent-pane runtime
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PermRequest {
+    /// The agent's own request id — echoed back in the response.
+    pub request_id: String,
+    pub tool_name: String,
+    #[serde(default)]
+    pub display_name: Option<String>,
+    /// The tool input as the agent sent it (raw JSON).
+    pub input: serde_json::Value,
+    /// Milliseconds this request has been pending (for UI countdowns).
+    #[serde(default)]
+    pub age_ms: u64,
+}
+
+/// T_PERM_RESP payload.
+#[allow(dead_code)] // wired by the 2.2 agent-pane runtime
+#[derive(Serialize, Deserialize, Clone)]
+pub struct PermResponse {
+    pub request_id: String,
+    /// "allow" | "deny"
+    pub behavior: String,
+    /// Optional message shown to the agent on deny.
+    #[serde(default)]
+    pub message: Option<String>,
+}
+
 pub struct Frame {
     pub typ: u8,
     pub id: u64,
@@ -115,10 +162,19 @@ pub struct HelloPane {
     pub last_ms: Option<u64>,
 }
 
+/// Wire-protocol revision spoken by the server. 0 (field absent) = every
+/// release before agent panes; 1 = agent frames (T_AGENT_*, T_PERM_*)
+/// understood. Clients treat unknown newer values as "newer than me, all
+/// my frames still valid" — the protocol only ever grows additively.
+pub const PROTO_VERSION: u32 = 1;
+
 #[derive(Serialize, Deserialize)]
 pub struct Hello {
     pub panes: Vec<HelloPane>,
     pub active: u64,
+    /// See [`PROTO_VERSION`]. serde(default) keeps old servers readable.
+    #[serde(default)]
+    pub proto: u32,
     /// This server understands `T_MOUSE`. Missing from an older server's
     /// hello, where the client keeps sending mouse reports as `T_INPUT`
     /// (ungated, as before) rather than into a frame type that would be
@@ -127,11 +183,19 @@ pub struct Hello {
     pub mouse_gate: bool,
 }
 
+fn default_pane_kind() -> String {
+    "pty".into()
+}
+
 #[derive(Serialize, Deserialize, Clone)]
 pub struct PaneState {
     pub index: usize,
     pub id: u64,
     pub name: String,
+    /// "pty" (default — a shell/TUI under the VT engine) or "agent"
+    /// (structured NDJSON pane, ADR 0002).
+    #[serde(default = "default_pane_kind")]
+    pub kind: String,
     pub title: String,
     pub status: String,        // working | idle | done | needs_input
     pub agent: Option<String>, // claude | opencode | ... | None = plain shell
@@ -349,11 +413,13 @@ mod tests {
             panes: Vec::new(),
             active: 3,
             mouse_gate: true,
+            proto: PROTO_VERSION,
         })
         .unwrap();
         let back: Hello = serde_json::from_str(&json).unwrap();
         assert!(back.mouse_gate);
         assert_eq!(back.active, 3);
+        assert_eq!(back.proto, PROTO_VERSION);
     }
 
     #[test]
@@ -370,6 +436,39 @@ mod tests {
         assert_eq!(agent_from_title("π"), None);
         assert_eq!(agent_from_title("πalpha - beta"), None);
         assert_eq!(agent_from_title("zsh"), None);
+    }
+
+    /// Old-server compat: a PaneState without `kind` reads as a pty pane,
+    /// and the server->client agent frames stay distinct from each other
+    /// and everything else.
+    #[test]
+    fn agent_frames_and_kind_default() {
+        let p: PaneState = serde_json::from_str(
+            r#"{"index":1,"id":1,"name":"x","title":"","status":"idle",
+                "agent":null,"cwd":null,"focused":false,"auto_resume":true}"#,
+        )
+        .unwrap();
+        assert_eq!(p.kind, "pty");
+        let mut srv = [
+            T_HELLO,
+            T_REPLAY,
+            T_OUTPUT,
+            T_PANE_OPENED,
+            T_PANE_CLOSED,
+            T_SERVER_EXIT,
+            T_STATE,
+            T_SCREEN,
+            T_GFX_STATE,
+            T_GFX_IMG,
+            T_PANE_RENAMED,
+            T_TRANSCRIPT,
+            T_AGENT_EVENT,
+            T_PERM_REQ,
+        ]
+        .to_vec();
+        srv.sort_unstable();
+        srv.dedup();
+        assert_eq!(srv.len(), 14, "two server frame types collide");
     }
 
     #[test]
@@ -392,6 +491,9 @@ mod tests {
             T_RESTORE,
             T_MOUSE,
             T_SEEN,
+            T_TRANSCRIPT_REQ,
+            T_AGENT_INPUT,
+            T_PERM_RESP,
         ];
         let mut seen = types.to_vec();
         seen.sort_unstable();

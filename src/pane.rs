@@ -359,6 +359,12 @@ impl SrvPane {
         });
     }
 
+    /// Wire value for `PaneState.kind` — "pty" until the agent-pane
+    /// runtime lands (roadmap 2.2).
+    pub fn kind_str(&self) -> &'static str {
+        "pty"
+    }
+
     pub fn title(&self) -> String {
         self.term.screen().title()
     }

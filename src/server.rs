@@ -821,6 +821,7 @@ impl Server {
         let hello = Hello {
             active: self.active,
             mouse_gate: true,
+            proto: crate::protocol::PROTO_VERSION,
             panes: self
                 .panes
                 .iter()
@@ -974,6 +975,7 @@ impl Server {
                         index: i + 1,
                         id: p.id,
                         name: p.name.clone(),
+                        kind: p.kind_str().to_string(),
                         title: p.title(),
                         status: p.status().to_string(),
                         cwd: p.cwd(),

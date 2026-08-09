@@ -912,3 +912,11 @@ dependencies = [
  "signal-hook",
  "vt100",
 ]
+
+[[package]]
+name = "zodiac-gui"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "zodiac",
+]

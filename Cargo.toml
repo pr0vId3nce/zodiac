@@ -1,3 +1,12 @@
+[workspace]
+members = ["zodiac-gui"]
+# The vendored fork is a path dependency, deliberately not a member: its
+# lib.rs carries doy's #![warn(clippy::cargo/pedantic/nursery)] headers,
+# which under the gate's -D warnings would fail on publish-metadata
+# pedantry for a crate that is never published. It still builds with the
+# workspace and is exercised by the golden + audit suites.
+exclude = ["vendor/vt100"]
+
 [package]
 name = "zodiac"
 version = "0.1.0"
@@ -27,6 +36,7 @@ vt100 = { path = "vendor/vt100" }
 # replays stay free of unhandled-sequence noise (ADR 0001).
 log = "0.4"
 
+# Workspace-wide (member profiles are ignored by cargo anyway).
 [profile.release]
 lto = true
 strip = true

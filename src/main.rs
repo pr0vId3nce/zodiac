@@ -1,22 +1,4 @@
-mod agent;
-mod chat;
-mod cli;
-mod client;
-mod client_core;
-#[cfg(test)]
-mod corpus;
-mod engine;
-mod gfx;
-mod kitty;
-mod monitor;
-mod pane;
-mod protocol;
-mod query;
-mod server;
-mod settings;
-mod snapshot;
-mod term;
-mod theme;
+use zodiac::{cli, client, server};
 
 use anyhow::{Context, Result};
 use crossterm::event::{

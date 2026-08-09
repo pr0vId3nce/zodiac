@@ -42,6 +42,12 @@ pub struct GfxSplitter {
     carry: Vec<u8>,
 }
 
+impl Default for GfxSplitter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl GfxSplitter {
     pub fn new() -> Self {
         Self { carry: Vec::new() }

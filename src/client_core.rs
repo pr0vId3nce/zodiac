@@ -18,23 +18,23 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::protocol::{socket_path, state_dir, GfxImgHdr, PermRequest};
 
-pub(crate) const CLIENT_SCROLLBACK: usize = 10_000;
+pub const CLIENT_SCROLLBACK: usize = 10_000;
 
 /// A pane image mirrored from the server, plus the id it was transmitted
 /// to the outer terminal under (None until first needed on screen).
-pub(crate) struct CImg {
-    pub(crate) ver: u32,
-    pub(crate) format: u8,
-    pub(crate) zlib: bool,
-    pub(crate) w: u32,
-    pub(crate) h: u32,
-    pub(crate) data: Vec<u8>,
-    pub(crate) outer: Option<u32>,
+pub struct CImg {
+    pub ver: u32,
+    pub format: u8,
+    pub zlib: bool,
+    pub w: u32,
+    pub h: u32,
+    pub data: Vec<u8>,
+    pub outer: Option<u32>,
 }
 
 /// Transcript entry roles for an agent pane (`kind == "agent"`).
 #[derive(Clone, Copy, PartialEq, Debug)]
-pub(crate) enum ARole {
+pub enum ARole {
     User,
     Assistant,
     Tool,
@@ -44,25 +44,25 @@ pub(crate) enum ARole {
 /// Client-side view state for one agent pane: the parsed transcript, the
 /// streaming tail, pending permission requests, and the prompt editor.
 #[derive(Default)]
-pub(crate) struct AgentUi {
-    pub(crate) log: Vec<(ARole, String)>,
+pub struct AgentUi {
+    pub log: Vec<(ARole, String)>,
     /// Assistant text still streaming in (shown at the transcript tail
     /// until the completed block replaces it).
-    pub(crate) stream: String,
+    pub stream: String,
     /// A thinking block is open — shown as a dim marker, never as text.
-    pub(crate) thinking: bool,
+    pub thinking: bool,
     /// Wrapped-line offset from the bottom; 0 = follow the tail.
-    pub(crate) scroll: usize,
-    pub(crate) perms: Vec<PermRequest>,
-    pub(crate) input: String,
-    pub(crate) cursor: usize, // char index into `input`
+    pub scroll: usize,
+    pub perms: Vec<PermRequest>,
+    pub input: String,
+    pub cursor: usize, // char index into `input`
 }
 
 impl AgentUi {
     /// Fold one agent-native NDJSON line (ADR 0002) into the transcript.
     /// Handles both claude stream-json and pi rpc shapes; unknown types
     /// are ignored — the event stream only ever grows.
-    pub(crate) fn apply_line(&mut self, v: &serde_json::Value) {
+    pub fn apply_line(&mut self, v: &serde_json::Value) {
         let s = |v: &serde_json::Value, k: &str| -> Option<String> {
             v.get(k).and_then(|x| x.as_str()).map(str::to_string)
         };
@@ -182,7 +182,7 @@ impl AgentUi {
 /// A tool call's first input value, compacted to one short run for the
 /// transcript's "⏺ Tool(…)" line — `Bash({"command":"ls"})` reads as
 /// `Bash(ls)`.
-pub(crate) fn tool_compact(input: &serde_json::Value) -> String {
+pub fn tool_compact(input: &serde_json::Value) -> String {
     let first = match input {
         serde_json::Value::Object(m) => match m.values().next() {
             Some(v) => v,
@@ -197,44 +197,44 @@ pub(crate) fn tool_compact(input: &serde_json::Value) -> String {
     truncate(&text.replace(['\n', '\r'], " "), 48)
 }
 
-pub(crate) struct CPane {
-    pub(crate) id: u64,
-    pub(crate) name: String,
+pub struct CPane {
+    pub id: u64,
+    pub name: String,
     /// "pty" or "agent" — mirrors `PaneState.kind`. Synced from T_STATE and
     /// inferred from agent frames arriving for the pane, whichever is first.
-    pub(crate) kind: String,
+    pub kind: String,
     /// Transcript/permission/input state; only meaningful for agent panes.
-    pub(crate) agent: AgentUi,
-    pub(crate) parser: vt100::Parser,
-    pub(crate) scroll: usize,
-    pub(crate) last_output: Option<Instant>,
+    pub agent: AgentUi,
+    pub parser: vt100::Parser,
+    pub scroll: usize,
+    pub last_output: Option<Instant>,
     /// When the title last showed a braille (working) spinner frame — lets
     /// the ✳ rest frames mid-work read as working without fresh output
     /// alone doing so (see `working()`).
-    pub(crate) last_title_working: Option<Instant>,
+    pub last_title_working: Option<Instant>,
     /// Output-rate history for the card sparkline: bytes per 50s bucket,
     /// newest last, ~10 minutes deep. Client-side only — it starts fresh
     /// on attach.
-    pub(crate) rate: std::collections::VecDeque<u32>,
-    pub(crate) rate_cur: u32,
-    pub(crate) rate_bucket_start: Option<Instant>,
+    pub rate: std::collections::VecDeque<u32>,
+    pub rate_cur: u32,
+    pub rate_bucket_start: Option<Instant>,
     /// Sparkline image version + content hash — a changed history gets a
     /// fresh image id so the terminal-side cache never shows stale bars.
-    pub(crate) spark_ver: u32,
-    pub(crate) spark_hash: u64,
-    pub(crate) activity: bool,
-    pub(crate) attention: bool,
-    pub(crate) bell_count: usize,
-    pub(crate) size: (u16, u16),
+    pub spark_ver: u32,
+    pub spark_hash: u64,
+    pub activity: bool,
+    pub attention: bool,
+    pub bell_count: usize,
+    pub size: (u16, u16),
     /// Latest graphics snapshot from the server (placements + live images).
-    pub(crate) gfx: crate::gfx::GfxSnapshot,
-    pub(crate) images: std::collections::HashMap<u32, CImg>,
+    pub gfx: crate::gfx::GfxSnapshot,
+    pub images: std::collections::HashMap<u32, CImg>,
     /// Chunked T_GFX_IMG payloads still assembling.
-    pub(crate) partial: std::collections::HashMap<u32, Vec<u8>>,
+    pub partial: std::collections::HashMap<u32, Vec<u8>>,
 }
 
 impl CPane {
-    pub(crate) fn new(id: u64, name: String, rows: u16, cols: u16) -> Self {
+    pub fn new(id: u64, name: String, rows: u16, cols: u16) -> Self {
         let rows = rows.max(2);
         let cols = cols.max(10);
         Self {
@@ -261,11 +261,11 @@ impl CPane {
         }
     }
 
-    pub(crate) fn is_agent(&self) -> bool {
+    pub fn is_agent(&self) -> bool {
         self.kind == "agent"
     }
 
-    pub(crate) fn resize(&mut self, rows: u16, cols: u16) {
+    pub fn resize(&mut self, rows: u16, cols: u16) {
         if rows < 2 || cols < 10 || self.size == (rows, cols) {
             return;
         }
@@ -275,7 +275,7 @@ impl CPane {
 
     /// Roll the sparkline's 50s buckets forward to now, filling quiet
     /// stretches with zeros. Called on output and before each render.
-    pub(crate) fn rate_tick(&mut self) {
+    pub fn rate_tick(&mut self) {
         const BUCKET: Duration = Duration::from_secs(50);
         const DEPTH: usize = 12; // ~10 minutes
         let now = Instant::now();
@@ -292,25 +292,25 @@ impl CPane {
         }
     }
 
-    pub(crate) fn poll_bell(&mut self) -> bool {
+    pub fn poll_bell(&mut self) -> bool {
         let count = self.parser.screen().audible_bell_count();
         let new = count > self.bell_count;
         self.bell_count = count;
         new
     }
 
-    pub(crate) fn clear_flags(&mut self) {
+    pub fn clear_flags(&mut self) {
         self.activity = false;
         self.attention = false;
         let _ = self.poll_bell();
     }
 
-    pub(crate) fn set_scroll(&mut self, offset: usize) {
+    pub fn set_scroll(&mut self, offset: usize) {
         self.scroll = offset;
         self.parser.set_scrollback(offset);
     }
 
-    pub(crate) fn scroll_by(&mut self, delta: isize) {
+    pub fn scroll_by(&mut self, delta: isize) {
         let new = if delta < 0 {
             self.scroll.saturating_sub(delta.unsigned_abs())
         } else {
@@ -322,7 +322,7 @@ impl CPane {
     /// Fold a `T_GFX_STATE` snapshot in: adopt it and drop mirrored images
     /// the server no longer lists, pushing the outer-terminal ids they were
     /// transmitted under onto `dead` for the frontend to free.
-    pub(crate) fn apply_gfx_state(&mut self, snap: crate::gfx::GfxSnapshot, dead: &mut Vec<u32>) {
+    pub fn apply_gfx_state(&mut self, snap: crate::gfx::GfxSnapshot, dead: &mut Vec<u32>) {
         let live: std::collections::HashSet<(u32, u32)> = snap.images.iter().copied().collect();
         self.images.retain(|id, img| {
             let keep = live.contains(&(*id, img.ver));
@@ -337,7 +337,7 @@ impl CPane {
     /// Fold one `T_GFX_IMG` chunk into the reassembly buffer; a completed
     /// image replaces the mirrored copy, pushing an obsoleted outer-terminal
     /// id onto `dead` for the frontend to free.
-    pub(crate) fn apply_gfx_chunk(&mut self, hdr: &GfxImgHdr, chunk: &[u8], dead: &mut Vec<u32>) {
+    pub fn apply_gfx_chunk(&mut self, hdr: &GfxImgHdr, chunk: &[u8], dead: &mut Vec<u32>) {
         let buf = self.partial.entry(hdr.img).or_default();
         if hdr.off == 0 {
             buf.clear();
@@ -366,7 +366,7 @@ impl CPane {
     }
 }
 
-pub(crate) fn connect_or_spawn(session: &str) -> Result<UnixStream> {
+pub fn connect_or_spawn(session: &str) -> Result<UnixStream> {
     let path = socket_path(session);
     if let Ok(s) = UnixStream::connect(&path) {
         return Ok(s);
@@ -405,7 +405,7 @@ pub(crate) fn connect_or_spawn(session: &str) -> Result<UnixStream> {
     )
 }
 
-pub(crate) fn truncate(s: &str, max: usize) -> String {
+pub fn truncate(s: &str, max: usize) -> String {
     if s.chars().count() <= max {
         s.to_string()
     } else {
@@ -415,7 +415,7 @@ pub(crate) fn truncate(s: &str, max: usize) -> String {
 }
 
 /// Encodes a key event into the byte sequence a real terminal would send.
-pub(crate) fn encode_key(key: &KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
+pub fn encode_key(key: &KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
     let mods = key.modifiers;
     let ctrl = mods.contains(KeyModifiers::CONTROL);
     let alt = mods.contains(KeyModifiers::ALT);
@@ -521,7 +521,7 @@ pub(crate) fn encode_key(key: &KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
 /// protocol mode and encoding it requested via DECSET. `x`/`y` are 0-based
 /// pane-relative cells. Returns None when the mode doesn't report this kind
 /// of event (including mode None — mouse reporting off).
-pub(crate) fn encode_mouse(
+pub fn encode_mouse(
     ev: &crossterm::event::MouseEvent,
     x: u16,
     y: u16,

@@ -25,5 +25,8 @@ pub enum TermEvent {
     /// OSC 52 write: the application asked the terminal to set a clipboard
     /// (`c`/`p`/... selection, base64 payload — passed through unparsed for
     /// the embedder to gate and decode).
-    Clipboard { selection: Vec<u8>, payload: Vec<u8> },
+    Clipboard {
+        selection: Vec<u8>,
+        payload: Vec<u8>,
+    },
 }

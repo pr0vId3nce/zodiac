@@ -24,6 +24,12 @@ enum Parsed {
     Incomplete,
 }
 
+impl Default for QueryScanner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl QueryScanner {
     pub fn new() -> Self {
         Self { carry: Vec::new() }

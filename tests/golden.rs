@@ -9,10 +9,7 @@
 //! and put a `REBASELINE: <reason>` note in the commit message
 //! (docs/roadmap.md, Guardrails).
 
-#[path = "../src/corpus.rs"]
-mod corpus;
-#[path = "../src/engine.rs"]
-mod engine;
+use zodiac::{corpus, engine};
 
 use engine::{TermEngine as _, TermScreen};
 

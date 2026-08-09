@@ -1,0 +1,14 @@
+[package]
+name = "zodiac-gui"
+version = "0.1.0"
+edition = "2021"
+description = "GUI client for zodiac (roadmap Phase 3) — third client on the session socket"
+license = "MIT"
+repository = "https://github.com/pr0vId3nce/zodiac"
+readme = "README.md"
+keywords = ["terminal", "gui", "agents"]
+categories = ["gui"]
+
+[dependencies]
+zodiac = { path = ".." }
+anyhow = "1"

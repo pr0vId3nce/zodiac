@@ -5,10 +5,7 @@
 //! Lives in its own integration-test crate because it installs the global
 //! logger — nothing else here may log.
 
-#[path = "../src/corpus.rs"]
-mod corpus;
-#[path = "../src/engine.rs"]
-mod engine;
+use zodiac::{corpus, engine};
 
 use engine::TermEngine as _;
 use std::sync::Mutex;

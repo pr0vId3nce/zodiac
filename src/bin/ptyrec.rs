@@ -9,8 +9,7 @@
 //! The recording size is fixed for the whole session (no SIGWINCH
 //! handling); the resize chunk kind exists for future use.
 
-#[path = "../corpus.rs"]
-mod corpus;
+use zodiac::corpus;
 
 use std::io::{Read, Write};
 use std::process::ExitCode;

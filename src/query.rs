@@ -261,4 +261,78 @@ mod tests {
         // the dangling title set was dropped, not carried into the next chunk
         assert_eq!(q.scan(b"more\x07\x1b[c", p.screen(), (0, 0)), b"\x1b[?62;22c");
     }
+
+    /// One row per query the scanner answers (or deliberately ignores) on a
+    /// fresh default screen. Phase 1 shrinks the scanner to whatever the
+    /// replacement engine doesn't answer natively — this table is the
+    /// behavior contract it must preserve.
+    #[test]
+    fn query_reply_table() {
+        #[rustfmt::skip]
+        let cases: &[(&str, &[u8], (u16, u16), &[u8])] = &[
+            ("DA1",                 b"\x1b[c",        (0, 0),   b"\x1b[?62;22c"),
+            ("DA1 explicit 0",      b"\x1b[0c",       (0, 0),   b"\x1b[?62;22c"),
+            ("DA2",                 b"\x1b[>c",       (0, 0),   b"\x1b[>41;354;0c"),
+            ("DSR 5 device ok",     b"\x1b[5n",       (0, 0),   b"\x1b[0n"),
+            ("DSR 6 CPR",           b"\x1b[6n",       (0, 0),   b"\x1b[1;1R"),
+            ("DECXCPR",             b"\x1b[?6n",      (0, 0),   b"\x1b[?1;1R"),
+            ("DECRQM 1 app cursor", b"\x1b[?1$p",     (0, 0),   b"\x1b[?1;2$y"),
+            ("DECRQM 25 cursor",    b"\x1b[?25$p",    (0, 0),   b"\x1b[?25;1$y"),
+            ("DECRQM 1049 primary", b"\x1b[?1049$p",  (0, 0),   b"\x1b[?1049;2$y"),
+            ("DECRQM 2004 paste",   b"\x1b[?2004$p",  (0, 0),   b"\x1b[?2004;2$y"),
+            ("DECRQM 2026 sync",    b"\x1b[?2026$p",  (0, 0),   b"\x1b[?2026;0$y"),
+            ("DECRQM 1000 mouse",   b"\x1b[?1000$p",  (0, 0),   b"\x1b[?1000;0$y"),
+            ("XTVERSION",           b"\x1b[>q",       (0, 0),   b"\x1bP>|zodiac 0.1.0\x1b\\"),
+            ("XTVERSION explicit",  b"\x1b[>0q",      (0, 0),   b"\x1bP>|zodiac 0.1.0\x1b\\"),
+            ("18t chars",           b"\x1b[18t",      (0, 0),   b"\x1b[8;24;80t"),
+            ("16t cell px",         b"\x1b[16t",      (10, 20), b"\x1b[6;20;10t"),
+            ("16t no cell yet",     b"\x1b[16t",      (0, 0),   b""),
+            ("14t text px",         b"\x1b[14t",      (10, 20), b"\x1b[4;480;800t"),
+            ("14t no cell yet",     b"\x1b[14t",      (0, 0),   b""),
+            ("OSC 10 fg",           b"\x1b]10;?\x07", (0, 0),   b"\x1b]10;rgb:ffff/ffff/ffff\x1b\\"),
+            ("OSC 11 bg",           b"\x1b]11;?\x07", (0, 0),   b"\x1b]11;rgb:0000/0000/0000\x1b\\"),
+            ("XTGETTCAP",           b"\x1bP+q544e\x1b\\", (0, 0), b"\x1bP0+r\x1b\\"),
+            ("kitty kbd probe",     b"\x1b[?u",       (0, 0),   b""),
+            ("DSR bare",            b"\x1b[n",        (0, 0),   b""),
+        ];
+        for (name, input, cell, expect) in cases {
+            let p = screen();
+            let mut q = QueryScanner::new();
+            let out = q.scan(input, p.screen(), *cell);
+            assert_eq!(&out, expect, "case {name}");
+        }
+    }
+
+    /// The carry buffer must assemble a query delivered one byte per chunk —
+    /// the worst read-boundary case a slow pty can produce.
+    #[test]
+    fn byte_at_a_time_carry() {
+        let p = screen();
+        let mut q = QueryScanner::new();
+        let query = b"\x1b[?2026$p";
+        let mut out = Vec::new();
+        for b in query {
+            out.extend(q.scan(&[*b], p.screen(), (0, 0)));
+        }
+        assert_eq!(out, b"\x1b[?2026;0$y");
+    }
+
+    /// DECRQM answers must track live screen state, not defaults.
+    #[test]
+    fn decrqm_tracks_screen_state() {
+        let mut p = screen();
+        p.process(b"\x1b[?1049h\x1b[?2004h");
+        let mut q = QueryScanner::new();
+        let out = q.scan(b"\x1b[?1049$p\x1b[?2004$p", p.screen(), (0, 0));
+        assert_eq!(out, b"\x1b[?1049;1$y\x1b[?2004;1$y");
+    }
+
+    /// CPR reports the cursor where the app actually moved it.
+    #[test]
+    fn cpr_tracks_cursor_position() {
+        let mut p = screen();
+        p.process(b"\x1b[5;10H");
+        let mut q = QueryScanner::new();
+        assert_eq!(q.scan(b"\x1b[6n", p.screen(), (0, 0)), b"\x1b[5;10R");
+    }
 }

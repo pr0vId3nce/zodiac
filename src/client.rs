@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::mpsc::{channel, Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant};
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
@@ -13,12 +13,14 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::{DefaultTerminal, Frame};
 
+use crate::client_core::{connect_or_spawn, encode_key, encode_mouse, truncate, ARole, CPane};
+#[cfg(test)]
+use crate::client_core::{tool_compact, AgentUi};
 use crate::protocol::{Frame as SrvFrame, *};
-use crate::term::{encode_key, encode_mouse, TermView};
+use crate::term::TermView;
 
 const SIDEBAR_WIDTH: u16 = 24;
 const SIDEBAR_COLLAPSED: u16 = 4;
-const CLIENT_SCROLLBACK: usize = 10_000;
 
 /// How much terminal text the chat digest may carry, and how many rows
 /// each card contributes. The cap keeps a spread of busy panes from eating
@@ -394,18 +396,6 @@ impl Sel {
     }
 }
 
-/// A pane image mirrored from the server, plus the id it was transmitted
-/// to the outer terminal under (None until first needed on screen).
-struct CImg {
-    ver: u32,
-    format: u8,
-    zlib: bool,
-    w: u32,
-    h: u32,
-    data: Vec<u8>,
-    outer: Option<u32>,
-}
-
 /// One placement currently alive on the outer terminal.
 struct OuterPlaced {
     pane: u64,
@@ -427,294 +417,6 @@ struct OuterGeom {
     z: i32,
     offx: u16,
     offy: u16,
-}
-
-/// Transcript entry roles for an agent pane (`kind == "agent"`).
-#[derive(Clone, Copy, PartialEq, Debug)]
-enum ARole {
-    User,
-    Assistant,
-    Tool,
-    Error,
-}
-
-/// Client-side view state for one agent pane: the parsed transcript, the
-/// streaming tail, pending permission requests, and the prompt editor.
-#[derive(Default)]
-struct AgentUi {
-    log: Vec<(ARole, String)>,
-    /// Assistant text still streaming in (shown at the transcript tail
-    /// until the completed block replaces it).
-    stream: String,
-    /// A thinking block is open — shown as a dim marker, never as text.
-    thinking: bool,
-    /// Wrapped-line offset from the bottom; 0 = follow the tail.
-    scroll: usize,
-    perms: Vec<PermRequest>,
-    input: String,
-    cursor: usize, // char index into `input`
-}
-
-impl AgentUi {
-    /// Fold one agent-native NDJSON line (ADR 0002) into the transcript.
-    /// Handles both claude stream-json and pi rpc shapes; unknown types
-    /// are ignored — the event stream only ever grows.
-    fn apply_line(&mut self, v: &serde_json::Value) {
-        let s = |v: &serde_json::Value, k: &str| -> Option<String> {
-            v.get(k).and_then(|x| x.as_str()).map(str::to_string)
-        };
-        match v.get("type").and_then(|t| t.as_str()) {
-            Some("zodiac_user") => {
-                if let Some(t) = s(v, "text") {
-                    self.log.push((ARole::User, t));
-                }
-            }
-            Some("assistant") => {
-                let blocks = v
-                    .get("message")
-                    .and_then(|m| m.get("content"))
-                    .and_then(|c| c.as_array());
-                for b in blocks.into_iter().flatten() {
-                    match b.get("type").and_then(|t| t.as_str()) {
-                        Some("text") => {
-                            if let Some(t) = s(b, "text") {
-                                self.log.push((ARole::Assistant, t));
-                            }
-                            // The completed block replaces the partial.
-                            self.stream.clear();
-                            self.thinking = false;
-                        }
-                        Some("tool_use") => {
-                            let name = s(b, "name").unwrap_or_else(|| "tool".into());
-                            let arg = b.get("input").map(tool_compact).unwrap_or_default();
-                            self.log.push((ARole::Tool, format!("{name}({arg})")));
-                        }
-                        _ => {}
-                    }
-                }
-            }
-            Some("stream_event") => {
-                let Some(ev) = v.get("event") else { return };
-                match ev.get("type").and_then(|t| t.as_str()) {
-                    Some("content_block_start") => {
-                        self.thinking = ev
-                            .get("content_block")
-                            .and_then(|b| b.get("type"))
-                            .and_then(|t| t.as_str())
-                            == Some("thinking");
-                    }
-                    Some("content_block_delta") => {
-                        let Some(d) = ev.get("delta") else { return };
-                        match d.get("type").and_then(|t| t.as_str()) {
-                            Some("text_delta") => {
-                                if let Some(t) = d.get("text").and_then(|t| t.as_str()) {
-                                    self.stream.push_str(t);
-                                }
-                                self.thinking = false;
-                            }
-                            Some("thinking_delta") => self.thinking = true,
-                            _ => {}
-                        }
-                    }
-                    Some("message_stop") => {
-                        self.stream.clear();
-                        self.thinking = false;
-                    }
-                    _ => {}
-                }
-            }
-            Some("result") => {
-                if v.get("is_error").and_then(|e| e.as_bool()) == Some(true) {
-                    let msg = s(v, "result").unwrap_or_else(|| "turn failed".into());
-                    self.log.push((ARole::Error, msg));
-                }
-                self.stream.clear();
-                self.thinking = false;
-            }
-            Some("zodiac_perm_resolved") => {
-                if let Some(rid) = s(v, "request_id") {
-                    self.perms.retain(|p| p.request_id != rid);
-                }
-            }
-            // pi rpc shapes (ADR 0002).
-            Some("message_end") => {
-                let Some(m) = v.get("message") else { return };
-                if m.get("role").and_then(|r| r.as_str()) != Some("assistant") {
-                    return;
-                }
-                for b in m
-                    .get("content")
-                    .and_then(|c| c.as_array())
-                    .into_iter()
-                    .flatten()
-                {
-                    if b.get("type").and_then(|t| t.as_str()) == Some("text") {
-                        if let Some(t) = s(b, "text") {
-                            self.log.push((ARole::Assistant, t));
-                        }
-                    }
-                }
-                self.stream.clear();
-                self.thinking = false;
-            }
-            Some("message_update") => {
-                let Some(ev) = v.get("assistantMessageEvent") else {
-                    return;
-                };
-                if ev.get("type").and_then(|t| t.as_str()) == Some("text_delta") {
-                    if let Some(t) = ev.get("delta").and_then(|d| d.as_str()) {
-                        self.stream.push_str(t);
-                    }
-                }
-            }
-            Some("turn_end") | Some("agent_end") => {
-                self.stream.clear();
-                self.thinking = false;
-            }
-            _ => {}
-        }
-    }
-}
-
-/// A tool call's first input value, compacted to one short run for the
-/// transcript's "⏺ Tool(…)" line — `Bash({"command":"ls"})` reads as
-/// `Bash(ls)`.
-fn tool_compact(input: &serde_json::Value) -> String {
-    let first = match input {
-        serde_json::Value::Object(m) => match m.values().next() {
-            Some(v) => v,
-            None => return String::new(),
-        },
-        v => v,
-    };
-    let text = match first {
-        serde_json::Value::String(s) => s.clone(),
-        v => v.to_string(),
-    };
-    truncate(&text.replace(['\n', '\r'], " "), 48)
-}
-
-struct CPane {
-    id: u64,
-    name: String,
-    /// "pty" or "agent" — mirrors `PaneState.kind`. Synced from T_STATE and
-    /// inferred from agent frames arriving for the pane, whichever is first.
-    kind: String,
-    /// Transcript/permission/input state; only meaningful for agent panes.
-    agent: AgentUi,
-    parser: vt100::Parser,
-    scroll: usize,
-    last_output: Option<Instant>,
-    /// When the title last showed a braille (working) spinner frame — lets
-    /// the ✳ rest frames mid-work read as working without fresh output
-    /// alone doing so (see `working()`).
-    last_title_working: Option<Instant>,
-    /// Output-rate history for the card sparkline: bytes per 50s bucket,
-    /// newest last, ~10 minutes deep. Client-side only — it starts fresh
-    /// on attach.
-    rate: std::collections::VecDeque<u32>,
-    rate_cur: u32,
-    rate_bucket_start: Option<Instant>,
-    /// Sparkline image version + content hash — a changed history gets a
-    /// fresh image id so the terminal-side cache never shows stale bars.
-    spark_ver: u32,
-    spark_hash: u64,
-    activity: bool,
-    attention: bool,
-    bell_count: usize,
-    size: (u16, u16),
-    /// Latest graphics snapshot from the server (placements + live images).
-    gfx: crate::gfx::GfxSnapshot,
-    images: std::collections::HashMap<u32, CImg>,
-    /// Chunked T_GFX_IMG payloads still assembling.
-    partial: std::collections::HashMap<u32, Vec<u8>>,
-}
-
-impl CPane {
-    fn new(id: u64, name: String, rows: u16, cols: u16) -> Self {
-        let rows = rows.max(2);
-        let cols = cols.max(10);
-        Self {
-            id,
-            name,
-            kind: "pty".into(),
-            agent: AgentUi::default(),
-            parser: vt100::Parser::new(rows, cols, CLIENT_SCROLLBACK),
-            scroll: 0,
-            last_output: None,
-            last_title_working: None,
-            rate: std::collections::VecDeque::new(),
-            rate_cur: 0,
-            rate_bucket_start: None,
-            spark_ver: 0,
-            spark_hash: 0,
-            activity: false,
-            attention: false,
-            bell_count: 0,
-            size: (rows, cols),
-            gfx: crate::gfx::GfxSnapshot::default(),
-            images: std::collections::HashMap::new(),
-            partial: std::collections::HashMap::new(),
-        }
-    }
-
-    fn is_agent(&self) -> bool {
-        self.kind == "agent"
-    }
-
-    fn resize(&mut self, rows: u16, cols: u16) {
-        if rows < 2 || cols < 10 || self.size == (rows, cols) {
-            return;
-        }
-        self.size = (rows, cols);
-        self.parser.set_size(rows, cols);
-    }
-
-    /// Roll the sparkline's 50s buckets forward to now, filling quiet
-    /// stretches with zeros. Called on output and before each render.
-    fn rate_tick(&mut self) {
-        const BUCKET: Duration = Duration::from_secs(50);
-        const DEPTH: usize = 12; // ~10 minutes
-        let now = Instant::now();
-        let start = *self.rate_bucket_start.get_or_insert(now);
-        let mut elapsed = now.duration_since(start);
-        while elapsed >= BUCKET {
-            self.rate.push_back(self.rate_cur);
-            self.rate_cur = 0;
-            if self.rate.len() > DEPTH {
-                self.rate.pop_front();
-            }
-            self.rate_bucket_start = Some(self.rate_bucket_start.unwrap() + BUCKET);
-            elapsed -= BUCKET;
-        }
-    }
-
-    fn poll_bell(&mut self) -> bool {
-        let count = self.parser.screen().audible_bell_count();
-        let new = count > self.bell_count;
-        self.bell_count = count;
-        new
-    }
-
-    fn clear_flags(&mut self) {
-        self.activity = false;
-        self.attention = false;
-        let _ = self.poll_bell();
-    }
-
-    fn set_scroll(&mut self, offset: usize) {
-        self.scroll = offset;
-        self.parser.set_scrollback(offset);
-    }
-
-    fn scroll_by(&mut self, delta: isize) {
-        let new = if delta < 0 {
-            self.scroll.saturating_sub(delta.unsigned_abs())
-        } else {
-            (self.scroll + delta as usize).min(CLIENT_SCROLLBACK)
-        };
-        self.set_scroll(new);
-    }
 }
 
 struct App {
@@ -1105,45 +807,6 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
         let _ = out.flush();
     }
     Ok(app.exit_msg)
-}
-
-fn connect_or_spawn(session: &str) -> Result<UnixStream> {
-    let path = socket_path(session);
-    if let Ok(s) = UnixStream::connect(&path) {
-        return Ok(s);
-    }
-    let exe = std::env::current_exe()?;
-    let logdir = state_dir(session);
-    std::fs::create_dir_all(&logdir)?;
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(logdir.join("server.log"))?;
-    let log2 = log.try_clone()?;
-    let mut cmd = std::process::Command::new(exe);
-    cmd.arg("--server")
-        .arg(session)
-        .stdin(std::process::Stdio::null())
-        .stdout(log)
-        .stderr(log2);
-    unsafe {
-        use std::os::unix::process::CommandExt;
-        cmd.pre_exec(|| {
-            libc::setsid();
-            Ok(())
-        });
-    }
-    cmd.spawn()?;
-    for _ in 0..50 {
-        std::thread::sleep(Duration::from_millis(100));
-        if let Ok(s) = UnixStream::connect(&path) {
-            return Ok(s);
-        }
-    }
-    bail!(
-        "zodiac server did not start (see {})",
-        logdir.join("server.log").display()
-    )
 }
 
 /// Reads `(url, cid, name)` from the astrolabe bridge's
@@ -1672,16 +1335,7 @@ impl App {
                 if let Ok(snap) = serde_json::from_slice::<crate::gfx::GfxSnapshot>(&f.data) {
                     let mut dead = Vec::new();
                     if let Some(p) = self.pane_by_id(f.id) {
-                        let live: std::collections::HashSet<(u32, u32)> =
-                            snap.images.iter().copied().collect();
-                        p.images.retain(|id, img| {
-                            let keep = live.contains(&(*id, img.ver));
-                            if !keep {
-                                dead.extend(img.outer);
-                            }
-                            keep
-                        });
-                        p.gfx = snap;
+                        p.apply_gfx_state(snap, &mut dead);
                     }
                     self.outer_dead.extend(dead);
                 }
@@ -1691,31 +1345,7 @@ impl App {
                     let chunk = &f.data[GFX_IMG_HDR..];
                     let mut dead = Vec::new();
                     if let Some(p) = self.pane_by_id(f.id) {
-                        let buf = p.partial.entry(hdr.img).or_default();
-                        if hdr.off == 0 {
-                            buf.clear();
-                        }
-                        buf.extend_from_slice(chunk);
-                        if buf.len() as u32 >= hdr.total {
-                            let data = std::mem::take(buf);
-                            p.partial.remove(&hdr.img);
-                            // a retransmitted image obsoletes its outer copy
-                            if let Some(old) = p.images.get(&hdr.img).and_then(|i| i.outer) {
-                                dead.push(old);
-                            }
-                            p.images.insert(
-                                hdr.img,
-                                CImg {
-                                    ver: hdr.ver,
-                                    format: hdr.format,
-                                    zlib: hdr.zlib,
-                                    w: hdr.w,
-                                    h: hdr.h,
-                                    data,
-                                    outer: None,
-                                },
-                            );
-                        }
+                        p.apply_gfx_chunk(&hdr, chunk, &mut dead);
                     }
                     self.outer_dead.extend(dead);
                 }
@@ -7559,15 +7189,6 @@ fn ago(unix_secs: u64) -> String {
         _ => (secs / 86400, "day"),
     };
     format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" })
-}
-
-fn truncate(s: &str, max: usize) -> String {
-    if s.chars().count() <= max {
-        s.to_string()
-    } else {
-        let cut: String = s.chars().take(max.saturating_sub(1)).collect();
-        format!("{cut}…")
-    }
 }
 
 /// Byte offset of the `ci`-th char (== s.len() past the end) — the agent

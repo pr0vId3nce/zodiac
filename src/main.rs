@@ -2,6 +2,7 @@ mod agent;
 mod chat;
 mod cli;
 mod client;
+mod client_core;
 #[cfg(test)]
 mod corpus;
 mod engine;

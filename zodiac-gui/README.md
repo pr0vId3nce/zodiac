@@ -46,14 +46,26 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
 ## Keys / settings
 
 - **Ctrl+PageUp / Ctrl+PageDown** — previous / next pane.
+- **Alt+←/→** (top tabs) or **Alt+↑/↓** (side tabs) — previous / next pane.
 - **Alt+1 … Alt+9** — jump straight to a pane by number.
+- **Alt+N** — new shell pane; **Alt+Shift+N** — new claude agent pane.
 - **Ctrl+S** — open the fullscreen settings page (Esc closes). ↑/↓ select a
   row, ←/→ or Enter cycle its value; changes persist to
   `~/.config/zodiac/config.json` and apply live.
-- Current settings: **Pane tabs** — `top` (a bar across the top) or `side`
-  (a left column, like the TUI sidebar). A placeholder page; more settings
-  land here over time. The `gui_tabs` key is GUI-only (the TUI/server
-  ignore it).
+
+Settings rows (all GUI-only keys the TUI/server ignore):
+
+- **Pane tabs** — `top` (bar across the top) or `side` (left column).
+- **Background** — backdrop preset: `oled` (#000, default), `charcoal`,
+  `midnight`, `slate`.
+- **Scale** — font scale 75%–200% (on top of the OS scale factor).
+- **Tab markers** — the glyph before each tab name: `dots`, `arabic`,
+  `roman`, or `zodiac` (white/text-presentation sigils, ♈–♓).
+- **Spinner position** — while a tab's agent is working a braille spinner
+  shows: `replace` the marker, `both`, or at the `end` of the title.
+- **Spinner color** / **Glow color** — named colors.
+- **Glow speed** — the bright band sweeping over a working tab's title:
+  `off`, `slow`, `normal`, `fast`, `zippy`.
 
 ## Fonts
 

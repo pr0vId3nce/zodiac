@@ -107,6 +107,22 @@ pub struct Settings {
     /// the TUI's sidebar). Ignored by the TUI/server.
     #[serde(default)]
     pub gui_tabs: String,
+    /// GUI backdrop preset: "oled" (#000, default), "charcoal", "midnight",
+    /// "slate". GUI-only.
+    #[serde(default)]
+    pub gui_bg: String,
+    /// GUI font scale as a percent string ("100%", "125%", …). GUI-only.
+    #[serde(default)]
+    pub gui_scale: String,
+    /// GUI tab marker glyphs: "dots" (default), "arabic", "roman", "zodiac"
+    /// (white/text-presentation sigils). GUI-only.
+    #[serde(default)]
+    pub gui_tab_marker: String,
+    /// Where the braille spinner sits on a working GUI tab: "replace" (the
+    /// marker, default), "both" (marker + spinner), or "end" (after the
+    /// title). GUI-only.
+    #[serde(default)]
+    pub gui_spinner_pos: String,
     /// Hide the keybinding hints in the bottom status bar (they stay
     /// visible in the settings page's Controls column).
     #[serde(default)]
@@ -254,6 +270,45 @@ impl Settings {
         match self.gui_tabs.as_str() {
             "side" => "side",
             _ => "top",
+        }
+    }
+
+    /// GUI backdrop preset name (default "oled"). The GUI maps it to RGB.
+    pub fn gui_bg(&self) -> &str {
+        match self.gui_bg.as_str() {
+            "charcoal" => "charcoal",
+            "midnight" => "midnight",
+            "slate" => "slate",
+            _ => "oled",
+        }
+    }
+
+    /// GUI font-scale multiplier parsed from the percent string (default 1.0).
+    /// Clamped to a sane 0.5–3.0 so a bad value can't make the grid unusable.
+    pub fn gui_scale(&self) -> f32 {
+        self.gui_scale
+            .trim_end_matches('%')
+            .parse::<f32>()
+            .map(|p| (p / 100.0).clamp(0.5, 3.0))
+            .unwrap_or(1.0)
+    }
+
+    /// GUI tab marker style (default "dots").
+    pub fn gui_tab_marker(&self) -> &str {
+        match self.gui_tab_marker.as_str() {
+            "arabic" => "arabic",
+            "roman" => "roman",
+            "zodiac" => "zodiac",
+            _ => "dots",
+        }
+    }
+
+    /// GUI working-tab spinner position (default "replace").
+    pub fn gui_spinner_pos(&self) -> &str {
+        match self.gui_spinner_pos.as_str() {
+            "both" => "both",
+            "end" => "end",
+            _ => "replace",
         }
     }
 

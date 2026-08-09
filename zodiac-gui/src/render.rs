@@ -14,7 +14,7 @@
 use std::collections::HashMap;
 use std::hash::{DefaultHasher, Hash, Hasher};
 use std::sync::Arc;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use glyphon::{
     Attrs, Buffer as TextBuffer, Cache, Color as TextColor, Family, FontSystem, Metrics,
@@ -27,7 +27,7 @@ use zodiac::protocol::SessionState;
 
 use crate::anim::AnimStore;
 use crate::font::{Fonts, FONT_PX};
-use crate::palette::{self, CellStyle, ACCENT, CHROME_BG, CHROME_FG, DEFAULT_BG, DEFAULT_FG};
+use crate::palette::{self, CellStyle, ACCENT, CHROME_BG, CHROME_FG, DEFAULT_FG};
 
 const RECT_WGSL: &str = r#"
 struct Globals { res: vec2f, _pad: vec2f }
@@ -209,6 +209,30 @@ pub struct SettingsView<'a> {
     pub cursor: usize,
 }
 
+/// Tab marker/spinner/glow styling, pushed in from settings.
+pub struct TabStyle {
+    /// "dots" | "arabic" | "roman" | "zodiac".
+    pub marker: String,
+    /// "replace" | "both" | "end".
+    pub spinner_pos: String,
+    pub spinner_color: [u8; 3],
+    pub glow_color: [u8; 3],
+    /// Glow sweep period in ms; None = glow off.
+    pub glow_period: Option<u64>,
+}
+
+impl Default for TabStyle {
+    fn default() -> Self {
+        Self {
+            marker: "dots".into(),
+            spinner_pos: "replace".into(),
+            spinner_color: [255, 135, 0], // orange
+            glow_color: [255, 255, 255],  // white
+            glow_period: Some(2000),      // normal
+        }
+    }
+}
+
 /// What one redraw hands back to the app.
 #[derive(Default)]
 pub struct FrameOut {
@@ -264,6 +288,15 @@ pub struct Renderer {
     /// 0. Set at the top of each `render()` and read by the grid/image/
     /// agent builders so one value moves the whole content region.
     ox: f32,
+    /// Window backdrop (the render-pass clear color); default OLED black.
+    /// Default-bg cells emit no quad, so this is the visible pane backdrop.
+    bg: [u8; 3],
+    /// User font-scale multiplier (settings), on top of the OS scale factor.
+    user_scale: f32,
+    /// Tab marker/spinner/glow styling (settings).
+    tab_style: TabStyle,
+    /// Clock for the working-tab spinner + glow animation.
+    start: Instant,
     grid_sig: u64,
     top_sig: u64,
     bottom_sig: u64,
@@ -525,6 +558,10 @@ impl Renderer {
             cell,
             tab_side: false,
             ox: 0.0,
+            bg: [0, 0, 0],
+            user_scale: 1.0,
+            tab_style: TabStyle::default(),
+            start: Instant::now(),
             grid_sig: 0,
             top_sig: 0,
             bottom_sig: 0,
@@ -548,9 +585,11 @@ impl Renderer {
             .write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
     }
 
-    /// Re-measure the font at a new scale factor and reset the text
-    /// buffers' metrics; every signature is invalidated.
-    pub fn set_scale(&mut self, scale: f32) {
+    /// Re-measure the font at a new OS scale factor (folding in the user
+    /// scale multiplier) and reset the text buffers' metrics; every
+    /// signature is invalidated.
+    pub fn set_scale(&mut self, os_scale: f32) {
+        let scale = os_scale * self.user_scale;
         self.cell = self.fonts.cell_size(scale);
         let metrics = Metrics::new(FONT_PX * scale, self.cell.1);
         for b in [
@@ -567,6 +606,30 @@ impl Renderer {
         self.bottom_sig = 0;
         self.input_sig = 0;
         self.modal_sig = 0;
+    }
+
+    /// Set the window backdrop (settings). Cheap — used as the clear color.
+    pub fn set_bg(&mut self, bg: [u8; 3]) {
+        self.bg = bg;
+    }
+
+    /// Set tab marker/spinner/glow styling (settings). Invalidates the tab
+    /// signature so the bar re-lays out.
+    pub fn set_tab_style(&mut self, style: TabStyle) {
+        self.tab_style = style;
+        self.top_sig = 0;
+    }
+
+    /// Set the user font-scale multiplier (settings) and re-measure metrics
+    /// at `os_scale * user_scale`. No-op when unchanged.
+    pub fn set_user_scale(&mut self, mult: f32) {
+        let mult = mult.clamp(0.5, 3.0);
+        if (mult - self.user_scale).abs() < f32::EPSILON {
+            return;
+        }
+        self.user_scale = mult;
+        let os = self.window.scale_factor() as f32;
+        self.set_scale(os * mult);
     }
 
     /// Toggle side vs top pane tabs (persisted setting). Invalidates the
@@ -752,6 +815,9 @@ impl Renderer {
         let mut x = 0.0f32;
         let mut top_sig_h = DefaultHasher::new();
         side.hash(&mut top_sig_h);
+        let elapsed_ms = now.saturating_duration_since(self.start).as_millis() as u64;
+        let ts = &self.tab_style;
+        let mut any_working = false;
         for (i, p) in panes.iter().enumerate() {
             let status = state
                 .and_then(|s| s.panes.iter().find(|sp| sp.id == p.id))
@@ -763,6 +829,8 @@ impl Renderer {
                 "done" => [120, 220, 120],
                 _ => [110, 110, 125],
             };
+            let working = status == "working";
+            any_working |= working;
             let cap = if side {
                 SIDE_TAB_COLS.saturating_sub(4)
             } else {
@@ -770,6 +838,51 @@ impl Renderer {
             };
             let name: String = p.name.chars().filter(|c| *c != '\n').take(cap).collect();
             let fg = if i == active { DEFAULT_FG } else { CHROME_FG };
+            let spinner = crate::palette::spinner_frame(elapsed_ms);
+
+            // Build the tab's spans and its visible cell width. `vis` skips
+            // the zero-width text-presentation selector so widths stay exact.
+            let mut spans: Vec<(String, [u8; 3], bool)> = Vec::new();
+            let mut vis = 0usize;
+            let mut push = |s: &str, color: [u8; 3], bold: bool| {
+                vis += s.chars().filter(|c| *c != '\u{FE0E}').count();
+                spans.push((s.to_string(), color, bold));
+            };
+            // Leading glyph: marker, spinner, or both (per gui_spinner_pos).
+            push(" ", fg, false);
+            if working && ts.spinner_pos == "replace" {
+                push(spinner, ts.spinner_color, false);
+            } else {
+                push(&crate::palette::marker(&ts.marker, i + 1), dot, false);
+                if working && ts.spinner_pos == "both" {
+                    push(" ", fg, false);
+                    push(spinner, ts.spinner_color, false);
+                }
+            }
+            push(" ", fg, false);
+            // Title: glow sweep while working (unless glow off), else plain.
+            match (working, ts.glow_period) {
+                (true, Some(period)) => {
+                    let phase = (elapsed_ms % period) as f32 / period as f32;
+                    let chars: Vec<char> = name.chars().collect();
+                    let n = chars.len();
+                    for (ci, c) in chars.into_iter().enumerate() {
+                        let col = crate::palette::glow_color_at(ci, n, phase, fg, ts.glow_color);
+                        push(&c.to_string(), col, i == active);
+                    }
+                }
+                _ => push(&name, fg, i == active),
+            }
+            // Trailing spinner when positioned at the end.
+            if working && ts.spinner_pos == "end" {
+                push(" ", fg, false);
+                push(spinner, ts.spinner_color, false);
+            }
+            if !side {
+                push(" ", fg, false);
+            }
+
+            // Lay the spans out per orientation.
             if side {
                 let y = i as f32 * ch;
                 if i == active {
@@ -779,27 +892,20 @@ impl Renderer {
                         color: rgba([45, 45, 62], 1.0),
                     });
                 }
-                top_rt.push(
-                    " ●",
-                    SpanAttr {
-                        color: dot,
-                        bold: false,
-                        italic: false,
-                    },
-                );
-                top_rt.push(
-                    &format!(" {name}"),
-                    SpanAttr {
-                        color: fg,
-                        bold: i == active,
-                        italic: false,
-                    },
-                );
+                for (s, color, bold) in &spans {
+                    top_rt.push(
+                        s,
+                        SpanAttr {
+                            color: *color,
+                            bold: *bold,
+                            italic: false,
+                        },
+                    );
+                }
                 top_rt.push_raw("\n");
                 out.tab_hits.push((i, [0.0, y, ox, y + ch]));
             } else {
-                let chars = 2 + 1 + name.chars().count() + 1;
-                let width = chars as f32 * cw;
+                let width = vis as f32 * cw;
                 if i == active {
                     rects_under.push(RectInst {
                         pos: [x, 0.0],
@@ -807,28 +913,30 @@ impl Renderer {
                         color: rgba([45, 45, 62], 1.0),
                     });
                 }
-                top_rt.push(
-                    " ●",
-                    SpanAttr {
-                        color: dot,
-                        bold: false,
-                        italic: false,
-                    },
-                );
-                top_rt.push(
-                    &format!(" {name} "),
-                    SpanAttr {
-                        color: fg,
-                        bold: i == active,
-                        italic: false,
-                    },
-                );
+                for (s, color, bold) in &spans {
+                    top_rt.push(
+                        s,
+                        SpanAttr {
+                            color: *color,
+                            bold: *bold,
+                            italic: false,
+                        },
+                    );
+                }
                 out.tab_hits.push((i, [x, 0.0, x + width, ch]));
                 x += width;
             }
             (i == active, status, &name).hash(&mut top_sig_h);
         }
         cols.hash(&mut top_sig_h);
+        // While a tab works, the spinner + glow change every frame: fold a
+        // ~30fps tick into the signature so the bar re-shapes, and ask for a
+        // redraw at the next tick. Idle tabs keep the cached shaping.
+        if any_working {
+            (elapsed_ms / 33).hash(&mut top_sig_h);
+            let next = now + Duration::from_millis(33);
+            out.next_anim = Some(out.next_anim.map_or(next, |x| x.min(next)));
+        }
         let top_sig = top_sig_h.finish();
         if top_sig != self.top_sig {
             self.top_sig = top_sig;
@@ -1224,7 +1332,7 @@ impl Renderer {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
-            let bg = rgba(DEFAULT_BG, 1.0);
+            let bg = rgba(self.bg, 1.0);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: None,
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1480,7 +1588,7 @@ impl Renderer {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor { label: None });
         {
-            let bg = rgba(DEFAULT_BG, 1.0);
+            let bg = rgba(self.bg, 1.0);
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("settings"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {

@@ -317,23 +317,61 @@ impl GuiApp {
 
     // ------------------------------------------------------------- input
 
-    /// The settings rows and their presets. A placeholder list for now —
-    /// add a `(label, values)` entry plus arms in `setting_sel`/`set_setting`.
-    const SETTING_SPECS: &'static [(&'static str, &'static [&'static str])] =
-        &[("Pane tabs", &["top", "side"])];
+    /// The settings rows and their presets. Each row maps to a persisted
+    /// field via `setting_sel`/`set_setting` (matched by index).
+    const SETTING_SPECS: &'static [(&'static str, &'static [&'static str])] = &[
+        ("Pane tabs", &["top", "side"]),
+        ("Background", &["oled", "charcoal", "midnight", "slate"]),
+        (
+            "Scale",
+            &["75%", "90%", "100%", "110%", "125%", "150%", "175%", "200%"],
+        ),
+        ("Tab markers", &["dots", "arabic", "roman", "zodiac"]),
+        ("Spinner position", &["replace", "both", "end"]),
+        ("Spinner color", crate::palette::COLOR_NAMES),
+        ("Glow color", crate::palette::COLOR_NAMES),
+        ("Glow speed", &["off", "slow", "normal", "fast", "zippy"]),
+    ];
+
+    /// Index of `cur` in row `row`'s preset list, falling back to `default`.
+    fn spec_idx(row: usize, cur: &str, default: usize) -> usize {
+        Self::SETTING_SPECS[row]
+            .1
+            .iter()
+            .position(|v| *v == cur)
+            .unwrap_or(default)
+    }
 
     /// Current preset index for setting `row`.
     fn setting_sel(&self, row: usize) -> usize {
+        let s = &self.settings;
         match row {
-            0 => usize::from(self.settings.gui_tabs() == "side"),
+            0 => usize::from(s.gui_tabs() == "side"),
+            1 => Self::spec_idx(1, s.gui_bg(), 0), // oled
+            2 => Self::spec_idx(2, s.gui_scale.as_str(), 2), // 100%
+            3 => Self::spec_idx(3, s.gui_tab_marker(), 0), // dots
+            4 => Self::spec_idx(4, s.gui_spinner_pos(), 0), // replace
+            5 => Self::spec_idx(5, s.spinner_color.as_str(), 0), // orange
+            6 => Self::spec_idx(6, s.shimmer_color.as_str(), 8), // white
+            7 => Self::spec_idx(7, s.shimmer_speed.as_str(), 2), // normal
             _ => 0,
         }
     }
 
     /// Store preset `sel` for setting `row` (does not persist/apply).
     fn set_setting(&mut self, row: usize, sel: usize) {
-        if row == 0 {
-            self.settings.gui_tabs = if sel == 1 { "side" } else { "top" }.into();
+        let val = Self::SETTING_SPECS[row].1[sel].to_string();
+        let s = &mut self.settings;
+        match row {
+            0 => s.gui_tabs = val,
+            1 => s.gui_bg = val,
+            2 => s.gui_scale = val,
+            3 => s.gui_tab_marker = val,
+            4 => s.gui_spinner_pos = val,
+            5 => s.spinner_color = val,
+            6 => s.shimmer_color = val,
+            7 => s.shimmer_speed = val,
+            _ => {}
         }
     }
 
@@ -364,15 +402,29 @@ impl GuiApp {
     }
 
     /// Push the current settings into the renderer and resend the grid size
-    /// (tab placement changes the usable grid area).
+    /// (tab placement and scale both change the usable grid area).
     fn apply_settings(&mut self) {
-        let side = self.settings.gui_tabs() == "side";
+        let s = &self.settings;
+        let side = s.gui_tabs() == "side";
+        let bg = crate::palette::bg_color(s.gui_bg());
+        let scale = s.gui_scale();
+        let style = crate::render::TabStyle {
+            marker: s.gui_tab_marker().to_string(),
+            spinner_pos: s.gui_spinner_pos().to_string(),
+            spinner_color: crate::palette::named_color(&s.spinner_color, [255, 135, 0]),
+            glow_color: crate::palette::named_color(&s.shimmer_color, [255, 255, 255]),
+            glow_period: crate::palette::glow_period_ms(&s.shimmer_speed),
+        };
         if let Some(r) = self.renderer.as_mut() {
             r.set_tab_side(side);
+            r.set_bg(bg);
+            r.set_user_scale(scale);
+            r.set_tab_style(style);
         }
-        // Grid dimensions changed under the new chrome — re-announce.
+        // Grid dimensions may have changed under the new chrome/scale.
         self.sent_grid = (0, 0);
         self.sync_size();
+        self.request_redraw();
     }
 
     fn settings_key(&mut self, key: &Key) {
@@ -415,6 +467,40 @@ impl GuiApp {
         if self.settings_open {
             self.settings_key(&ev.logical_key);
             return;
+        }
+        // Alt tab navigation + new-pane shortcuts.
+        if self.mods.alt_key() {
+            let n = self.panes.len();
+            let side = self.settings.gui_tabs() == "side";
+            let prev = |me: &mut Self| {
+                if n > 0 {
+                    me.focus((me.active + n - 1) % n);
+                    me.request_redraw();
+                }
+            };
+            let next = |me: &mut Self| {
+                if n > 0 {
+                    me.focus((me.active + 1) % n);
+                    me.request_redraw();
+                }
+            };
+            match &ev.logical_key {
+                // Arrow nav: horizontal for top tabs, vertical for side.
+                Key::Named(NamedKey::ArrowLeft) if !side => return prev(self),
+                Key::Named(NamedKey::ArrowRight) if !side => return next(self),
+                Key::Named(NamedKey::ArrowUp) if side => return prev(self),
+                Key::Named(NamedKey::ArrowDown) if side => return next(self),
+                // Alt+N new shell pane; Alt+Shift+N new claude agent pane.
+                Key::Character(s) if s.eq_ignore_ascii_case("n") => {
+                    if self.mods.shift_key() {
+                        self.send(T_NEW_PANE, 0, br#"{"kind":"agent","agent":"claude"}"#);
+                    } else {
+                        self.send(T_NEW_PANE, 0, &[]);
+                    }
+                    return;
+                }
+                _ => {}
+            }
         }
         // Alt+1..9 jumps straight to a pane (Alt+1 = first).
         if self.mods.alt_key() {
@@ -844,11 +930,11 @@ impl ApplicationHandler<UserEvent> for GuiApp {
         window.set_ime_allowed(true);
         let fonts = self.fonts.take().expect("fonts consumed once");
         match Renderer::new(window, fonts) {
-            Ok(mut r) => {
-                // Honor the saved tab placement before the first sync/draw.
-                r.set_tab_side(self.settings.gui_tabs() == "side");
+            Ok(r) => {
                 self.renderer = Some(r);
-                self.sync_size();
+                // Honor all saved settings (tabs, bg, scale, tab style)
+                // before the first sync/draw; also sends the grid size.
+                self.apply_settings();
                 self.request_redraw();
             }
             Err(e) => {

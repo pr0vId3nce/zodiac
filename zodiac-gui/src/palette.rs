@@ -11,6 +11,118 @@ pub const ACCENT: [u8; 3] = [130, 170, 255];
 pub const CHROME_BG: [u8; 3] = [24, 24, 32];
 pub const CHROME_FG: [u8; 3] = [150, 150, 160];
 
+// --- Named colors (ported from the TUI's COLOR_CHOICES) -------------------
+// Spinner + glow color pickers cycle through these in order.
+pub const COLOR_NAMES: &[&str] = &[
+    "orange", "gold", "cyan", "blue", "violet", "pink", "green", "red", "white", "gray", "dark",
+];
+
+/// A named color's RGB, defaulting to `default` when unknown.
+pub fn named_color(name: &str, default: [u8; 3]) -> [u8; 3] {
+    match name {
+        "orange" => [255, 135, 0],
+        "gold" => [255, 215, 0],
+        "cyan" => [0, 215, 255],
+        "blue" => [95, 175, 255],
+        "violet" => [175, 95, 255],
+        "pink" => [255, 95, 175],
+        "green" => [135, 215, 135],
+        "red" => [255, 95, 135],
+        "white" => [255, 255, 255],
+        "gray" => [138, 138, 138],
+        "dark" => [98, 98, 98],
+        _ => default,
+    }
+}
+
+// --- Background presets ----------------------------------------------------
+/// GUI backdrop presets (name, RGB). OLED true-black is the default.
+pub const BG_PRESETS: &[(&str, [u8; 3])] = &[
+    ("oled", [0, 0, 0]),
+    ("charcoal", [13, 13, 18]),
+    ("midnight", [10, 12, 20]),
+    ("slate", [20, 22, 28]),
+];
+
+/// A background preset's RGB (default OLED black).
+pub fn bg_color(name: &str) -> [u8; 3] {
+    BG_PRESETS
+        .iter()
+        .find(|(n, _)| *n == name)
+        .map(|(_, c)| *c)
+        .unwrap_or([0, 0, 0])
+}
+
+// --- Working-tab braille spinner (ported from the TUI "dots") -------------
+pub const SPINNER_FRAMES: &[&str] = &["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+const SPINNER_INTERVAL_MS: u64 = 80;
+
+/// The spinner glyph for a given elapsed time.
+pub fn spinner_frame(elapsed_ms: u64) -> &'static str {
+    SPINNER_FRAMES[(elapsed_ms / SPINNER_INTERVAL_MS) as usize % SPINNER_FRAMES.len()]
+}
+
+// --- Tab markers ----------------------------------------------------------
+const ZODIAC: &[&str] = &[
+    "♈", "♉", "♊", "♋", "♌", "♍", "♎", "♏", "♐", "♑", "♒", "♓",
+];
+
+fn roman(mut n: usize) -> String {
+    const M: &[(usize, &str)] = &[(10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I")];
+    let mut s = String::new();
+    for &(v, r) in M {
+        while n >= v {
+            s.push_str(r);
+            n -= v;
+        }
+    }
+    s
+}
+
+/// The leading marker glyph(s) for tab number `n1` (1-based) in the given
+/// style. `zodiac` uses the white/text-presentation sigils (U+FE0E) — the
+/// outline glyphs, never the emoji ones.
+pub fn marker(style: &str, n1: usize) -> String {
+    let n = n1.max(1);
+    match style {
+        "arabic" => n.to_string(),
+        "roman" => roman(n),
+        "zodiac" => format!("{}\u{FE0E}", ZODIAC[(n - 1) % ZODIAC.len()]),
+        _ => "●".to_string(),
+    }
+}
+
+// --- Glow (moving shimmer band over a working title) ----------------------
+/// Shimmer period in ms for a speed name; `None` = glow off (static base).
+pub fn glow_period_ms(speed: &str) -> Option<u64> {
+    match speed {
+        "off" => None,
+        "slow" => Some(3200),
+        "fast" => Some(1200),
+        "zippy" => Some(700),
+        _ => Some(2000), // "normal"
+    }
+}
+
+/// Color of character `i` of `n` under the sweeping glow band. `phase` is
+/// `elapsed_ms % period / period` in 0..1. A smooth version of the TUI's
+/// three-tier sweep (band = 2.5 chars): the moving center reaches `glow`,
+/// falling back toward `base` with distance.
+pub fn glow_color_at(i: usize, n: usize, phase: f32, base: [u8; 3], glow: [u8; 3]) -> [u8; 3] {
+    let band = 2.5f32;
+    let center = phase * (n as f32 + 2.0 * band) - band;
+    let d = (i as f32 - center).abs();
+    // 1.0 at the center, ~0 by the band edge; smooth falloff.
+    let t = (1.0 - (d / band)).clamp(0.0, 1.0);
+    let t = t * t; // ease so the core reads brighter than the fringe
+    let lerp = |a: u8, b: u8| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    [
+        lerp(base[0], glow[0]),
+        lerp(base[1], glow[1]),
+        lerp(base[2], glow[2]),
+    ]
+}
+
 /// xterm 256-color palette entry -> RGB.
 pub fn xterm256(i: u8) -> [u8; 3] {
     match i {
@@ -149,6 +261,50 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(cell_colors(&s).0, xterm256(196));
+    }
+
+    #[test]
+    fn markers_render_per_style() {
+        assert_eq!(marker("dots", 3), "●");
+        assert_eq!(marker("arabic", 3), "3");
+        assert_eq!(marker("roman", 4), "IV");
+        assert_eq!(marker("roman", 12), "XII");
+        // zodiac = white/text-presentation sigil (U+FE0E), never emoji.
+        assert_eq!(marker("zodiac", 1), "♈\u{FE0E}");
+        assert!(marker("zodiac", 13).ends_with('\u{FE0E}')); // wraps at 12
+    }
+
+    #[test]
+    fn named_and_bg_lookup() {
+        assert_eq!(named_color("orange", DEFAULT_FG), [255, 135, 0]);
+        assert_eq!(named_color("nope", DEFAULT_FG), DEFAULT_FG);
+        assert_eq!(bg_color("oled"), [0, 0, 0]);
+        assert_eq!(bg_color("charcoal"), [13, 13, 18]);
+        assert_eq!(bg_color("bogus"), [0, 0, 0]); // defaults to OLED
+    }
+
+    #[test]
+    fn spinner_advances_and_wraps() {
+        assert_eq!(spinner_frame(0), SPINNER_FRAMES[0]);
+        assert_eq!(spinner_frame(80), SPINNER_FRAMES[1]);
+        assert_eq!(spinner_frame(80 * 10), SPINNER_FRAMES[0]); // wraps
+    }
+
+    #[test]
+    fn glow_off_and_center() {
+        assert_eq!(glow_period_ms("off"), None);
+        assert_eq!(glow_period_ms("slow"), Some(3200));
+        let base = [50, 50, 50];
+        let glow = [255, 255, 255];
+        // A char far from the center stays near base.
+        let far = glow_color_at(0, 20, 0.9, base, glow);
+        assert!(far[0] < 90, "far char should stay dim: {far:?}");
+        // Some phase lights char 5 strongly.
+        let lit = (0..20)
+            .map(|p| glow_color_at(5, 20, p as f32 / 20.0, base, glow)[0])
+            .max()
+            .unwrap();
+        assert!(lit > 200, "the band should brighten char 5: {lit}");
     }
 
     #[test]

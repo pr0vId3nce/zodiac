@@ -13,6 +13,11 @@ use crate::engine::TermScreen;
 /// title set spanning chunks) is not carried.
 pub struct QueryScanner {
     carry: Vec<u8>,
+    /// Answer the kitty keyboard probe (CSI ? u)? Follows the
+    /// kitty_keyboard setting via the server's capability tick — off
+    /// keeps the historic silence that makes apps fall back to legacy
+    /// keys (roadmap 4.4, ADR 0005).
+    pub kitty_kbd: bool,
 }
 
 const CARRY_MAX: usize = 256;
@@ -32,7 +37,10 @@ impl Default for QueryScanner {
 
 impl QueryScanner {
     pub fn new() -> Self {
-        Self { carry: Vec::new() }
+        Self {
+            carry: Vec::new(),
+            kitty_kbd: false,
+        }
     }
 
     /// Scan one pty output chunk; returns reply bytes to feed back as input.
@@ -55,7 +63,7 @@ impl QueryScanner {
                 i += 1;
                 continue;
             }
-            match parse_seq(&buf[i..], screen, cell, &mut out) {
+            match parse_seq(&buf[i..], screen, cell, self.kitty_kbd, &mut out) {
                 Parsed::Done(n) => i += n.max(1),
                 Parsed::Incomplete => {
                     let tail = &buf[i..];
@@ -70,17 +78,29 @@ impl QueryScanner {
     }
 }
 
-fn parse_seq(s: &[u8], screen: &dyn TermScreen, cell: (u16, u16), out: &mut Vec<u8>) -> Parsed {
+fn parse_seq(
+    s: &[u8],
+    screen: &dyn TermScreen,
+    cell: (u16, u16),
+    kitty_kbd: bool,
+    out: &mut Vec<u8>,
+) -> Parsed {
     match s.get(1) {
         None => Parsed::Incomplete,
-        Some(b'[') => parse_csi(s, screen, cell, out),
+        Some(b'[') => parse_csi(s, screen, cell, kitty_kbd, out),
         Some(b']') => parse_string(s, out, respond_osc),
         Some(b'P') => parse_string(s, out, respond_dcs),
         Some(_) => Parsed::Done(1),
     }
 }
 
-fn parse_csi(s: &[u8], screen: &dyn TermScreen, cell: (u16, u16), out: &mut Vec<u8>) -> Parsed {
+fn parse_csi(
+    s: &[u8],
+    screen: &dyn TermScreen,
+    cell: (u16, u16),
+    kitty_kbd: bool,
+    out: &mut Vec<u8>,
+) -> Parsed {
     let mut j = 2;
     // parameter bytes (0x30–0x3f) and intermediates (0x20–0x2f)
     while j < s.len() && (0x20..=0x3f).contains(&s[j]) {
@@ -92,7 +112,7 @@ fn parse_csi(s: &[u8], screen: &dyn TermScreen, cell: (u16, u16), out: &mut Vec<
     if !(0x40..=0x7e).contains(&fin) {
         return Parsed::Done(j);
     }
-    respond_csi(&s[2..j], fin, screen, cell, out);
+    respond_csi(&s[2..j], fin, screen, cell, kitty_kbd, out);
     Parsed::Done(j + 1)
 }
 
@@ -120,8 +140,22 @@ fn parse_string(s: &[u8], out: &mut Vec<u8>, respond: fn(&[u8], &mut Vec<u8>)) -
     }
 }
 
-fn respond_csi(body: &[u8], fin: u8, screen: &dyn TermScreen, cell: (u16, u16), out: &mut Vec<u8>) {
+fn respond_csi(
+    body: &[u8],
+    fin: u8,
+    screen: &dyn TermScreen,
+    cell: (u16, u16),
+    kitty_kbd: bool,
+    out: &mut Vec<u8>,
+) {
     match fin {
+        // Kitty keyboard probe: answered only when advertised (4.4) —
+        // silence makes apps (crossterm's enhancement check) fall back
+        // to legacy keys, exactly as before.
+        b'u' if body == b"?" && kitty_kbd => {
+            let flags = screen.kitty_keyboard_flags();
+            out.extend_from_slice(format!("\x1b[?{flags}u").as_bytes());
+        }
         // DA1: VT220 with ANSI color. Also what resolves crossterm's
         // keyboard-enhancement probe (kitty query + DA1; a DA1 reply with
         // no kitty reply means "not supported" — no timeout).
@@ -261,6 +295,18 @@ mod tests {
         let p = screen();
         let mut q = QueryScanner::new();
         assert!(q.scan(b"\x1b[?u", p.screen(), (0, 0)).is_empty());
+    }
+
+    /// 4.4: with the kitty_keyboard setting advertised, the probe answers
+    /// with the pane's live flag stack.
+    #[test]
+    fn kitty_probe_answers_when_advertised() {
+        let mut p = screen();
+        let mut q = QueryScanner::new();
+        q.kitty_kbd = true;
+        assert_eq!(q.scan(b"\x1b[?u", p.screen(), (0, 0)), b"\x1b[?0u");
+        p.process(b"\x1b[>1u");
+        assert_eq!(q.scan(b"\x1b[?u", p.screen(), (0, 0)), b"\x1b[?1u");
     }
 
     #[test]

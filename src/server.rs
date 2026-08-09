@@ -1060,10 +1060,12 @@ impl Server {
     /// see the new floor; running apps keep their cached answer — the
     /// documented limitation.
     fn capability_tick(&mut self) {
-        let floor = crate::settings::Settings::cached().floor();
+        let settings = crate::settings::Settings::cached();
+        let floor = settings.floor();
         for p in &mut self.panes {
             p.gfx.active = floor != "off";
             p.gfx.anim = floor == "animation";
+            p.set_kitty_kbd(settings.kitty_keyboard);
         }
     }
 

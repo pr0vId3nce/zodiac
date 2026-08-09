@@ -71,6 +71,7 @@ const CONTROLS: &[(&str, &str)] = &[
     ("Alt+PgUp/Dn", "move pane"),
     ("Alt+T", "toggle sidebar"),
     ("Alt+Z", "zoom pane"),
+    ("Alt+U", "toggle kitty keys (pane)"),
     ("Alt+~", "home page"),
     ("⇧PgUp/Dn", "scroll"),
     ("Ctrl+S", "settings"),
@@ -421,6 +422,9 @@ struct OuterGeom {
 
 struct App {
     session: String,
+    /// Host terminal disambiguates keys (kitty enhancement pushed at
+    /// startup) — precondition for synthesizing CSI-u to panes (4.4).
+    kitty_host: bool,
     panes: Vec<CPane>,
     active: usize,
     collapsed: bool,
@@ -606,6 +610,18 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
     }
     // The chat panel's network worker reports through the same channel.
     let settings = Settings::load();
+    // Kitty keyboard (4.4): push host disambiguation when the host offers
+    // it and the setting is on — the one-shot probe the roadmap asks for.
+    // Popped alongside the terminal teardown at exit.
+    let kitty_host = settings.kitty_keyboard
+        && crossterm::terminal::supports_keyboard_enhancement().unwrap_or(false)
+        && crossterm::execute!(
+            std::io::stdout(),
+            crossterm::event::PushKeyboardEnhancementFlags(
+                crossterm::event::KeyboardEnhancementFlags::DISAMBIGUATE_ESCAPE_CODES
+            )
+        )
+        .is_ok();
     let (chat_tx, chat_cancel) = if settings.chat_panel {
         let txw = tx.clone();
         let (tx, cancel) = crate::chat::spawn(
@@ -631,6 +647,7 @@ pub fn run(session: &str, terminal: &mut DefaultTerminal) -> Result<&'static str
     let size = terminal.size()?;
     let mut app = App {
         session: session.to_string(),
+        kitty_host,
         panes: Vec::new(),
         active: 0,
         collapsed: false,
@@ -1761,6 +1778,13 @@ impl App {
                     self.zoom = !self.zoom;
                     return;
                 }
+                // Per-pane kitty-keyboard kill switch (roadmap 4.4).
+                KeyCode::Char('u') | KeyCode::Char('U') => {
+                    if let Some(p) = self.panes.get_mut(self.active) {
+                        p.kitty_kill = !p.kitty_kill;
+                    }
+                    return;
+                }
                 KeyCode::Char('R') => {
                     self.mode = self.restore_preview();
                     return;
@@ -1853,10 +1877,31 @@ impl App {
         }
 
         if let Some(id) = self.active_id() {
-            let app_cursor = self
+            let (app_cursor, kitty_flags) = self
                 .pane_by_id(id)
-                .map(|p| p.parser.screen().application_cursor())
-                .unwrap_or(false);
+                .map(|p| {
+                    let screen = p.parser.screen();
+                    (
+                        screen.application_cursor(),
+                        if p.kitty_kill {
+                            0
+                        } else {
+                            screen.kitty_keyboard_flags()
+                        },
+                    )
+                })
+                .unwrap_or((false, 0));
+            // Kitty keyboard (roadmap 4.4): the client-side parser sees the
+            // same byte stream as the server's, so the pane's flag stack is
+            // readable locally. Synthesis only helps when the host itself
+            // disambiguates (crossterm enhancement pushed at startup) —
+            // otherwise Ctrl+Shift+P never reaches us distinctly anyway.
+            if self.kitty_host && kitty_flags != 0 {
+                if let Some(bytes) = crate::client_core::encode_key_kitty(&key, kitty_flags) {
+                    self.send_input(id, &bytes);
+                    return;
+                }
+            }
             if let Some(bytes) = encode_key(&key, app_cursor) {
                 self.send_input(id, &bytes);
             }

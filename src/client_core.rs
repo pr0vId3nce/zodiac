@@ -203,6 +203,10 @@ pub struct CPane {
     /// "pty" or "agent" — mirrors `PaneState.kind`. Synced from T_STATE and
     /// inferred from agent frames arriving for the pane, whichever is first.
     pub kind: String,
+    /// Per-pane kitty-keyboard kill switch (roadmap 4.4): when set, this
+    /// client encodes legacy keys for the pane regardless of its flag
+    /// stack. Client-local; toggled from the UI.
+    pub kitty_kill: bool,
     /// Transcript/permission/input state; only meaningful for agent panes.
     pub agent: AgentUi,
     pub parser: vt100::Parser,
@@ -241,6 +245,7 @@ impl CPane {
             id,
             name,
             kind: "pty".into(),
+            kitty_kill: false,
             agent: AgentUi::default(),
             parser: vt100::Parser::new(rows, cols, CLIENT_SCROLLBACK),
             scroll: 0,
@@ -585,4 +590,96 @@ pub fn encode_mouse(
             ]
         }
     })
+}
+
+/// Kitty keyboard protocol synthesis (roadmap 4.4), for panes whose flag
+/// stack enables it (bit 0b1 = disambiguate escape codes). Returns None
+/// when the legacy encoder should handle the event instead — plain
+/// printable text stays text, so only ambiguous combinations change on
+/// the wire. The payoff: Ctrl+Shift+P and Ctrl+P become distinct.
+pub fn encode_key_kitty(key: &crossterm::event::KeyEvent, flags: u8) -> Option<Vec<u8>> {
+    use crossterm::event::{KeyCode, KeyModifiers};
+    if flags & 0b1 == 0 {
+        return None;
+    }
+    let mods = key.modifiers;
+    let shift = mods.contains(KeyModifiers::SHIFT);
+    let alt = mods.contains(KeyModifiers::ALT);
+    let ctrl = mods.contains(KeyModifiers::CONTROL);
+    let sup = mods.contains(KeyModifiers::SUPER);
+    let modp = 1 + shift as u8 + 2 * alt as u8 + 4 * ctrl as u8 + 8 * sup as u8;
+    let csi_u = |cp: u32, modp: u8| -> Vec<u8> {
+        if modp == 1 {
+            format!("\x1b[{cp}u").into_bytes()
+        } else {
+            format!("\x1b[{cp};{modp}u").into_bytes()
+        }
+    };
+    match key.code {
+        // Esc is always CSI-u under disambiguation — that is the point.
+        KeyCode::Esc => Some(csi_u(27, modp)),
+        // Enter / Tab / Backspace change encoding only when modified
+        // beyond what their legacy bytes can carry.
+        KeyCode::Enter if modp > 1 => Some(csi_u(13, modp)),
+        KeyCode::Tab if modp > 1 && !(modp == 2 && shift) => Some(csi_u(9, modp)),
+        KeyCode::Backspace if modp > 1 => Some(csi_u(127, modp)),
+        // Character keys: ctrl/alt/super combinations emit the lowercase
+        // codepoint + modifiers, making shift visible; unmodified (or
+        // shift-only) text stays plain text via the legacy encoder.
+        KeyCode::Char(c) if ctrl || sup || (alt && !c.is_ascii()) => {
+            let cp = c.to_ascii_lowercase() as u32;
+            Some(csi_u(cp, modp))
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod kitty_kbd_tests {
+    use super::*;
+    use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+    fn key(code: KeyCode, mods: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, mods)
+    }
+
+    /// The Phase 4 exit criterion: Ctrl+Shift+P and Ctrl+P must be
+    /// distinct on the wire under disambiguation.
+    #[test]
+    fn ctrl_shift_p_differs_from_ctrl_p() {
+        let ctrl_p = encode_key_kitty(&key(KeyCode::Char('p'), KeyModifiers::CONTROL), 1).unwrap();
+        let ctrl_shift_p = encode_key_kitty(
+            &key(
+                KeyCode::Char('P'),
+                KeyModifiers::CONTROL | KeyModifiers::SHIFT,
+            ),
+            1,
+        )
+        .unwrap();
+        assert_eq!(ctrl_p, b"\x1b[112;5u");
+        assert_eq!(ctrl_shift_p, b"\x1b[112;6u");
+        assert_ne!(ctrl_p, ctrl_shift_p);
+    }
+
+    #[test]
+    fn plain_text_stays_legacy() {
+        assert!(encode_key_kitty(&key(KeyCode::Char('a'), KeyModifiers::NONE), 1).is_none());
+        assert!(encode_key_kitty(&key(KeyCode::Char('A'), KeyModifiers::SHIFT), 1).is_none());
+        // Flags 0 = protocol off entirely.
+        assert!(encode_key_kitty(&key(KeyCode::Esc, KeyModifiers::NONE), 0).is_none());
+    }
+
+    #[test]
+    fn esc_and_modified_specials() {
+        assert_eq!(
+            encode_key_kitty(&key(KeyCode::Esc, KeyModifiers::NONE), 1).unwrap(),
+            b"\x1b[27u"
+        );
+        assert_eq!(
+            encode_key_kitty(&key(KeyCode::Enter, KeyModifiers::CONTROL), 1).unwrap(),
+            b"\x1b[13;5u"
+        );
+        // Plain Enter stays legacy \r.
+        assert!(encode_key_kitty(&key(KeyCode::Enter, KeyModifiers::NONE), 1).is_none());
+    }
 }

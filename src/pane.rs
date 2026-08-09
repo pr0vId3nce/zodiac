@@ -435,6 +435,12 @@ impl SrvPane {
         }
     }
 
+    /// Advertise the kitty keyboard protocol on this pane's QueryScanner
+    /// (roadmap 4.4; driven by the capability tick).
+    pub fn set_kitty_kbd(&mut self, on: bool) {
+        self.queries.kitty_kbd = on;
+    }
+
     /// Wire value for `PaneState.kind`.
     pub fn kind_str(&self) -> &'static str {
         match &self.io {

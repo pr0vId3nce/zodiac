@@ -79,6 +79,13 @@ pub struct Settings {
     /// happens at client render time. Applies to newly probed apps only.
     #[serde(default)]
     pub capability_floor: String,
+    /// Advertise the kitty keyboard protocol to children (roadmap 4.4):
+    /// when on, the CSI ? u probe is answered with the pane's current
+    /// flags, so apps enable CSI-u sequences and clients synthesize them
+    /// (the GUI natively; the TUI when its host disambiguates).
+    /// Default off — flip it once the GUI is the daily driver.
+    #[serde(default)]
+    pub kitty_keyboard: bool,
     /// Cursor shape in panes: "auto" (follow the inner app's DECSCUSR),
     /// "block", "underline", or "bar".
     #[serde(default)]

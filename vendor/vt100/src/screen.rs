@@ -75,6 +75,10 @@ pub struct Screen {
     icon_name: String,
 
     modes: u8,
+    /// Kitty keyboard protocol flag stacks (CSI > / < / = u), one per
+    /// screen buffer as the spec requires. The active flags are the top
+    /// of the current screen's stack (empty = 0, the legacy protocol).
+    kitty_kbd: [Vec<u8>; 2],
     mouse_protocol_mode: MouseProtocolMode,
     mouse_protocol_encoding: MouseProtocolEncoding,
 
@@ -104,6 +108,7 @@ impl Screen {
             icon_name: String::default(),
 
             modes: 0,
+            kitty_kbd: [Vec::new(), Vec::new()],
             mouse_protocol_mode: MouseProtocolMode::default(),
             mouse_protocol_encoding: MouseProtocolEncoding::default(),
 
@@ -671,6 +676,48 @@ impl Screen {
     #[must_use]
     pub fn hide_cursor(&self) -> bool {
         self.mode(MODE_HIDE_CURSOR)
+    }
+
+    /// The kitty keyboard protocol flags currently in effect for the
+    /// active screen (0 = legacy). Bit 0b1 = disambiguate escape codes.
+    #[must_use]
+    pub fn kitty_keyboard_flags(&self) -> u8 {
+        let idx = usize::from(self.mode(MODE_ALTERNATE_SCREEN));
+        self.kitty_kbd[idx].last().copied().unwrap_or(0)
+    }
+
+    fn kitty_kbd_stack(&mut self) -> &mut Vec<u8> {
+        let idx = usize::from(self.mode(MODE_ALTERNATE_SCREEN));
+        &mut self.kitty_kbd[idx]
+    }
+
+    fn kitty_kbd_push(&mut self, flags: u8) {
+        let stack = self.kitty_kbd_stack();
+        stack.push(flags);
+        // The spec caps the stack; excess pushes evict the oldest.
+        if stack.len() > 32 {
+            stack.remove(0);
+        }
+    }
+
+    fn kitty_kbd_pop(&mut self, n: u16) {
+        let stack = self.kitty_kbd_stack();
+        let n = (n.max(1) as usize).min(stack.len());
+        stack.truncate(stack.len() - n);
+    }
+
+    fn kitty_kbd_set(&mut self, flags: u8, mode: u16) {
+        let stack = self.kitty_kbd_stack();
+        let cur = stack.last().copied().unwrap_or(0);
+        let new = match mode {
+            2 => cur | flags,
+            3 => cur & !flags,
+            _ => flags,
+        };
+        match stack.last_mut() {
+            Some(top) => *top = new,
+            None => stack.push(new),
+        }
     }
 
     /// Returns whether the terminal is inside a synchronized update
@@ -1700,8 +1747,8 @@ impl vte::Perform for Screen {
                 // DSR) and window ops / title-stack ops we don't model:
                 // consumed so they never reach the fallthrough log.
                 'c' | 'n' | 't' => {}
-                // Kitty keyboard protocol (CSI = flags u): recognized,
-                // not yet implemented (Phase 4 flag stack).
+                // Plain CSI u is SCORC (ANSI.SYS restore cursor) —
+                // unimplemented, consumed; kitty-set is `CSI = ... u`.
                 'u' => {}
                 _ => {
                     if log::log_enabled!(log::Level::Debug) {
@@ -1730,9 +1777,23 @@ impl vte::Perform for Screen {
                     .try_into()
                     .unwrap_or(0);
             }
+            // Kitty keyboard push / pop (roadmap 4.4).
+            Some(b'>') if c == 'u' => {
+                let flags = canonicalize_params_1(params, 0);
+                self.kitty_kbd_push(flags.min(255) as u8);
+            }
+            Some(b'<') if c == 'u' => {
+                let n = canonicalize_params_1(params, 1);
+                self.kitty_kbd_pop(n);
+            }
+            // Kitty keyboard set (CSI = flags ; mode u).
+            Some(b'=') if c == 'u' => {
+                let (flags, mode) = canonicalize_params_2(params, 0, 1);
+                self.kitty_kbd_set(flags.min(255) as u8, mode);
+            }
             // '>' / '<' prefixed: XTVERSION + XTMODKEYS queries
-            // (answered upstream) and kitty keyboard push/pop (Phase 4).
-            Some(b'>' | b'<') if matches!(c, 'u' | 'q' | 'm' | 'c') => {}
+            // (answered upstream).
+            Some(b'>' | b'<') if matches!(c, 'q' | 'm' | 'c') => {}
             Some(i) => {
                 if log::log_enabled!(log::Level::Debug) {
                     log::debug!(

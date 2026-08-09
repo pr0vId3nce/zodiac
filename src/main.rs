@@ -41,7 +41,9 @@ fn main() -> Result<()> {
     let _ = crossterm::execute!(
         std::io::stdout(),
         DisableMouseCapture,
-        DisableBracketedPaste
+        DisableBracketedPaste,
+        // No-op when the kitty enhancement was never pushed (4.4).
+        crossterm::event::PopKeyboardEnhancementFlags
     );
     ratatui::restore();
     match res {

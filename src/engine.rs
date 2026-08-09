@@ -56,6 +56,8 @@ pub trait TermScreen {
     fn bracketed_paste(&self) -> bool;
     /// Inside a DECSET 2026 synchronized update (present atomically).
     fn synchronized_update(&self) -> bool;
+    /// Kitty keyboard protocol flags in effect (0 = legacy; roadmap 4.4).
+    fn kitty_keyboard_flags(&self) -> u8;
 }
 
 /// The emulator itself: feed bytes, observe screens and semantic events.
@@ -158,6 +160,10 @@ impl TermScreen for vt100::Screen {
     fn synchronized_update(&self) -> bool {
         vt100::Screen::synchronized_update(self)
     }
+
+    fn kitty_keyboard_flags(&self) -> u8 {
+        vt100::Screen::kitty_keyboard_flags(self)
+    }
 }
 
 /// The engine the server runs. Swapping engines (roadmap 1.4A) means
@@ -222,6 +228,35 @@ mod tests {
         let e = fed(b"\x1b[4:3mcurly\x1b[4:0m off");
         assert!(e.screen().cell(0, 0).unwrap().underline);
         assert!(!e.screen().cell(0, 7).unwrap().underline);
+    }
+
+    /// Kitty keyboard flag stack (4.4): push/pop, per-screen stacks,
+    /// set with or/and-not modes.
+    #[test]
+    fn kitty_keyboard_flag_stack() {
+        let mut e = fed(b"\x1b[>1u");
+        assert_eq!(e.screen().kitty_keyboard_flags(), 1);
+        e.process(b"\x1b[>5u");
+        assert_eq!(e.screen().kitty_keyboard_flags(), 5);
+        e.process(b"\x1b[<u");
+        assert_eq!(e.screen().kitty_keyboard_flags(), 1);
+        // The alt screen has its own stack.
+        e.process(b"\x1b[?1049h");
+        assert_eq!(e.screen().kitty_keyboard_flags(), 0);
+        e.process(b"\x1b[>3u");
+        assert_eq!(e.screen().kitty_keyboard_flags(), 3);
+        e.process(b"\x1b[?1049l");
+        assert_eq!(e.screen().kitty_keyboard_flags(), 1);
+        // Set modes: 2 = or, 3 = clear bits, default replace.
+        e.process(b"\x1b[=4;2u");
+        assert_eq!(e.screen().kitty_keyboard_flags(), 5);
+        e.process(b"\x1b[=1;3u");
+        assert_eq!(e.screen().kitty_keyboard_flags(), 4);
+        e.process(b"\x1b[=2u");
+        assert_eq!(e.screen().kitty_keyboard_flags(), 2);
+        // Pop past the bottom clamps to the legacy protocol.
+        e.process(b"\x1b[<9u");
+        assert_eq!(e.screen().kitty_keyboard_flags(), 0);
     }
 
     /// DECAWM reset (?7l): the cursor pins at the right margin and

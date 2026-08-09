@@ -113,12 +113,12 @@ default = extend vt100.
 
 ### Tasks
 
-- [ ] **1.1 `TermEngine` trait**, extracted from actual call sites (`pane.rs` screen
+- [x] **1.1 `TermEngine` trait**, extracted from actual call sites (`pane.rs` screen
       reads/title/modes/screen_hash, `gfx.rs` drain_events, `query.rs`, `server.rs`/
       `snapshot.rs` reads). Surface: `process(&[u8]) -> Responses`, cell/row iteration
-      with attrs, cursor, modes, title, `drain_events()`, `resize`.
-- [ ] **1.2 Implement trait for vendored vt100**; port `pane.rs`/`gfx.rs`/`query.rs`
-      to the trait. Mechanical, move-only. Gate: all goldens byte-identical.
+      with attrs, cursor, modes, title, `drain_events()`, `resize`. *(src/engine.rs)*
+- [x] **1.2 Implement trait for vendored vt100**; port `pane.rs`/`gfx.rs`/`query.rs`
+      to the trait. Mechanical, move-only. Gate: all goldens byte-identical. *(72a6719)*
 - [ ] **1.3 Run Spike S1 → ADR 0001.**
 - [ ] **1.4A (switch)** Adapter for chosen engine behind a cargo feature; dual-run
       differential mode diffing full screens per chunk between engines. Zero cell

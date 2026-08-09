@@ -53,6 +53,8 @@ pub trait TermScreen {
     fn hide_cursor(&self) -> bool;
     fn alternate_screen(&self) -> bool;
     fn bracketed_paste(&self) -> bool;
+    /// Inside a DECSET 2026 synchronized update (present atomically).
+    fn synchronized_update(&self) -> bool;
 }
 
 /// The emulator itself: feed bytes, observe screens and semantic events.
@@ -149,6 +151,10 @@ impl TermScreen for vt100::Screen {
 
     fn bracketed_paste(&self) -> bool {
         vt100::Screen::bracketed_paste(self)
+    }
+
+    fn synchronized_update(&self) -> bool {
+        vt100::Screen::synchronized_update(self)
     }
 }
 

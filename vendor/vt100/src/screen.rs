@@ -6,6 +6,7 @@ const MODE_APPLICATION_CURSOR: u8 = 0b0000_0010;
 const MODE_HIDE_CURSOR: u8 = 0b0000_0100;
 const MODE_ALTERNATE_SCREEN: u8 = 0b0000_1000;
 const MODE_BRACKETED_PASTE: u8 = 0b0001_0000;
+const MODE_SYNCHRONIZED_UPDATE: u8 = 0b0010_0000;
 
 /// The xterm mouse handling mode currently in use.
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -729,6 +730,14 @@ impl Screen {
         self.mode(MODE_HIDE_CURSOR)
     }
 
+    /// Returns whether the terminal is inside a synchronized update
+    /// (DECSET 2026): output between `?2026h` and `?2026l` should be
+    /// presented atomically.
+    #[must_use]
+    pub fn synchronized_update(&self) -> bool {
+        self.mode(MODE_SYNCHRONIZED_UPDATE)
+    }
+
     /// Returns whether the terminal should be in bracketed paste mode.
     #[must_use]
     pub fn bracketed_paste(&self) -> bool {
@@ -1363,6 +1372,7 @@ impl Screen {
                     self.enter_alternate_grid();
                 }
                 &[2004] => self.set_mode(MODE_BRACKETED_PASTE),
+                &[2026] => self.set_mode(MODE_SYNCHRONIZED_UPDATE),
                 ns => {
                     if log::log_enabled!(log::Level::Debug) {
                         let n = if ns.len() == 1 {
@@ -1422,6 +1432,7 @@ impl Screen {
                     self.decrc();
                 }
                 &[2004] => self.clear_mode(MODE_BRACKETED_PASTE),
+                &[2026] => self.clear_mode(MODE_SYNCHRONIZED_UPDATE),
                 ns => {
                     if log::log_enabled!(log::Level::Debug) {
                         let n = if ns.len() == 1 {

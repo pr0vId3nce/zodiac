@@ -236,7 +236,14 @@ pub fn run(session: &str) -> Result<()> {
     while !srv.quit && !term.load(Ordering::Relaxed) {
         // 1s cap so the watchdog/finish ticks stay timely even when every
         // pane is quiet (no events to wake the loop).
-        match rx.recv_timeout(Duration::from_secs(1)) {
+        // Shorten the wait while any pane holds a synchronized update
+        // open so its deadline flush stays timely.
+        let tick = if srv.panes.iter().any(crate::pane::SrvPane::sync_pending) {
+            Duration::from_millis(50)
+        } else {
+            Duration::from_secs(1)
+        };
+        match rx.recv_timeout(tick) {
             Ok(ev) => {
                 srv.handle(ev);
                 let mut drained = 0;
@@ -251,6 +258,7 @@ pub fn run(session: &str) -> Result<()> {
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => break,
         }
+        srv.sync_flush_tick();
         if last_stall_check.elapsed() >= Duration::from_secs(1) {
             last_stall_check = Instant::now();
             srv.autoresume_tick();
@@ -645,6 +653,22 @@ impl Server {
     /// kick off a background classification for each. Advisory only — this
     /// never writes to a pane, only logs and notifies. Re-read from settings
     /// every tick so the on/off toggle applies live.
+    /// Flush panes whose DECSET 2026 hold exceeded its deadline (1.6).
+    fn sync_flush_tick(&mut self) {
+        let due: Vec<(u64, Vec<u8>)> = self
+            .panes
+            .iter_mut()
+            .filter_map(|p| p.sync_flush_due().map(|out| (p.id, out)))
+            .collect();
+        for (id, out) in due {
+            if !out.is_empty() {
+                self.send_ui(T_OUTPUT, id, &out);
+                self.send_watchers(T_OUTPUT, id, &out);
+            }
+            self.push_gfx(id);
+        }
+    }
+
     fn monitor_tick(&mut self) {
         let settings = crate::settings::Settings::cached();
         if !settings.pane_monitor {

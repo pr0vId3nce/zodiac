@@ -170,6 +170,7 @@ fn decrqm_value(mode: u32, screen: &dyn TermScreen) -> u8 {
         25 => !screen.hide_cursor(),
         1049 => screen.alternate_screen(),
         2004 => screen.bracketed_paste(),
+        2026 => screen.synchronized_update(),
         _ => return 0,
     };
     if on {
@@ -233,7 +234,7 @@ mod tests {
         let p = screen();
         let mut q = QueryScanner::new();
         let out = q.scan(b"\x1b[?2026$p\x1b[?2004$p", p.screen(), (0, 0));
-        assert_eq!(out, b"\x1b[?2026;0$y\x1b[?2004;2$y");
+        assert_eq!(out, b"\x1b[?2026;2$y\x1b[?2004;2$y");
     }
 
     #[test]
@@ -284,7 +285,7 @@ mod tests {
             ("DECRQM 25 cursor",    b"\x1b[?25$p",    (0, 0),   b"\x1b[?25;1$y"),
             ("DECRQM 1049 primary", b"\x1b[?1049$p",  (0, 0),   b"\x1b[?1049;2$y"),
             ("DECRQM 2004 paste",   b"\x1b[?2004$p",  (0, 0),   b"\x1b[?2004;2$y"),
-            ("DECRQM 2026 sync",    b"\x1b[?2026$p",  (0, 0),   b"\x1b[?2026;0$y"),
+            ("DECRQM 2026 sync",    b"\x1b[?2026$p",  (0, 0),   b"\x1b[?2026;2$y"),
             ("DECRQM 1000 mouse",   b"\x1b[?1000$p",  (0, 0),   b"\x1b[?1000;0$y"),
             ("XTVERSION",           b"\x1b[>q",       (0, 0),   b"\x1bP>|zodiac 0.1.0\x1b\\"),
             ("XTVERSION explicit",  b"\x1b[>0q",      (0, 0),   b"\x1bP>|zodiac 0.1.0\x1b\\"),
@@ -318,7 +319,7 @@ mod tests {
         for b in query {
             out.extend(q.scan(&[*b], p.screen(), (0, 0)));
         }
-        assert_eq!(out, b"\x1b[?2026;0$y");
+        assert_eq!(out, b"\x1b[?2026;2$y");
     }
 
     /// DECRQM answers must track live screen state, not defaults.

@@ -20,6 +20,12 @@ use crate::server::SrvEvent;
 /// T_REPLAY under the protocol's 8 MiB frame cap with room to spare.
 pub const RING_CAP: usize = 6 * 1024 * 1024;
 
+/// DECSET 2026 coalescing: max buffered bytes and max hold time before the
+/// safety valves flush anyway (matching the ~150 ms grace real terminals
+/// give a stuck synchronized update).
+const SYNC_BUF_MAX: usize = 2 * 1024 * 1024;
+const SYNC_DEADLINE: Duration = Duration::from_millis(150);
+
 pub struct SrvPane {
     pub id: u64,
     pub name: String,
@@ -81,6 +87,10 @@ pub struct SrvPane {
     stall_latched: bool,
     /// Background pane-monitor bookkeeping (see `monitor.rs`) — purely
     /// server-side tracking, not part of the wire protocol.
+    /// DECSET 2026: output buffered while the child holds a synchronized
+    /// update open, flushed as one T_OUTPUT at ?2026l or the deadline.
+    sync_buf: Vec<u8>,
+    sync_since: Option<Instant>,
     pub monitor_screen_hash: Option<u64>,
     pub monitor_screen_since: Option<Instant>,
     pub monitor_checked_at: Option<Instant>,
@@ -213,6 +223,8 @@ impl SrvPane {
             stall_since: None,
             stall_fired: None,
             stall_latched: false,
+            sync_buf: Vec::new(),
+            sync_since: None,
             monitor_screen_hash: None,
             monitor_screen_since: None,
             monitor_checked_at: None,
@@ -243,7 +255,45 @@ impl SrvPane {
             bytes,
             |t, screen, replies| replies.extend(queries.scan(t, screen, cell)),
         );
-        self.ring.extend_from_slice(&out);
+        // Child-side DECSET 2026 (roadmap 1.6): while the child holds a
+        // synchronized update open, hold its output back so every attached
+        // client repaints once, at the closing ?2026l (or the deadline /
+        // size safety valves — a child that never closes must not freeze
+        // or bloat the pane). The ring is appended on flush so T_REPLAY
+        // and live T_OUTPUT stay ordered identically.
+        let out = if self.term.screen().synchronized_update() {
+            self.sync_buf.extend_from_slice(&out);
+            self.sync_since.get_or_insert_with(Instant::now);
+            if self.sync_buf.len() > SYNC_BUF_MAX {
+                self.take_sync_buf()
+            } else {
+                Vec::new()
+            }
+        } else if !self.sync_buf.is_empty() {
+            self.sync_buf.extend_from_slice(&out);
+            self.take_sync_buf()
+        } else {
+            out
+        };
+        self.ring_extend(&out);
+        if !replies.is_empty() {
+            self.write_input(&replies);
+        }
+        self.last_output = Some(Instant::now());
+        if crate::protocol::title_state(&self.title()) == crate::protocol::TitleState::Working {
+            self.last_title_working = Some(Instant::now());
+        }
+        let count = self.term.screen().audible_bell_count();
+        let new = count > self.bell_count;
+        self.bell_count = count;
+        (out, new)
+    }
+
+    fn ring_extend(&mut self, out: &[u8]) {
+        if out.is_empty() {
+            return;
+        }
+        self.ring.extend_from_slice(out);
         // Trim with hysteresis: draining to CAP on every 8 KiB read is a
         // ~2 MiB memmove per chunk once full (~250× write amplification
         // during a big cat). Letting it overshoot by a block first makes
@@ -264,17 +314,28 @@ impl SrvPane {
             }
             self.ring.drain(..cut);
         }
-        if !replies.is_empty() {
-            self.write_input(&replies);
+    }
+
+    fn take_sync_buf(&mut self) -> Vec<u8> {
+        self.sync_since = None;
+        std::mem::take(&mut self.sync_buf)
+    }
+
+    /// A synchronized update is being held open; the server shortens its
+    /// event-loop timeout while any pane reports true.
+    pub fn sync_pending(&self) -> bool {
+        self.sync_since.is_some()
+    }
+
+    /// Deadline valve for 1.6: a child that opened ?2026h but hasn't closed
+    /// it within SYNC_DEADLINE gets its buffered output flushed anyway.
+    pub fn sync_flush_due(&mut self) -> Option<Vec<u8>> {
+        if self.sync_since?.elapsed() < SYNC_DEADLINE {
+            return None;
         }
-        self.last_output = Some(Instant::now());
-        if crate::protocol::title_state(&self.title()) == crate::protocol::TitleState::Working {
-            self.last_title_working = Some(Instant::now());
-        }
-        let count = self.term.screen().audible_bell_count();
-        let new = count > self.bell_count;
-        self.bell_count = count;
-        (out, new)
+        let out = self.take_sync_buf();
+        self.ring_extend(&out);
+        Some(out)
     }
 
     /// Outer-terminal cell size (px) learned from the attached client:
@@ -1880,6 +1941,33 @@ mod tests {
 
     fn args(s: &str) -> Vec<String> {
         s.split_whitespace().map(String::from).collect()
+    }
+
+    /// Child-side DECSET 2026 (roadmap 1.6): output inside ?2026h..?2026l
+    /// is held and flushed as one piece; the deadline valve frees a stuck
+    /// hold. Uses a real spawned pane (the bytes fed are synthetic; the
+    /// shell child underneath is just a live PTY to construct against).
+    #[test]
+    fn sync_2026_coalesces_output() {
+        let (tx, _rx) = std::sync::mpsc::channel();
+        let mut p = SrvPane::spawn(9999, None, 24, 80, None, Vec::new(), tx).unwrap();
+        let (out, _) = p.process_output(b"\x1b[?2026hheld");
+        assert!(out.is_empty(), "output must be held during a sync update");
+        assert!(p.sync_pending());
+        assert!(p.sync_flush_due().is_none(), "deadline must not fire early");
+        let (out, _) = p.process_output(b" more\x1b[?2026l tail");
+        let s = String::from_utf8_lossy(&out);
+        assert!(s.contains("held") && s.contains("more") && s.contains("tail"));
+        assert!(!p.sync_pending());
+
+        // Deadline valve: a hold left open flushes after SYNC_DEADLINE.
+        let (out, _) = p.process_output(b"\x1b[?2026hstuck");
+        assert!(out.is_empty());
+        std::thread::sleep(SYNC_DEADLINE + Duration::from_millis(20));
+        let flushed = p.sync_flush_due().expect("deadline flush");
+        assert!(String::from_utf8_lossy(&flushed).contains("stuck"));
+        assert!(!p.sync_pending());
+        p.kill();
     }
 
     #[test]

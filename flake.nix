@@ -39,7 +39,19 @@
             rustfmt
             # astrolabe bridge/web
             nodejs_24
+            # zodiac-gui runtime (winit/wgpu dlopen these at run time)
+            vulkan-loader
+            wayland
+            libxkbcommon
           ];
+          # dlopen'd libraries for `cargo run -p zodiac-gui`: libvulkan,
+          # libwayland-client, libxkbcommon, plus the system Vulkan ICDs
+          # (RADV & friends) from /run/opengl-driver on NixOS.
+          LD_LIBRARY_PATH = pkgs.lib.makeLibraryPath (with pkgs; [
+            vulkan-loader
+            wayland
+            libxkbcommon
+          ]) + ":/run/opengl-driver/lib";
           shellHook = ''
             echo "zodiac devshell — merge gate: ./scripts/check.sh"
           '';

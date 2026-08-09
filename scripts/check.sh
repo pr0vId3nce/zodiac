@@ -11,9 +11,9 @@ say "cargo fmt --check"
 cargo fmt --check
 
 say "cargo clippy -- -D warnings"
-cargo clippy --all-targets -- -D warnings
+cargo clippy --workspace --all-targets -- -D warnings
 
 say "cargo test"
-cargo test
+cargo test --workspace
 
 say "check.sh: all green"

@@ -1,15 +1,71 @@
-//! zodiac-gui: the Phase 3 GUI client (roadmap 3.3–3.6). This stub pins
-//! the workspace seam: it links the zodiac library (client_core,
-//! protocol) — the wgpu grid renderer lands on top of it.
+//! zodiac-gui: the Phase 3 GUI client (roadmap 3.3–3.6). A third client on
+//! the session socket: it attaches with the gfx-capable T_ATTACH payload,
+//! mirrors panes through `zodiac::client_core::CPane` exactly like the TUI,
+//! and renders the active pane with wgpu + glyphon per ADR 0004 — including
+//! zodiac's first actual pixel decode of the kitty image mirror.
+
+mod app;
+mod font;
+mod img;
+mod keys;
+mod palette;
+mod render;
+
+use app::{GuiApp, UserEvent};
+use zodiac::protocol::{read_frame, write_frame, T_ATTACH};
 
 fn main() -> anyhow::Result<()> {
-    let session = std::env::args().nth(1).unwrap_or_else(|| "main".into());
-    // Prove the seam: resolve the session socket the same way the TUI does.
-    let path = zodiac::protocol::socket_path(&session);
-    println!(
-        "zodiac-gui (Phase 3 stub): would attach to {} — the wgpu grid \
-         renderer is the next roadmap task",
-        path.display()
-    );
+    let arg = std::env::args().nth(1);
+    if matches!(arg.as_deref(), Some("-h") | Some("--help")) {
+        println!(
+            "usage: zodiac-gui [session]\n\n\
+             Attaches to the zodiac session (default: main), starting the\n\
+             server if needed. Keys go to the active pane; Ctrl+PageUp /\n\
+             Ctrl+PageDown switch panes; click a tab to focus it.\n\n\
+             env: ZODIAC_GUI_FONT=<family>  ZODIAC_GUI_EXIT_AFTER_MS=<ms>"
+        );
+        return Ok(());
+    }
+    let session = arg.unwrap_or_else(|| "main".into());
+
+    // Font first: the attach payload carries the cell size in px so the
+    // server's PTYs can report pixel dimensions to inner apps.
+    let mut fonts = font::Fonts::load();
+    let (cw, ch) = fonts.cell_size(1.0);
+    let mut sock = zodiac::client_core::connect_or_spawn(&session)?;
+    let (cw16, ch16) = (cw.round() as u16, ch.round() as u16);
+    let hello = [
+        1u8, // gfx capable
+        cw16.to_le_bytes()[0],
+        cw16.to_le_bytes()[1],
+        ch16.to_le_bytes()[0],
+        ch16.to_le_bytes()[1],
+    ];
+    write_frame(&mut sock, T_ATTACH, 0, &hello)?;
+
+    let event_loop = winit::event_loop::EventLoop::<UserEvent>::with_user_event().build()?;
+    let proxy = event_loop.create_proxy();
+    {
+        let mut rd = sock.try_clone()?;
+        std::thread::spawn(move || loop {
+            match read_frame(&mut rd) {
+                Ok(f) => {
+                    if proxy.send_event(UserEvent::Srv(f)).is_err() {
+                        break;
+                    }
+                }
+                Err(_) => {
+                    let _ = proxy.send_event(UserEvent::SrvGone);
+                    break;
+                }
+            }
+        });
+    }
+
+    let mut app = GuiApp::new(session, sock, fonts);
+    event_loop.run_app(&mut app)?;
+    if let Some(msg) = app.exit_msg.take() {
+        println!("{msg}");
+    }
     Ok(())
 }

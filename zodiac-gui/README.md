@@ -24,10 +24,14 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
 - **Focused pane** — sidebar (pane list, click to switch) · main · activity
   rail. The header carries a **transcript | terminal** toggle (per-pane,
   remembered; shells are always terminal). Transcript renders agent turns
-  natively (user bubbles, ✦ assistant, ⏺ tool cards, streaming tail, thinking);
-  the composer sends to the agent (Enter / **Send** → `T_AGENT_INPUT`) and a
-  "needs you" card answers permission requests (**Approve / Deny** →
-  `T_PERM_RESP`). Terminal mode paints the live vt100 grid. **Esc** returns.
+  natively with the Claude-Code feel: user bubbles, `⏺` assistant recaps with
+  fenced **code in its own boxes**, **expandable tool boxes** (full command +
+  collapsed output, red on error), **collapsible thinking** panels plus the live
+  orange "Cogitating…" sayings and spinner, and the streaming tail. The composer
+  sends to the agent (Enter / **Send** → `T_AGENT_INPUT`). A pending permission
+  raises a **modal question popup** navigable by mouse, number keys, ↑/↓ (or
+  j/k), and Enter (Esc denies) → `T_PERM_RESP`. Terminal mode paints the live
+  vt100 grid. **Esc** returns.
 - **⌘K / Ctrl+K** — command palette (fuzzy pane jump; ↑/↓, Enter, Esc).
 - **⌘, / Ctrl+,** — settings (grouped; edits real `config.json` keys, persists).
 - **Alt+O** — the Oracle panel (gradient orb; presentational for now).

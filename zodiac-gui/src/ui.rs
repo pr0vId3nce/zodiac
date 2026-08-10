@@ -48,6 +48,8 @@ pub struct UiState {
     /// Command-palette query + selected row.
     pub palette_query: String,
     pub palette_sel: usize,
+    /// Selected option in the permission popup (0 = allow, 1 = deny).
+    pub perm_sel: usize,
     /// The focused pane's measured terminal-area grid: (rows, cols, cell_w_px,
     /// cell_h_px). The app sends this as `T_RESIZE` so the pty matches the
     /// actual egui terminal widget, not the legacy full-window grid.
@@ -1064,17 +1066,26 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
     if show_term {
         terminal_view(ui, st, p);
     } else {
-        // Composer + approvals pinned to the bottom; transcript fills above.
+        // A pending permission takes over the bottom bar and raises a modal
+        // question popup; otherwise the composer sits there. Transcript fills
+        // the space above either way.
+        let has_perm = !p.agent.perms.is_empty();
         egui::Panel::bottom("composer")
             .resizable(false)
             .frame(Frame::NONE.fill(theme::bg_chrome()))
             .show(ui, |ui| {
-                approvals(ui, p, actions);
-                composer_bar(ui, p, &mut st.composer, actions);
+                if has_perm {
+                    perm_hint(ui);
+                } else {
+                    composer_bar(ui, p, &mut st.composer, actions);
+                }
             });
         egui::CentralPanel::default()
             .frame(Frame::NONE.fill(theme::bg_window()))
             .show(ui, |ui| transcript_view(ui, p));
+        if has_perm {
+            perm_popup(ui, p, st, actions);
+        }
     }
 }
 
@@ -1460,53 +1471,175 @@ fn composer_bar(ui: &mut egui::Ui, p: &CPane, composer: &mut String, actions: &m
         });
 }
 
-/// Pending-permission card: the tool + input, with Approve / Deny. Answering
-/// writes a T_PERM_RESP for the pane exactly as a keystroke would.
-fn approvals(ui: &mut egui::Ui, p: &CPane, actions: &mut Vec<UiAction>) {
+/// A slim bar shown in place of the composer while a decision is pending —
+/// the actual choices live in the modal `perm_popup`.
+fn perm_hint(ui: &mut egui::Ui) {
+    Frame::NONE
+        .inner_margin(Margin::symmetric(18, 14))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new("●").color(theme::STATUS_RAIL[0]).size(11.0));
+                ui.add_space(6.0);
+                ui.label(
+                    RichText::new("waiting for your decision…")
+                        .color(theme::TEXT_DIM)
+                        .size(13.0),
+                );
+            });
+        });
+}
+
+/// The pending permission as a centered modal question: the tool + its input,
+/// then the choices. Navigable by mouse, number keys, ↑/↓ (or j/k), and
+/// Enter; Esc denies. Answering writes a T_PERM_RESP exactly as before.
+fn perm_popup(ui: &mut egui::Ui, p: &CPane, st: &mut UiState, actions: &mut Vec<UiAction>) {
     let Some(req) = p.agent.perms.first() else {
         return;
     };
-    Frame::NONE
-        .fill(fade(theme::STATUS_RAIL[0], 0.10))
-        .stroke(Stroke::new(1.0, fade(theme::STATUS_RAIL[0], 0.28)))
-        .corner_radius(CornerRadius::same(10))
-        .inner_margin(Margin::same(12))
-        .outer_margin(Margin::symmetric(18, 8))
-        .show(ui, |ui| {
-            ui.set_width(ui.available_width());
-            let tool = req
-                .display_name
-                .clone()
-                .unwrap_or_else(|| req.tool_name.clone());
-            ui.label(
-                RichText::new(format!("needs you · {tool}"))
-                    .color(theme::STATUS_TEXT[0])
-                    .size(13.5)
-                    .strong(),
-            );
-            let arg = zodiac::client_core::tool_compact(&req.input);
-            if !arg.is_empty() {
-                ui.add(
-                    Label::new(
-                        RichText::new(clip(&arg, 120))
+    // (label, allow?) — the two outcomes the protocol supports.
+    let opts: [(&str, bool); 2] = [("Allow", true), ("Deny", false)];
+    let n = opts.len();
+    if st.perm_sel >= n {
+        st.perm_sel = 0;
+    }
+    // Keyboard navigation.
+    let mut confirm: Option<usize> = None;
+    ui.input(|i| {
+        if i.key_pressed(egui::Key::ArrowDown) || i.key_pressed(egui::Key::J) {
+            st.perm_sel = (st.perm_sel + 1).min(n - 1);
+        }
+        if i.key_pressed(egui::Key::ArrowUp) || i.key_pressed(egui::Key::K) {
+            st.perm_sel = st.perm_sel.saturating_sub(1);
+        }
+        if i.key_pressed(egui::Key::Num1) {
+            confirm = Some(0);
+        }
+        if i.key_pressed(egui::Key::Num2) {
+            confirm = Some(1);
+        }
+        if i.key_pressed(egui::Key::Enter) {
+            confirm = Some(st.perm_sel);
+        }
+        if i.key_pressed(egui::Key::Escape) {
+            confirm = Some(1); // deny
+        }
+    });
+    // Dim the screen behind the modal.
+    let screen = ui
+        .ctx()
+        .input(|i| i.raw.screen_rect)
+        .unwrap_or_else(|| ui.max_rect());
+    ui.painter().rect_filled(
+        screen,
+        CornerRadius::ZERO,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 150),
+    );
+    let tool = req
+        .display_name
+        .clone()
+        .unwrap_or_else(|| req.tool_name.clone());
+    let cmd = zodiac::client_core::tool_command(&req.input);
+    egui::Area::new(egui::Id::new("perm_popup"))
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            Frame::NONE
+                .fill(theme::bg_card())
+                .stroke(Stroke::new(1.0, fade(theme::STATUS_RAIL[0], 0.5)))
+                .corner_radius(CornerRadius::same(14))
+                .inner_margin(Margin::same(20))
+                .show(ui, |ui| {
+                    ui.set_width(520.0);
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("⏺").color(theme::STATUS_RAIL[0]).size(15.0));
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new("Permission needed")
+                                .color(theme::TEXT_PRIMARY)
+                                .size(17.0)
+                                .strong(),
+                        );
+                    });
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new(format!("Claude wants to use {tool}"))
                             .color(theme::TEXT_DIM)
-                            .size(12.0)
-                            .monospace(),
-                    )
-                    .truncate(),
-                );
-            }
-            ui.add_space(8.0);
-            ui.horizontal(|ui| {
-                if amber_button(ui, "Approve").clicked() {
-                    actions.push(UiAction::Perm(p.id, true));
-                }
-                ui.add_space(8.0);
-                if ui.button(RichText::new("Deny").size(13.0)).clicked() {
-                    actions.push(UiAction::Perm(p.id, false));
-                }
-            });
+                            .size(13.0),
+                    );
+                    if !cmd.trim().is_empty() {
+                        ui.add_space(10.0);
+                        code_box(ui, &clip_lines(cmd.trim_matches('\n'), 12));
+                    }
+                    ui.add_space(14.0);
+                    for (i, (label, _)) in opts.iter().enumerate() {
+                        let resp = perm_option_row(ui, i + 1, label, i == st.perm_sel);
+                        if resp.hovered() {
+                            st.perm_sel = i;
+                        }
+                        if resp.clicked() {
+                            confirm = Some(i);
+                        }
+                        ui.add_space(6.0);
+                    }
+                    ui.add_space(2.0);
+                    ui.label(
+                        RichText::new("↑↓ move · 1–2 pick · enter confirm · esc deny")
+                            .color(theme::TEXT_FAINT)
+                            .size(11.0),
+                    );
+                });
         });
+    if let Some(sel) = confirm {
+        actions.push(UiAction::Perm(p.id, opts[sel].1));
+        st.perm_sel = 0;
+    }
+}
+
+/// One selectable row in the permission popup: a numbered, highlightable
+/// button. Returns its response (hover selects, click confirms).
+fn perm_option_row(ui: &mut egui::Ui, num: usize, label: &str, selected: bool) -> egui::Response {
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 40.0), Sense::click());
+    let hovered = resp.hovered();
+    let bg = if selected {
+        theme::bg_selected()
+    } else if hovered {
+        theme::bg_raised()
+    } else {
+        theme::bg_panel()
+    };
+    let edge = if selected {
+        theme::accent()
+    } else {
+        theme::LINE_BORDER
+    };
+    let paint = ui.painter();
+    paint.rect(
+        rect,
+        CornerRadius::same(9),
+        bg,
+        Stroke::new(1.0, edge),
+        egui::StrokeKind::Inside,
+    );
+    paint.text(
+        rect.left_center() + egui::vec2(14.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        num.to_string(),
+        egui::FontId::monospace(13.0),
+        theme::accent(),
+    );
+    paint.text(
+        rect.left_center() + egui::vec2(40.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(14.0),
+        if selected {
+            theme::TEXT_PRIMARY
+        } else {
+            theme::TEXT_BODY
+        },
+    );
+    resp
 }
 
 /// Terminal-mode body: the pane's live vt100 screen, painted cell-by-cell

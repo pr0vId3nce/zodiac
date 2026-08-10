@@ -154,6 +154,15 @@ impl GuiApp {
                 self.ui_state.overlay = Overlay::None;
                 self.screen = Screen::Observatory;
             }
+            9 => {
+                // Seed a synthetic agent pane with the full range of rich
+                // transcript items + a pending permission, then focus it in
+                // transcript mode so every new render path (thinking, tool
+                // boxes, code, error, the question popup) is exercised.
+                self.seed_agent_pane();
+                self.active = self.panes.len().saturating_sub(1);
+                self.screen = Screen::Focused;
+            }
             _ => {
                 let panes = self.panes.len();
                 self.exit_msg = Some(format!(
@@ -166,6 +175,50 @@ impl GuiApp {
         }
         self.request_redraw();
         self.selftest_next = Some(Instant::now() + Duration::from_millis(250));
+    }
+
+    /// Build an in-memory agent pane covering every `ChatItem` kind and a
+    /// pending permission — used only by the self-test to render the rich
+    /// transcript + question popup without spawning a real agent.
+    fn seed_agent_pane(&mut self) {
+        let (rows, cols) = self.grid();
+        let mut p = CPane::new(u64::MAX, "selftest agent".into(), rows, cols);
+        p.kind = "agent".into();
+        let lines = [
+            serde_json::json!({"type": "zodiac_user", "text": "run the tests"}),
+            serde_json::json!({"type": "assistant", "message": {"content": [
+                {"type": "thinking", "thinking": "Let me look at the test runner first."},
+                {"type": "text", "text": "I'll run the suite now."},
+            ]}}),
+            serde_json::json!({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "t1", "name": "Bash",
+                 "input": {"command": "cargo test --all"}},
+            ]}}),
+            serde_json::json!({"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "t1", "content": "test result: ok. 42 passed"},
+            ]}}),
+            serde_json::json!({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "t2", "name": "Bash", "input": {"command": "false"}},
+            ]}}),
+            serde_json::json!({"type": "user", "message": {"content": [
+                {"type": "tool_result", "tool_use_id": "t2",
+                 "content": "exit code 1", "is_error": true},
+            ]}}),
+            serde_json::json!({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "Here's the fix:\n```rust\nfn main() {}\n```\nDone."},
+            ]}}),
+        ];
+        for l in &lines {
+            p.agent.apply_line(l);
+        }
+        p.agent.perms.push(PermRequest {
+            request_id: "selftest".into(),
+            tool_name: "Bash".into(),
+            display_name: Some("Bash".into()),
+            input: serde_json::json!({"command": "rm -rf ./build"}),
+            age_ms: 0,
+        });
+        self.panes.push(p);
     }
 
     fn send(&mut self, typ: u8, id: u64, data: &[u8]) {

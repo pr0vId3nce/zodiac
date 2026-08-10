@@ -79,9 +79,9 @@ pub struct GuiApp {
     /// Pane ids currently showing terminal mode (vs. the native transcript);
     /// per-pane and remembered, per the handoff (task #26).
     term_mode: std::collections::HashSet<u64>,
-    /// The focused agent pane's composer buffer (egui TextEdit backing store),
-    /// cleared when the active pane changes.
-    composer: String,
+    /// Mutable UI state egui edits in place (composer buffer, open overlay,
+    /// palette query/selection).
+    ui_state: crate::ui::UiState,
 }
 
 impl GuiApp {
@@ -118,7 +118,7 @@ impl GuiApp {
             egui_state: None,
             screen: crate::ui::Screen::Observatory,
             term_mode: std::collections::HashSet::new(),
-            composer: String::new(),
+            ui_state: crate::ui::UiState::default(),
         }
     }
 
@@ -918,7 +918,7 @@ impl GuiApp {
                 screen: self.screen,
                 term_active: active_id.is_some_and(|id| self.term_mode.contains(&id)),
             };
-            crate::ui::build(ui, &data, &mut self.composer, &mut actions);
+            crate::ui::build(ui, &data, &mut self.ui_state, &mut actions);
         });
         self.egui_state
             .as_mut()
@@ -945,13 +945,13 @@ impl GuiApp {
             match a {
                 crate::ui::UiAction::Focus(i) => {
                     if i != self.active {
-                        self.composer.clear();
+                        self.ui_state.composer.clear();
                     }
                     self.focus(i);
                 }
                 crate::ui::UiAction::Open(i) => {
                     if i != self.active {
-                        self.composer.clear();
+                        self.ui_state.composer.clear();
                     }
                     self.focus(i);
                     self.screen = crate::ui::Screen::Focused;
@@ -963,8 +963,8 @@ impl GuiApp {
                     }
                 }
                 crate::ui::UiAction::SendAgent(id) => {
-                    let text = self.composer.trim().to_string();
-                    self.composer.clear();
+                    let text = self.ui_state.composer.trim().to_string();
+                    self.ui_state.composer.clear();
                     if !text.is_empty() {
                         self.send(T_AGENT_INPUT, id, text.as_bytes());
                         if let Some(p) = self.panes.iter_mut().find(|p| p.id == id) {

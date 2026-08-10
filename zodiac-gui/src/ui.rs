@@ -21,6 +21,27 @@ pub enum Screen {
     Focused,
 }
 
+/// A modal overlay open over the current screen.
+#[derive(Clone, Copy, PartialEq, Eq, Default)]
+pub enum Overlay {
+    #[default]
+    None,
+    /// Command palette (⌘K): fuzzy pane/action jump.
+    Palette,
+}
+
+/// Mutable UI state egui edits in place across frames (buffers + overlays).
+#[derive(Default)]
+pub struct UiState {
+    /// The focused agent pane's composer buffer.
+    pub composer: String,
+    /// Which modal overlay is open.
+    pub overlay: Overlay,
+    /// Command-palette query + selected row.
+    pub palette_query: String,
+    pub palette_sel: usize,
+}
+
 /// Things the UI wants the app to do after a frame. Applied by `redraw`
 /// once egui's borrows are released.
 pub enum UiAction {
@@ -114,12 +135,192 @@ fn clip(s: &str, max: usize) -> String {
 
 /// Build the frame's UI, pushing any resulting actions. egui 0.36 hands the
 /// integration a root `&mut Ui`; panels are shown into it.
-pub fn build(ui: &mut egui::Ui, d: &UiData, composer: &mut String, actions: &mut Vec<UiAction>) {
+pub fn build(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<UiAction>) {
+    // Chrome shortcut: ⌘K / Ctrl+K opens the command palette.
+    if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::K)) {
+        st.overlay = Overlay::Palette;
+        st.palette_query.clear();
+        st.palette_sel = 0;
+    }
     title_bar(ui, d);
     match d.screen {
         Screen::Observatory => observatory(ui, d, actions),
-        Screen::Focused => focused(ui, d, composer, actions),
+        Screen::Focused => focused(ui, d, &mut st.composer, actions),
     }
+    if st.overlay == Overlay::Palette {
+        palette(ui, d, st, actions);
+    }
+}
+
+/// Subsequence fuzzy score: all pattern chars must appear in order; bonuses
+/// for consecutive runs and word-boundary starts. None = no match. (A small
+/// local scorer — the TUI's `fuzzy_score` lives in the binary, not the lib.)
+fn fuzzy_score(text: &str, pattern: &str) -> Option<i32> {
+    if pattern.is_empty() {
+        return Some(0);
+    }
+    let t: Vec<char> = text.to_lowercase().chars().collect();
+    let p: Vec<char> = pattern.to_lowercase().chars().collect();
+    let mut score = 0i32;
+    let mut ti = 0usize;
+    let mut prev_match = false;
+    let mut prev_char = ' ';
+    for &pc in &p {
+        let mut found = false;
+        while ti < t.len() {
+            let c = t[ti];
+            ti += 1;
+            if c == pc {
+                score += 1;
+                if prev_match {
+                    score += 3;
+                }
+                if prev_char == ' ' || prev_char == '/' || prev_char == '-' || prev_char == '_' {
+                    score += 5;
+                }
+                prev_match = true;
+                prev_char = c;
+                found = true;
+                break;
+            }
+            prev_match = false;
+            prev_char = c;
+        }
+        if !found {
+            return None;
+        }
+    }
+    Some(score)
+}
+
+/// Command palette (⌘K): a centered modal — query row + fuzzy-ranked pane
+/// list; ↑/↓ move, Enter opens, Esc closes.
+fn palette(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<UiAction>) {
+    // Ranked matches (index, score), best first.
+    let mut hits: Vec<(usize, i32)> = d
+        .panes
+        .iter()
+        .enumerate()
+        .filter_map(|(i, p)| fuzzy_score(&p.name, &st.palette_query).map(|s| (i, s)))
+        .collect();
+    hits.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
+    if st.palette_sel >= hits.len() {
+        st.palette_sel = hits.len().saturating_sub(1);
+    }
+    // Keys.
+    let (up, down, enter, esc) = ui.input(|i| {
+        (
+            i.key_pressed(egui::Key::ArrowUp),
+            i.key_pressed(egui::Key::ArrowDown),
+            i.key_pressed(egui::Key::Enter),
+            i.key_pressed(egui::Key::Escape),
+        )
+    });
+    if down && !hits.is_empty() {
+        st.palette_sel = (st.palette_sel + 1).min(hits.len() - 1);
+    }
+    if up {
+        st.palette_sel = st.palette_sel.saturating_sub(1);
+    }
+    if esc {
+        st.overlay = Overlay::None;
+    }
+    if enter {
+        if let Some(&(idx, _)) = hits.get(st.palette_sel) {
+            actions.push(UiAction::Open(idx));
+        }
+        st.overlay = Overlay::None;
+    }
+
+    // Dim scrim.
+    let screen = ui
+        .ctx()
+        .input(|i| i.raw.screen_rect)
+        .unwrap_or_else(|| ui.max_rect());
+    ui.painter().rect_filled(
+        screen,
+        CornerRadius::ZERO,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 140),
+    );
+    egui::Area::new(egui::Id::new("palette"))
+        .anchor(egui::Align2::CENTER_TOP, egui::vec2(0.0, 120.0))
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            Frame::NONE
+                .fill(theme::BG_CARD)
+                .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
+                .corner_radius(CornerRadius::same(14))
+                .inner_margin(Margin::same(8))
+                .show(ui, |ui| {
+                    ui.set_width(600.0);
+                    // Query row.
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("⌕").color(theme::AMBER).size(16.0));
+                        let edit = egui::TextEdit::singleline(&mut st.palette_query)
+                            .frame(Frame::NONE)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("jump to pane…")
+                            .font(egui::FontId::proportional(16.0))
+                            .text_color(theme::TEXT_PRIMARY);
+                        let r = ui.add(edit);
+                        r.request_focus();
+                    });
+                    ui.add_space(6.0);
+                    ui.separator();
+                    ui.add_space(4.0);
+                    // Results.
+                    for (row, &(idx, _)) in hits.iter().enumerate() {
+                        let p = &d.panes[idx];
+                        let si = d.si(p);
+                        let sel = row == st.palette_sel;
+                        let rr = Frame::NONE
+                            .fill(if sel {
+                                theme::BG_SELECTED
+                            } else {
+                                Color32::TRANSPARENT
+                            })
+                            .corner_radius(CornerRadius::same(9))
+                            .inner_margin(Margin::symmetric(10, 8))
+                            .show(ui, |ui| {
+                                ui.set_width(ui.available_width());
+                                ui.horizontal(|ui| {
+                                    ui.label(
+                                        RichText::new(roman(idx + 1))
+                                            .color(theme::AMBER)
+                                            .size(13.0)
+                                            .monospace(),
+                                    );
+                                    ui.add_space(8.0);
+                                    ui.label(
+                                        RichText::new(clip(&p.name, 40))
+                                            .color(theme::TEXT_PRIMARY)
+                                            .size(14.0),
+                                    );
+                                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                        ui.label(
+                                            RichText::new(theme::STATUS_WORD[si])
+                                                .color(theme::STATUS_TEXT[si])
+                                                .size(12.0),
+                                        );
+                                    });
+                                });
+                            });
+                        if rr.response.interact(Sense::click()).clicked() {
+                            actions.push(UiAction::Open(idx));
+                            st.overlay = Overlay::None;
+                        }
+                    }
+                    if hits.is_empty() {
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new("no matching panes")
+                                .color(theme::TEXT_FAINT)
+                                .size(13.0),
+                        );
+                        ui.add_space(6.0);
+                    }
+                });
+        });
 }
 
 /// The focused-pane screen (task #26): sidebar · main (header + transcript

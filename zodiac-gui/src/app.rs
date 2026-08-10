@@ -79,6 +79,9 @@ pub struct GuiApp {
     /// Pane ids currently showing terminal mode (vs. the native transcript);
     /// per-pane and remembered, per the handoff (task #26).
     term_mode: std::collections::HashSet<u64>,
+    /// The focused agent pane's composer buffer (egui TextEdit backing store),
+    /// cleared when the active pane changes.
+    composer: String,
 }
 
 impl GuiApp {
@@ -115,6 +118,7 @@ impl GuiApp {
             egui_state: None,
             screen: crate::ui::Screen::Observatory,
             term_mode: std::collections::HashSet::new(),
+            composer: String::new(),
         }
     }
 
@@ -914,7 +918,7 @@ impl GuiApp {
                 screen: self.screen,
                 term_active: active_id.is_some_and(|id| self.term_mode.contains(&id)),
             };
-            crate::ui::build(ui, &data, &mut actions);
+            crate::ui::build(ui, &data, &mut self.composer, &mut actions);
         });
         self.egui_state
             .as_mut()
@@ -939,8 +943,16 @@ impl GuiApp {
         // Apply UI actions now that egui's borrows are released.
         for a in actions {
             match a {
-                crate::ui::UiAction::Focus(i) => self.focus(i),
+                crate::ui::UiAction::Focus(i) => {
+                    if i != self.active {
+                        self.composer.clear();
+                    }
+                    self.focus(i);
+                }
                 crate::ui::UiAction::Open(i) => {
+                    if i != self.active {
+                        self.composer.clear();
+                    }
                     self.focus(i);
                     self.screen = crate::ui::Screen::Focused;
                 }
@@ -948,6 +960,31 @@ impl GuiApp {
                 crate::ui::UiAction::ToggleTerm(id) => {
                     if !self.term_mode.remove(&id) {
                         self.term_mode.insert(id);
+                    }
+                }
+                crate::ui::UiAction::SendAgent(id) => {
+                    let text = self.composer.trim().to_string();
+                    self.composer.clear();
+                    if !text.is_empty() {
+                        self.send(T_AGENT_INPUT, id, text.as_bytes());
+                        if let Some(p) = self.panes.iter_mut().find(|p| p.id == id) {
+                            p.agent.scroll = 0;
+                        }
+                    }
+                }
+                crate::ui::UiAction::Perm(id, allow) => {
+                    if let Some(p) = self.panes.iter_mut().find(|p| p.id == id) {
+                        if let Some(req) = p.agent.perms.first() {
+                            let rid = req.request_id.clone();
+                            p.agent.perms.retain(|r| r.request_id != rid);
+                            let resp = serde_json::to_vec(&PermResponse {
+                                request_id: rid,
+                                behavior: if allow { "allow" } else { "deny" }.into(),
+                                message: None,
+                            })
+                            .unwrap_or_default();
+                            self.send(T_PERM_RESP, id, &resp);
+                        }
                     }
                 }
                 crate::ui::UiAction::NewShell => self.send(T_NEW_PANE, 0, &[]),

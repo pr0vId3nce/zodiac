@@ -32,6 +32,10 @@ pub enum UiAction {
     Back,
     /// Toggle transcript/terminal display for the pane id.
     ToggleTerm(u64),
+    /// Send the composer buffer to the agent pane id as T_AGENT_INPUT.
+    SendAgent(u64),
+    /// Answer the pane's first pending permission request (true = allow).
+    Perm(u64, bool),
     /// Spawn a new shell pane.
     NewShell,
     /// Spawn a new claude agent pane.
@@ -110,11 +114,11 @@ fn clip(s: &str, max: usize) -> String {
 
 /// Build the frame's UI, pushing any resulting actions. egui 0.36 hands the
 /// integration a root `&mut Ui`; panels are shown into it.
-pub fn build(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
+pub fn build(ui: &mut egui::Ui, d: &UiData, composer: &mut String, actions: &mut Vec<UiAction>) {
     title_bar(ui, d);
     match d.screen {
         Screen::Observatory => observatory(ui, d, actions),
-        Screen::Focused => focused(ui, d, actions),
+        Screen::Focused => focused(ui, d, composer, actions),
     }
 }
 
@@ -122,8 +126,9 @@ pub fn build(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
 /// or terminal + composer) · activity rail. Esc returns to the Observatory.
 /// Terminal mode's real grid/kitty compositing lands in task #26b; for now
 /// it shows the rendered-screen tail from `T_STATE`.
-fn focused(root: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
-    if root.input(|i| i.key_pressed(egui::Key::Escape)) {
+fn focused(root: &mut egui::Ui, d: &UiData, composer: &mut String, actions: &mut Vec<UiAction>) {
+    // Esc closes only when the composer isn't focused (so it can clear text).
+    if root.input(|i| i.key_pressed(egui::Key::Escape)) && root.memory(|m| m.focused().is_none()) {
         actions.push(UiAction::Back);
     }
     egui::Panel::left("sidebar")
@@ -150,7 +155,7 @@ fn focused(root: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
                 .fill(theme::BG_WINDOW)
                 .inner_margin(Margin::same(0)),
         )
-        .show(root, |ui| main_pane(ui, d, actions));
+        .show(root, |ui| main_pane(ui, d, composer, actions));
 }
 
 /// The left sidebar: masthead, pane rows (click to switch), footer.
@@ -259,7 +264,7 @@ fn sidebar(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
 }
 
 /// The main column: pane header, then transcript or terminal, then composer.
-fn main_pane(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
+fn main_pane(ui: &mut egui::Ui, d: &UiData, composer: &mut String, actions: &mut Vec<UiAction>) {
     let Some(p) = d.panes.get(d.active) else {
         ui.centered_and_justified(|ui| {
             ui.label(RichText::new("no pane").color(theme::TEXT_FAINT));
@@ -304,8 +309,17 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
     if show_term {
         terminal_view(ui, p);
     } else {
-        transcript_view(ui, p);
-        composer(ui, p);
+        // Composer + approvals pinned to the bottom; transcript fills above.
+        egui::Panel::bottom("composer")
+            .resizable(false)
+            .frame(Frame::NONE.fill(theme::BG_CHROME))
+            .show(ui, |ui| {
+                approvals(ui, p, actions);
+                composer_bar(ui, p, composer, actions);
+            });
+        egui::CentralPanel::default()
+            .frame(Frame::NONE.fill(theme::BG_WINDOW))
+            .show(ui, |ui| transcript_view(ui, p));
     }
 }
 
@@ -411,39 +425,90 @@ fn turn_tool(ui: &mut egui::Ui, text: &str, inner: f32) {
     });
 }
 
-/// The composer (visual for now; functional input + T_AGENT_INPUT/approvals
-/// are the next focused-pane sub-step). Shows the pending prompt buffer.
-fn composer(ui: &mut egui::Ui, p: &CPane) {
+/// The composer: a live one-line prompt editor. Enter (or Send) submits to
+/// the agent as T_AGENT_INPUT and clears the buffer.
+fn composer_bar(ui: &mut egui::Ui, p: &CPane, composer: &mut String, actions: &mut Vec<UiAction>) {
     Frame::NONE
-        .fill(theme::BG_CHROME)
         .inner_margin(Margin::symmetric(18, 14))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            let mut submit = false;
             Frame::NONE
                 .fill(theme::BG_RAISED)
                 .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
                 .corner_radius(CornerRadius::same(11))
-                .inner_margin(Margin::symmetric(12, 10))
+                .inner_margin(Margin::symmetric(12, 8))
                 .show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    let shown = if p.agent.input.is_empty() {
-                        "message the agent…".to_string()
-                    } else {
-                        p.agent.input.clone()
-                    };
-                    let col = if p.agent.input.is_empty() {
-                        theme::TEXT_GHOST
-                    } else {
-                        theme::TEXT_BODY
-                    };
-                    ui.label(RichText::new(shown).color(col).size(14.0));
-                    ui.add_space(6.0);
-                    ui.label(
-                        RichText::new("⌘⏎ send · input wiring next")
-                            .color(theme::TEXT_GHOST)
-                            .size(11.5),
-                    );
+                    ui.horizontal(|ui| {
+                        let edit = egui::TextEdit::singleline(composer)
+                            .frame(Frame::NONE)
+                            .desired_width(ui.available_width() - 64.0)
+                            .hint_text("message the agent…")
+                            .font(egui::FontId::proportional(14.0))
+                            .text_color(theme::TEXT_BODY);
+                        let resp = ui.add(edit);
+                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            submit = true;
+                        }
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if amber_button(ui, "Send").clicked() {
+                                submit = true;
+                            }
+                        });
+                    });
                 });
+            if submit && !composer.trim().is_empty() {
+                actions.push(UiAction::SendAgent(p.id));
+            }
+        });
+}
+
+/// Pending-permission card: the tool + input, with Approve / Deny. Answering
+/// writes a T_PERM_RESP for the pane exactly as a keystroke would.
+fn approvals(ui: &mut egui::Ui, p: &CPane, actions: &mut Vec<UiAction>) {
+    let Some(req) = p.agent.perms.first() else {
+        return;
+    };
+    Frame::NONE
+        .fill(fade(theme::STATUS_RAIL[0], 0.10))
+        .stroke(Stroke::new(1.0, fade(theme::STATUS_RAIL[0], 0.28)))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin::same(12))
+        .outer_margin(Margin::symmetric(18, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let tool = req
+                .display_name
+                .clone()
+                .unwrap_or_else(|| req.tool_name.clone());
+            ui.label(
+                RichText::new(format!("needs you · {tool}"))
+                    .color(theme::STATUS_TEXT[0])
+                    .size(13.5)
+                    .strong(),
+            );
+            let arg = zodiac::client_core::tool_compact(&req.input);
+            if !arg.is_empty() {
+                ui.add(
+                    Label::new(
+                        RichText::new(clip(&arg, 120))
+                            .color(theme::TEXT_DIM)
+                            .size(12.0)
+                            .monospace(),
+                    )
+                    .truncate(),
+                );
+            }
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                if amber_button(ui, "Approve").clicked() {
+                    actions.push(UiAction::Perm(p.id, true));
+                }
+                ui.add_space(8.0);
+                if ui.button(RichText::new("Deny").size(13.0)).clicked() {
+                    actions.push(UiAction::Perm(p.id, false));
+                }
+            });
         });
 }
 

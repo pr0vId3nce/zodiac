@@ -82,6 +82,11 @@ pub struct GuiApp {
     /// Mutable UI state egui edits in place (composer buffer, open overlay,
     /// palette query/selection).
     ui_state: crate::ui::UiState,
+    /// `ZODIAC_GUI_SELFTEST`: walk every screen + overlay (and open a pane)
+    /// unattended, then exit — a headless click-through for CI/bug sweeps.
+    selftest: bool,
+    selftest_step: usize,
+    selftest_next: Option<Instant>,
 }
 
 impl GuiApp {
@@ -119,7 +124,48 @@ impl GuiApp {
             screen: crate::ui::Screen::Observatory,
             term_mode: std::collections::HashSet::new(),
             ui_state: crate::ui::UiState::default(),
+            selftest: std::env::var("ZODIAC_GUI_SELFTEST").is_ok(),
+            selftest_step: 0,
+            selftest_next: None,
         }
+    }
+
+    /// One step of the self-test walk (`ZODIAC_GUI_SELFTEST`): drive the GUI
+    /// through every screen and overlay, opening a pane so the focused /
+    /// terminal paths render, then exit. Any panic in a render path crashes
+    /// the process (nonzero exit) — that's the bug sweep.
+    fn selftest_tick(&mut self, event_loop: &ActiveEventLoop) {
+        use crate::ui::{Overlay, Screen};
+        let step = self.selftest_step;
+        self.selftest_step += 1;
+        match step {
+            0 => self.send(T_NEW_PANE, 0, &[]), // open a shell pane
+            1 => self.send(T_QUERY, 0, &[]),    // refresh state
+            2 => {
+                self.active = self.panes.len().saturating_sub(1);
+                self.screen = Screen::Focused; // focused (terminal for a shell)
+            }
+            3 => self.ui_state.overlay = Overlay::Palette,
+            4 => self.ui_state.overlay = Overlay::Settings,
+            5 => self.ui_state.overlay = Overlay::Oracle,
+            6 => self.ui_state.overlay = Overlay::Pairing,
+            7 => self.ui_state.overlay = Overlay::Raise,
+            8 => {
+                self.ui_state.overlay = Overlay::None;
+                self.screen = Screen::Observatory;
+            }
+            _ => {
+                let panes = self.panes.len();
+                self.exit_msg = Some(format!(
+                    "zodiac-gui: selftest ok — {panes} pane(s), all screens + overlays rendered"
+                ));
+                self.send(T_DETACH, 0, &[]);
+                event_loop.exit();
+                return;
+            }
+        }
+        self.request_redraw();
+        self.selftest_next = Some(Instant::now() + Duration::from_millis(250));
     }
 
     fn send(&mut self, typ: u8, id: u64, data: &[u8]) {
@@ -493,22 +539,6 @@ impl GuiApp {
         if ev.state != ElementState::Pressed {
             return;
         }
-        // Ctrl+S toggles the fullscreen settings page.
-        if self.mods.control_key() {
-            if let Key::Character(s) = &ev.logical_key {
-                if s.eq_ignore_ascii_case("s") {
-                    self.settings_open = !self.settings_open;
-                    self.settings_row = 0;
-                    self.request_redraw();
-                    return;
-                }
-            }
-        }
-        // While the settings page is open it owns the keyboard.
-        if self.settings_open {
-            self.settings_key(&ev.logical_key);
-            return;
-        }
         // Alt tab navigation + new-pane shortcuts.
         if self.mods.alt_key() {
             let n = self.panes.len();
@@ -584,33 +614,39 @@ impl GuiApp {
                 _ => {}
             }
         }
+        // Raw keys reach a pane's pty ONLY in the focused screen's terminal
+        // view. Everywhere else — Observatory, agent transcript (the egui
+        // composer owns input), and while any overlay is open — egui owns the
+        // keyboard, so unfocused keystrokes must not leak into a pty.
+        let in_terminal = self.screen == crate::ui::Screen::Focused
+            && self.ui_state.overlay == crate::ui::Overlay::None
+            && self
+                .panes
+                .get(self.active)
+                .is_some_and(|p| !p.is_agent() || self.term_mode.contains(&p.id));
+        if !in_terminal {
+            return;
+        }
         let Some(ck) = crate::keys::to_key_event(&ev.logical_key, self.mods) else {
             return;
         };
         let Some(p) = self.panes.get(self.active) else {
             return;
         };
-        if p.is_agent() {
-            self.agent_key(ck);
+        let id = p.id;
+        let screen = p.parser.screen();
+        let app_cursor = screen.application_cursor();
+        // Kitty keyboard (4.4): when the pane's flag stack is on, the GUI
+        // always synthesizes CSI-u. `encode_key_kitty` returns None when the
+        // legacy bytes are already unambiguous (and when flags are 0), so
+        // plain text stays plain text.
+        let flags = if p.kitty_kill {
+            0
         } else {
-            let id = p.id;
-            let screen = p.parser.screen();
-            let app_cursor = screen.application_cursor();
-            // Kitty keyboard (4.4): when the pane's flag stack is on, the
-            // GUI always synthesizes CSI-u — it is not gated on a host
-            // probe like the TUI. `encode_key_kitty` returns None for
-            // events whose legacy bytes are already unambiguous (and when
-            // flags are 0), so plain text stays plain text.
-            let flags = if p.kitty_kill {
-                0
-            } else {
-                screen.kitty_keyboard_flags()
-            };
-            if let Some(bytes) =
-                encode_key_kitty(&ck, flags).or_else(|| encode_key(&ck, app_cursor))
-            {
-                self.send_input(id, &bytes);
-            }
+            screen.kitty_keyboard_flags()
+        };
+        if let Some(bytes) = encode_key_kitty(&ck, flags).or_else(|| encode_key(&ck, app_cursor)) {
+            self.send_input(id, &bytes);
         }
         self.request_redraw();
     }
@@ -744,19 +780,22 @@ impl GuiApp {
     }
 
     fn on_ime(&mut self, text: String) {
-        let Some(p) = self.panes.get_mut(self.active) else {
+        // Same rule as on_key: IME text reaches a pty only in the focused
+        // terminal view; elsewhere egui's own text widgets own IME.
+        let in_terminal = self.screen == crate::ui::Screen::Focused
+            && self.ui_state.overlay == crate::ui::Overlay::None
+            && self
+                .panes
+                .get(self.active)
+                .is_some_and(|p| !p.is_agent() || self.term_mode.contains(&p.id));
+        if !in_terminal {
+            return;
+        }
+        let Some(p) = self.panes.get(self.active) else {
             return;
         };
-        if p.is_agent() {
-            for c in text.chars() {
-                let at = char_byte(&p.agent.input, p.agent.cursor);
-                p.agent.input.insert(at, c);
-                p.agent.cursor += 1;
-            }
-        } else {
-            let id = p.id;
-            self.send_input(id, text.as_bytes());
-        }
+        let id = p.id;
+        self.send_input(id, text.as_bytes());
         self.request_redraw();
     }
 
@@ -1110,6 +1149,9 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 // before the first sync/draw; also sends the grid size.
                 self.apply_settings();
                 self.request_redraw();
+                if self.selftest {
+                    self.selftest_next = Some(Instant::now() + Duration::from_millis(400));
+                }
             }
             Err(e) => {
                 self.exit_msg = Some(format!("zodiac-gui: GPU init failed: {e}"));
@@ -1194,7 +1236,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
 
     /// A WaitUntil deadline fired: redraw if it was the animation timer, and
     /// poll `T_QUERY` if the state-poll deadline elapsed.
-    fn new_events(&mut self, _event_loop: &ActiveEventLoop, cause: StartCause) {
+    fn new_events(&mut self, event_loop: &ActiveEventLoop, cause: StartCause) {
         if !matches!(cause, StartCause::ResumeTimeReached { .. }) {
             return;
         }
@@ -1206,6 +1248,10 @@ impl ApplicationHandler<UserEvent> for GuiApp {
             // The T_STATE reply arrives as a Srv frame and triggers a redraw.
             self.send(T_QUERY, 0, &[]);
             self.next_query = Some(now + QUERY_INTERVAL);
+        }
+        if self.selftest && self.selftest_next.is_some_and(|t| now >= t) {
+            self.selftest_next = None;
+            self.selftest_tick(event_loop);
         }
     }
 
@@ -1220,10 +1266,15 @@ impl ApplicationHandler<UserEvent> for GuiApp {
         // Sleep until the earliest armed deadline: test-exit, animation
         // frame flip, or the next state poll. (The poll is always armed, so
         // this is effectively WaitUntil at the poll cadence.)
-        let next = [self.exit_at, self.next_anim, self.next_query]
-            .into_iter()
-            .flatten()
-            .min();
+        let next = [
+            self.exit_at,
+            self.next_anim,
+            self.next_query,
+            self.selftest_next,
+        ]
+        .into_iter()
+        .flatten()
+        .min();
         event_loop.set_control_flow(match next {
             Some(t) => ControlFlow::WaitUntil(t),
             None => ControlFlow::Wait,

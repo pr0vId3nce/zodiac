@@ -76,6 +76,9 @@ pub struct GuiApp {
     egui_state: Option<egui_winit::State>,
     /// Which screen the GUI is showing (app-shell router, task #24).
     screen: crate::ui::Screen,
+    /// Pane ids currently showing terminal mode (vs. the native transcript);
+    /// per-pane and remembered, per the handoff (task #26).
+    term_mode: std::collections::HashSet<u64>,
 }
 
 impl GuiApp {
@@ -111,6 +114,7 @@ impl GuiApp {
             egui_ctx: egui::Context::default(),
             egui_state: None,
             screen: crate::ui::Screen::Observatory,
+            term_mode: std::collections::HashSet::new(),
         }
     }
 
@@ -901,12 +905,14 @@ impl GuiApp {
         let raw = self.egui_state.as_mut().unwrap().take_egui_input(&win);
         let mut actions: Vec<crate::ui::UiAction> = Vec::new();
         let full = self.egui_ctx.run_ui(raw, |ui| {
+            let active_id = self.panes.get(self.active).map(|p| p.id);
             let data = crate::ui::UiData {
                 session: &self.session,
                 panes: &self.panes,
                 state: self.state.as_ref(),
                 active: self.active,
                 screen: self.screen,
+                term_active: active_id.is_some_and(|id| self.term_mode.contains(&id)),
             };
             crate::ui::build(ui, &data, &mut actions);
         });
@@ -939,6 +945,11 @@ impl GuiApp {
                     self.screen = crate::ui::Screen::Focused;
                 }
                 crate::ui::UiAction::Back => self.screen = crate::ui::Screen::Observatory,
+                crate::ui::UiAction::ToggleTerm(id) => {
+                    if !self.term_mode.remove(&id) {
+                        self.term_mode.insert(id);
+                    }
+                }
                 crate::ui::UiAction::NewShell => self.send(T_NEW_PANE, 0, &[]),
                 crate::ui::UiAction::NewAgent => {
                     self.send(T_NEW_PANE, 0, br#"{"kind":"agent","agent":"claude"}"#)

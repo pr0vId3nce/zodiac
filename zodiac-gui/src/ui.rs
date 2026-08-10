@@ -30,6 +30,8 @@ pub enum UiAction {
     Open(usize),
     /// Return to the Observatory.
     Back,
+    /// Toggle transcript/terminal display for the pane id.
+    ToggleTerm(u64),
     /// Spawn a new shell pane.
     NewShell,
     /// Spawn a new claude agent pane.
@@ -43,6 +45,8 @@ pub struct UiData<'a> {
     pub state: Option<&'a SessionState>,
     pub active: usize,
     pub screen: Screen,
+    /// The active pane is showing terminal mode (vs. native transcript).
+    pub term_active: bool,
 }
 
 impl UiData<'_> {
@@ -114,85 +118,436 @@ pub fn build(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
     }
 }
 
-/// The focused-pane screen (task #24 shell; the full sidebar + transcript +
-/// activity rail land in task #26). For now: a pane header with a back
-/// affordance and a transcript-tail preview from live state. Esc returns.
+/// The focused-pane screen (task #26): sidebar · main (header + transcript
+/// or terminal + composer) · activity rail. Esc returns to the Observatory.
+/// Terminal mode's real grid/kitty compositing lands in task #26b; for now
+/// it shows the rendered-screen tail from `T_STATE`.
 fn focused(root: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
     if root.input(|i| i.key_pressed(egui::Key::Escape)) {
         actions.push(UiAction::Back);
     }
+    egui::Panel::left("sidebar")
+        .exact_size(268.0)
+        .resizable(false)
+        .frame(
+            Frame::NONE
+                .fill(theme::BG_CHROME)
+                .inner_margin(Margin::same(10)),
+        )
+        .show(root, |ui| sidebar(ui, d, actions));
+    egui::Panel::right("rail")
+        .exact_size(288.0)
+        .resizable(false)
+        .frame(
+            Frame::NONE
+                .fill(theme::BG_PANEL)
+                .inner_margin(Margin::same(14)),
+        )
+        .show(root, |ui| activity_rail(ui, d));
     egui::CentralPanel::default()
         .frame(
             Frame::NONE
                 .fill(theme::BG_WINDOW)
                 .inner_margin(Margin::same(0)),
         )
-        .show(root, |ui| {
-            let Some(p) = d.panes.get(d.active) else {
-                ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new("no pane").color(theme::TEXT_FAINT));
-                });
-                return;
-            };
-            let ps = d.ps(p);
-            let si = d.si(p);
-            // Header.
-            Frame::NONE
-                .fill(theme::BG_CHROME)
-                .inner_margin(Margin::symmetric(16, 10))
-                .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        sigil_tile(ui, d.active + 1, si);
-                        ui.add_space(10.0);
-                        ui.label(
-                            RichText::new(clip(&p.name, 40))
-                                .color(theme::TEXT_PRIMARY)
-                                .size(16.0)
-                                .strong(),
-                        );
-                        if let Some(agent) = ps.and_then(|s| s.agent.as_deref()) {
-                            agent_chip(ui, agent, ps.and_then(|s| s.version.as_deref()));
-                        }
-                        status_pill(ui, si, theme::STATUS_WORD[si]);
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui
-                                .button(RichText::new("← observatory").size(12.5))
-                                .clicked()
-                            {
-                                actions.push(UiAction::Back);
-                            }
+        .show(root, |ui| main_pane(ui, d, actions));
+}
+
+/// The left sidebar: masthead, pane rows (click to switch), footer.
+fn sidebar(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
+    ui.label(
+        RichText::new("PANES")
+            .color(theme::TEXT_GHOST)
+            .size(11.0)
+            .strong(),
+    );
+    ui.add_space(8.0);
+    egui::ScrollArea::vertical()
+        .id_salt("sidebar_scroll")
+        .show(ui, |ui| {
+            for (i, p) in d.panes.iter().enumerate() {
+                let si = d.si(p);
+                let sel = i == d.active;
+                let fr = Frame::NONE
+                    .fill(if sel {
+                        theme::BG_SELECTED
+                    } else {
+                        Color32::TRANSPARENT
+                    })
+                    .corner_radius(CornerRadius::same(9))
+                    .inner_margin(Margin::symmetric(10, 9))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(roman(i + 1))
+                                    .color(if sel {
+                                        theme::AMBER
+                                    } else {
+                                        theme::STATUS_TEXT[si]
+                                    })
+                                    .size(13.0)
+                                    .monospace(),
+                            );
+                            ui.add_space(6.0);
+                            ui.vertical(|ui| {
+                                ui.label(
+                                    RichText::new(clip(&p.name, 22))
+                                        .color(if sel {
+                                            theme::TEXT_PRIMARY
+                                        } else {
+                                            theme::TEXT_BODY
+                                        })
+                                        .size(13.5)
+                                        .strong(),
+                                );
+                                let meta = d
+                                    .ps(p)
+                                    .and_then(|s| s.agent.clone())
+                                    .unwrap_or_else(|| "shell".into());
+                                ui.label(
+                                    RichText::new(format!("{meta} · {}", theme::STATUS_WORD[si]))
+                                        .color(theme::TEXT_GHOST)
+                                        .size(11.5),
+                                );
+                            });
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                let (dot, _) =
+                                    ui.allocate_exact_size(egui::vec2(9.0, 9.0), Sense::hover());
+                                ui.painter().circle_filled(
+                                    dot.center(),
+                                    3.5,
+                                    theme::STATUS_RAIL[si],
+                                );
+                            });
                         });
                     });
-                });
-            // Body: transcript-tail preview (full transcript/terminal: #26).
-            egui::Frame::NONE
-                .inner_margin(Margin::same(18))
-                .show(ui, |ui| {
-                    let tail: Vec<&String> =
-                        ps.map(|s| s.tail.iter().collect()).unwrap_or_default();
-                    if tail.is_empty() {
-                        ui.label(
-                            RichText::new("No transcript yet.")
-                                .color(theme::TEXT_FAINT)
-                                .size(13.5),
-                        );
-                    } else {
-                        egui::ScrollArea::vertical().show(ui, |ui| {
-                            for line in tail {
-                                ui.add(
-                                    Label::new(
-                                        RichText::new(line)
-                                            .color(theme::TEXT_BODY)
-                                            .size(13.0)
-                                            .monospace(),
-                                    )
-                                    .truncate(),
-                                );
-                            }
-                        });
+                if fr
+                    .response
+                    .interact(Sense::click())
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    actions.push(UiAction::Focus(i));
+                }
+                ui.add_space(4.0);
+            }
+        });
+    ui.add_space(8.0);
+    ui.separator();
+    ui.add_space(6.0);
+    if ui
+        .button(
+            RichText::new("+ new pane")
+                .color(theme::TEXT_DIM)
+                .size(13.0),
+        )
+        .clicked()
+    {
+        actions.push(UiAction::NewShell);
+    }
+    if ui
+        .button(
+            RichText::new("← observatory")
+                .color(theme::TEXT_DIM)
+                .size(13.0),
+        )
+        .clicked()
+    {
+        actions.push(UiAction::Back);
+    }
+}
+
+/// The main column: pane header, then transcript or terminal, then composer.
+fn main_pane(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
+    let Some(p) = d.panes.get(d.active) else {
+        ui.centered_and_justified(|ui| {
+            ui.label(RichText::new("no pane").color(theme::TEXT_FAINT));
+        });
+        return;
+    };
+    let ps = d.ps(p);
+    let si = d.si(p);
+    // Header.
+    Frame::NONE
+        .fill(theme::BG_CHROME)
+        .inner_margin(Margin::symmetric(16, 10))
+        .show(ui, |ui| {
+            ui.horizontal(|ui| {
+                sigil_tile(ui, d.active + 1, si);
+                ui.add_space(10.0);
+                ui.label(
+                    RichText::new(clip(&p.name, 40))
+                        .color(theme::TEXT_PRIMARY)
+                        .size(16.0)
+                        .strong(),
+                );
+                if let Some(agent) = ps.and_then(|s| s.agent.as_deref()) {
+                    agent_chip(ui, agent, ps.and_then(|s| s.version.as_deref()));
+                }
+                status_pill(ui, si, theme::STATUS_WORD[si]);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    // transcript | terminal segmented toggle.
+                    let is_agent = p.is_agent();
+                    let term = d.term_active || !is_agent;
+                    if seg(ui, "terminal", term) && !term && is_agent {
+                        actions.push(UiAction::ToggleTerm(p.id));
+                    }
+                    if seg(ui, "transcript", !term) && term && is_agent {
+                        actions.push(UiAction::ToggleTerm(p.id));
                     }
                 });
+            });
         });
+    // Body.
+    let show_term = d.term_active || !p.is_agent();
+    if show_term {
+        terminal_view(ui, d, p);
+    } else {
+        transcript_view(ui, p);
+        composer(ui, p);
+    }
+}
+
+/// Native agent transcript: user/assistant/tool/error turns + streaming tail.
+fn transcript_view(ui: &mut egui::Ui, p: &CPane) {
+    use zodiac::client_core::ARole;
+    egui::ScrollArea::vertical()
+        .id_salt("transcript")
+        .stick_to_bottom(true)
+        .auto_shrink([false, false])
+        .show(ui, |ui| {
+            ui.add_space(12.0);
+            let inner = 22.0;
+            for (role, text) in &p.agent.log {
+                match role {
+                    ARole::User => turn_user(ui, text, inner),
+                    ARole::Assistant => turn_agent(ui, "✦", theme::VIOLET, text, inner),
+                    ARole::Tool => turn_tool(ui, text, inner),
+                    ARole::Error => turn_agent(ui, "✗", theme::STATUS_RAIL[0], text, inner),
+                }
+                ui.add_space(10.0);
+            }
+            if p.agent.thinking {
+                indent(ui, inner, |ui| {
+                    ui.label(
+                        RichText::new("● ● ●  thinking")
+                            .color(theme::VIOLET_TEXT)
+                            .size(13.0),
+                    );
+                });
+            }
+            if !p.agent.stream.is_empty() {
+                turn_agent(ui, "✦", theme::VIOLET, &p.agent.stream, inner);
+            }
+            ui.add_space(12.0);
+        });
+}
+
+/// A left-indented block.
+fn indent(ui: &mut egui::Ui, x: f32, add: impl FnOnce(&mut egui::Ui)) {
+    ui.horizontal(|ui| {
+        ui.add_space(x);
+        ui.vertical(|ui| {
+            ui.set_max_width(ui.available_width() - x);
+            add(ui);
+        });
+    });
+}
+
+/// User turn: a right-aligned selected-fill bubble.
+fn turn_user(ui: &mut egui::Ui, text: &str, inner: f32) {
+    ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
+        ui.add_space(inner);
+        Frame::NONE
+            .fill(theme::BG_SELECTED)
+            .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
+            .corner_radius(CornerRadius::same(12))
+            .inner_margin(Margin::symmetric(12, 8))
+            .show(ui, |ui| {
+                ui.set_max_width(ui.available_width() * 0.64);
+                ui.label(RichText::new(text).color(theme::TEXT_BODY).size(14.0));
+            });
+    });
+}
+
+/// Assistant/error turn: an avatar glyph + prose column.
+fn turn_agent(ui: &mut egui::Ui, glyph: &str, col: Color32, text: &str, inner: f32) {
+    ui.horizontal_top(|ui| {
+        ui.add_space(inner - 18.0);
+        ui.label(RichText::new(glyph).color(col).size(15.0));
+        ui.add_space(6.0);
+        ui.vertical(|ui| {
+            ui.set_max_width(ui.available_width());
+            ui.label(RichText::new(text).color(theme::TEXT_BODY).size(14.5));
+        });
+    });
+}
+
+/// Tool-call: a compact mono card.
+fn turn_tool(ui: &mut egui::Ui, text: &str, inner: f32) {
+    indent(ui, inner, |ui| {
+        Frame::NONE
+            .fill(theme::BG_CHROME)
+            .stroke(Stroke::new(1.0, theme::LINE_BORDER))
+            .corner_radius(CornerRadius::same(10))
+            .inner_margin(Margin::symmetric(10, 7))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("⏺").color(theme::AMBER).size(12.0));
+                    ui.add_space(6.0);
+                    ui.add(
+                        Label::new(
+                            RichText::new(text)
+                                .color(theme::TEXT_DIM)
+                                .size(12.0)
+                                .monospace(),
+                        )
+                        .truncate(),
+                    );
+                });
+            });
+    });
+}
+
+/// The composer (visual for now; functional input + T_AGENT_INPUT/approvals
+/// are the next focused-pane sub-step). Shows the pending prompt buffer.
+fn composer(ui: &mut egui::Ui, p: &CPane) {
+    Frame::NONE
+        .fill(theme::BG_CHROME)
+        .inner_margin(Margin::symmetric(18, 14))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            Frame::NONE
+                .fill(theme::BG_RAISED)
+                .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
+                .corner_radius(CornerRadius::same(11))
+                .inner_margin(Margin::symmetric(12, 10))
+                .show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    let shown = if p.agent.input.is_empty() {
+                        "message the agent…".to_string()
+                    } else {
+                        p.agent.input.clone()
+                    };
+                    let col = if p.agent.input.is_empty() {
+                        theme::TEXT_GHOST
+                    } else {
+                        theme::TEXT_BODY
+                    };
+                    ui.label(RichText::new(shown).color(col).size(14.0));
+                    ui.add_space(6.0);
+                    ui.label(
+                        RichText::new("⌘⏎ send · input wiring next")
+                            .color(theme::TEXT_GHOST)
+                            .size(11.5),
+                    );
+                });
+        });
+}
+
+/// Terminal-mode body: the rendered-screen tail from state until the real
+/// grid/kitty compositing lands (task #26b).
+fn terminal_view(ui: &mut egui::Ui, d: &UiData, p: &CPane) {
+    egui::Frame::NONE
+        .inner_margin(Margin::same(14))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            let tail: Vec<&String> = d.ps(p).map(|s| s.tail.iter().collect()).unwrap_or_default();
+            if tail.is_empty() {
+                ui.label(
+                    RichText::new("terminal mode — live grid compositing lands next (26b)")
+                        .color(theme::TEXT_FAINT)
+                        .size(13.0),
+                );
+            } else {
+                egui::ScrollArea::vertical()
+                    .id_salt("term")
+                    .auto_shrink([false, false])
+                    .show(ui, |ui| {
+                        for line in tail {
+                            ui.add(
+                                Label::new(
+                                    RichText::new(line)
+                                        .color(theme::TEXT_BODY)
+                                        .size(13.0)
+                                        .monospace(),
+                                )
+                                .truncate(),
+                            );
+                        }
+                    });
+            }
+        });
+}
+
+/// A small segmented-control button; returns true when clicked.
+fn seg(ui: &mut egui::Ui, label: &str, on: bool) -> bool {
+    let btn = egui::Button::new(
+        RichText::new(label)
+            .color(if on {
+                theme::BG_CHROME
+            } else {
+                theme::TEXT_DIM
+            })
+            .size(12.0),
+    )
+    .fill(if on { theme::AMBER } else { theme::BG_RAISED })
+    .corner_radius(CornerRadius::same(6));
+    ui.add(btn).clicked()
+}
+
+/// The right activity rail: session facts (the output histogram needs
+/// server-side rate buckets — deferred).
+fn activity_rail(ui: &mut egui::Ui, d: &UiData) {
+    let Some(p) = d.panes.get(d.active) else {
+        return;
+    };
+    let ps = d.ps(p);
+    ui.label(
+        RichText::new("SESSION")
+            .color(theme::TEXT_GHOST)
+            .size(11.0)
+            .strong(),
+    );
+    ui.add_space(10.0);
+    let row = |ui: &mut egui::Ui, k: &str, v: String| {
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(k).color(theme::TEXT_FAINT).size(12.0));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.add(
+                    Label::new(
+                        RichText::new(v)
+                            .color(theme::TEXT_DIM)
+                            .size(12.0)
+                            .monospace(),
+                    )
+                    .truncate(),
+                );
+            });
+        });
+        ui.add_space(6.0);
+    };
+    row(ui, "session", d.session.to_string());
+    if let Some(s) = ps {
+        if let Some(cwd) = &s.cwd {
+            row(ui, "cwd", clip(cwd, 26));
+        }
+        if let Some(host) = &s.ssh {
+            row(ui, "ssh", clip(host, 20));
+        }
+        row(ui, "uptime", fmt_age(s.uptime_ms));
+        row(
+            ui,
+            "auto-resume",
+            if s.auto_resume {
+                "on".into()
+            } else {
+                "off".into()
+            },
+        );
+    }
 }
 
 /// The 52px title bar: amber mark, "zodiac", session chip, host vitals.

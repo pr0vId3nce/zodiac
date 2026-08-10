@@ -212,6 +212,7 @@ function Row({ pane, onOpen }: { pane: PaneState; onOpen: (id: number) => void }
       <span className="flex gap-2 pl-[54px] font-mono text-[9.5px] text-dim">
         {pane.agent && <span>{pane.version ?? pane.agent}</span>}
         {pane.cwd && <span className="truncate">{tail(pane.cwd)}</span>}
+        {pane.ssh && <span className="shrink-0 text-gold-soft">⇄{pane.ssh}</span>}
         <span className="ml-auto shrink-0 tabular-nums">↑{uptime(pane.uptime_ms)}</span>
       </span>
     </button>

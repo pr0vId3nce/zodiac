@@ -24,6 +24,7 @@ export const T_REPLAY = 21;
 export const T_OUTPUT = 22;
 export const T_PANE_OPENED = 23;
 export const T_PANE_CLOSED = 24;
+export const T_PANE_RENAMED = 30; // payload: utf8 name (server auto-naming)
 export const T_SERVER_EXIT = 25;
 export const T_STATE = 26;
 export const T_SCREEN = 27;
@@ -49,6 +50,10 @@ export interface PaneState {
   thinking: boolean;
   recap: string | null;
   subtitle: string | null;
+  /** The host this pane's shell is ssh'd into, if any. */
+  ssh?: string | null;
+  /** The last few non-blank rendered screen lines (empty for shells). */
+  tail?: string[];
 }
 
 export interface SessionState {
@@ -450,6 +455,11 @@ export class ZodiacLink extends EventEmitter {
       }
       case T_PANE_OPENED:
         // state poll picks the new pane up within a second
+        break;
+      case T_PANE_RENAMED:
+        // Auto-rename: refresh state now so the phone updates the pane name
+        // immediately instead of waiting for the 1 Hz poll.
+        this.send(T_QUERY, 0, Buffer.alloc(0));
         break;
       case T_SERVER_EXIT:
         this.sock?.destroy();

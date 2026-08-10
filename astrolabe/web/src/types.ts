@@ -17,6 +17,10 @@ export interface PaneState {
   thinking: boolean;
   recap: string | null;
   subtitle: string | null;
+  /** The host this pane's shell is ssh'd into, if any. */
+  ssh?: string | null;
+  /** The last few non-blank rendered screen lines (empty for shells). */
+  tail?: string[];
   /** Parsed question dialog, merged in by the bridge while the pane is
       needs_input with a numbered picker on screen (bridge/question.ts). */
   question?: string;

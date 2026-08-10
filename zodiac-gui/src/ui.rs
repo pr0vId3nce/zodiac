@@ -32,6 +32,8 @@ pub enum Overlay {
     Settings,
     /// Pair-a-phone dialog: astrolabe pairing QR.
     Pairing,
+    /// The Oracle chat panel (Alt+O).
+    Oracle,
 }
 
 /// Mutable UI state egui edits in place across frames (buffers + overlays).
@@ -159,6 +161,9 @@ pub fn build(
     if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Comma)) {
         st.overlay = Overlay::Settings;
     }
+    if ui.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::O)) {
+        st.overlay = Overlay::Oracle;
+    }
     title_bar(ui, d, st);
     match d.screen {
         Screen::Observatory => observatory(ui, d, actions),
@@ -168,8 +173,173 @@ pub fn build(
         Overlay::Palette => palette(ui, d, st, actions),
         Overlay::Settings => settings_dialog(ui, st, settings, actions),
         Overlay::Pairing => pairing_dialog(ui, d, st),
+        Overlay::Oracle => oracle_dialog(ui, st),
         Overlay::None => {}
     }
+}
+
+/// The Oracle panel (Alt+O): the CSS-gradient orb + status + slash chips and
+/// an input row. Presentational — the GUI has no chat wiring yet and makes no
+/// network calls (chat send/receive is a follow-on).
+fn oracle_dialog(ui: &mut egui::Ui, st: &mut UiState) {
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        st.overlay = Overlay::None;
+    }
+    let screen = ui
+        .ctx()
+        .input(|i| i.raw.screen_rect)
+        .unwrap_or_else(|| ui.max_rect());
+    ui.painter().rect_filled(
+        screen,
+        CornerRadius::ZERO,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 150),
+    );
+    let mut close = false;
+    egui::Area::new(egui::Id::new("oracle"))
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            Frame::NONE
+                .fill(Color32::from_rgb(0x0a, 0x0f, 0x14))
+                .stroke(Stroke::new(1.0, fade(theme::VIOLET, 0.35)))
+                .corner_radius(CornerRadius::same(14))
+                .inner_margin(Margin::same(0))
+                .show(ui, |ui| {
+                    ui.set_width(520.0);
+                    // Orb.
+                    orb(ui, 180.0);
+                    ui.add_space(6.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new("The Oracle")
+                                .color(theme::TEXT_PRIMARY)
+                                .size(15.0)
+                                .strong(),
+                        );
+                        ui.label(
+                            RichText::new("not configured · set chat_endpoint / chat_model")
+                                .color(theme::TEXT_FAINT)
+                                .size(12.0),
+                        );
+                    });
+                    ui.add_space(12.0);
+                    Frame::NONE
+                        .inner_margin(Margin::symmetric(18, 10))
+                        .show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            // Slash-command chips (visual).
+                            ui.horizontal_wrapped(|ui| {
+                                for c in ["/why 3", "/read 1", "/wake", "/sleep"] {
+                                    Frame::NONE
+                                        .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
+                                        .corner_radius(CornerRadius::same(7))
+                                        .inner_margin(Margin::symmetric(8, 3))
+                                        .show(ui, |ui| {
+                                            ui.label(
+                                                RichText::new(c)
+                                                    .color(theme::VIOLET_TEXT)
+                                                    .size(12.0)
+                                                    .monospace(),
+                                            );
+                                        });
+                                    ui.add_space(6.0);
+                                }
+                            });
+                            ui.add_space(10.0);
+                            // Input row (visual placeholder).
+                            Frame::NONE
+                                .fill(theme::BG_RAISED)
+                                .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
+                                .corner_radius(CornerRadius::same(10))
+                                .inner_margin(Margin::symmetric(12, 9))
+                                .show(ui, |ui| {
+                                    ui.set_width(ui.available_width());
+                                    ui.horizontal(|ui| {
+                                        ui.label(
+                                            RichText::new("❯").color(theme::VIOLET).size(14.0),
+                                        );
+                                        ui.label(
+                                            RichText::new(
+                                                "ask the oracle… (chat wiring is a follow-on)",
+                                            )
+                                            .color(theme::TEXT_GHOST)
+                                            .size(13.0),
+                                        );
+                                    });
+                                });
+                            ui.add_space(10.0);
+                            ui.vertical_centered(|ui| {
+                                if amber_button(ui, "Close").clicked() {
+                                    close = true;
+                                }
+                            });
+                        });
+                });
+        });
+    if close {
+        st.overlay = Overlay::None;
+    }
+}
+
+/// The Oracle orb: a radial gradient approximated by concentric filled
+/// circles (edge → core), with the highlight offset up-left like the mock.
+fn orb(ui: &mut egui::Ui, h: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), Sense::hover());
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(
+        rect,
+        CornerRadius::ZERO,
+        Color32::from_rgb(0x05, 0x08, 0x0c),
+    );
+    let r = h * 0.72;
+    let center = egui::pos2(rect.center().x, rect.center().y + 6.0);
+    let highlight = egui::pos2(center.x - r * 0.24, center.y - r * 0.30);
+    // Gradient stops (t, rgb): edge → core.
+    let stops = [
+        (1.00, [0x16, 0x0f, 0x2c]),
+        (0.72, [0x5b, 0x3f, 0xa8]),
+        (0.42, [0xa8, 0x74, 0xf0]),
+        (0.00, [0xe7, 0xd9, 0xff]),
+    ];
+    let lerp = |a: u8, b: u8, t: f32| (a as f32 + (b as f32 - a as f32) * t).round() as u8;
+    let steps = 40;
+    for i in (0..steps).rev() {
+        let t = i as f32 / (steps - 1) as f32; // 1 at edge, 0 at core
+                                               // Find bracketing stops.
+        let mut col = stops[0].1;
+        for w in stops.windows(2) {
+            let (t0, c0) = w[0];
+            let (t1, c1) = w[1];
+            if t <= t0 && t >= t1 {
+                let f = if (t0 - t1).abs() < f32::EPSILON {
+                    0.0
+                } else {
+                    (t0 - t) / (t0 - t1)
+                };
+                col = [
+                    lerp(c0[0], c1[0], f),
+                    lerp(c0[1], c1[1], f),
+                    lerp(c0[2], c1[2], f),
+                ];
+                break;
+            }
+        }
+        // Interpolate center toward the highlight as we approach the core.
+        let c = egui::pos2(
+            center.x + (highlight.x - center.x) * (1.0 - t),
+            center.y + (highlight.y - center.y) * (1.0 - t),
+        );
+        painter.circle_filled(c, r * t, Color32::from_rgb(col[0], col[1], col[2]));
+    }
+    // Rim.
+    painter.circle_stroke(
+        center,
+        r,
+        Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 34)),
+    );
+    // Keep animating (drift is a follow-on; a gentle repaint keeps it live).
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(66));
 }
 
 /// Read the astrolabe bridge endpoint `(url, cid, name)` from
@@ -1243,6 +1413,9 @@ fn title_bar(root: &mut egui::Ui, d: &UiData, st: &mut UiState) {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if chrome_btn(ui, "settings") {
                         st.overlay = Overlay::Settings;
+                    }
+                    if chrome_btn(ui, "oracle") {
+                        st.overlay = Overlay::Oracle;
                     }
                     if chrome_btn(ui, "pair phone") {
                         st.overlay = Overlay::Pairing;

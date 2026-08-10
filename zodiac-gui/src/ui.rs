@@ -46,6 +46,10 @@ pub struct UiState {
     /// Command-palette query + selected row.
     pub palette_query: String,
     pub palette_sel: usize,
+    /// The focused pane's measured terminal-area grid: (rows, cols, cell_w_px,
+    /// cell_h_px). The app sends this as `T_RESIZE` so the pty matches the
+    /// actual egui terminal widget, not the legacy full-window grid.
+    pub term_grid: Option<(u16, u16, u16, u16)>,
 }
 
 /// Things the UI wants the app to do after a frame. Applied by `redraw`
@@ -164,10 +168,13 @@ pub fn build(
     if ui.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::O)) {
         st.overlay = Overlay::Oracle;
     }
+    if d.screen != Screen::Focused {
+        st.term_grid = None;
+    }
     title_bar(ui, d, st);
     match d.screen {
         Screen::Observatory => observatory(ui, d, actions),
-        Screen::Focused => focused(ui, d, &mut st.composer, actions),
+        Screen::Focused => focused(ui, d, st, actions),
     }
     match st.overlay {
         Overlay::Palette => palette(ui, d, st, actions),
@@ -670,7 +677,7 @@ fn palette(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<Ui
 /// or terminal + composer) · activity rail. Esc returns to the Observatory.
 /// Terminal mode's real grid/kitty compositing lands in task #26b; for now
 /// it shows the rendered-screen tail from `T_STATE`.
-fn focused(root: &mut egui::Ui, d: &UiData, composer: &mut String, actions: &mut Vec<UiAction>) {
+fn focused(root: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<UiAction>) {
     // Esc closes only when the composer isn't focused (so it can clear text).
     if root.input(|i| i.key_pressed(egui::Key::Escape)) && root.memory(|m| m.focused().is_none()) {
         actions.push(UiAction::Back);
@@ -699,7 +706,7 @@ fn focused(root: &mut egui::Ui, d: &UiData, composer: &mut String, actions: &mut
                 .fill(theme::BG_WINDOW)
                 .inner_margin(Margin::same(0)),
         )
-        .show(root, |ui| main_pane(ui, d, composer, actions));
+        .show(root, |ui| main_pane(ui, d, st, actions));
 }
 
 /// The left sidebar: masthead, pane rows (click to switch), footer.
@@ -808,7 +815,7 @@ fn sidebar(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
 }
 
 /// The main column: pane header, then transcript or terminal, then composer.
-fn main_pane(ui: &mut egui::Ui, d: &UiData, composer: &mut String, actions: &mut Vec<UiAction>) {
+fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<UiAction>) {
     let Some(p) = d.panes.get(d.active) else {
         ui.centered_and_justified(|ui| {
             ui.label(RichText::new("no pane").color(theme::TEXT_FAINT));
@@ -848,6 +855,20 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, composer: &mut String, actions: &mut
                 });
             });
         });
+    // Measure the body area (below the header) in cells at the terminal
+    // font, so the pty is sized to the actual egui terminal widget rather
+    // than the legacy full-window grid. Recorded for the app to send as
+    // T_RESIZE after the frame.
+    {
+        let font = egui::FontId::monospace(13.0);
+        let (cw, ch) = ui.fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
+        let avail = ui.available_size();
+        if cw > 1.0 && ch > 1.0 {
+            let cols = ((avail.x / cw).floor() as i32).clamp(10, 1000) as u16;
+            let rows = ((avail.y / ch).floor() as i32).clamp(2, 1000) as u16;
+            st.term_grid = Some((rows, cols, cw.round() as u16, ch.round() as u16));
+        }
+    }
     // Body.
     let show_term = d.term_active || !p.is_agent();
     if show_term {
@@ -859,7 +880,7 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, composer: &mut String, actions: &mut
             .frame(Frame::NONE.fill(theme::BG_CHROME))
             .show(ui, |ui| {
                 approvals(ui, p, actions);
-                composer_bar(ui, p, composer, actions);
+                composer_bar(ui, p, &mut st.composer, actions);
             });
         egui::CentralPanel::default()
             .frame(Frame::NONE.fill(theme::BG_WINDOW))

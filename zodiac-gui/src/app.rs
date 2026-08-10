@@ -164,12 +164,9 @@ impl GuiApp {
         self.send(T_FOCUS, id, &[]);
     }
 
-    /// Announce the current grid size (and cell px) to the server. Called
-    /// whenever the window or font metrics change.
-    fn sync_size(&mut self) {
-        let Some(r) = &self.renderer else { return };
-        let (rows, cols) = r.grid_size();
-        let cell = r.cell;
+    /// Send a grid size + cell px to the server (deduped on `sent_grid`) and
+    /// resize the local panes to match.
+    fn apply_grid(&mut self, rows: u16, cols: u16, cw: u16, ch: u16) {
         if (rows, cols) == self.sent_grid {
             return;
         }
@@ -177,13 +174,21 @@ impl GuiApp {
         for p in &mut self.panes {
             p.resize(rows, cols);
         }
-        let (cw, ch) = (cell.0.round() as u16, cell.1.round() as u16);
         let mut data = [0u8; 8];
         data[..2].copy_from_slice(&rows.to_le_bytes());
         data[2..4].copy_from_slice(&cols.to_le_bytes());
         data[4..6].copy_from_slice(&cw.to_le_bytes());
         data[6..8].copy_from_slice(&ch.to_le_bytes());
         self.send(T_RESIZE, 0, &data);
+    }
+
+    /// Fallback grid announce from the renderer's window-derived size, used
+    /// before a focused pane has measured its egui terminal widget.
+    fn sync_size(&mut self) {
+        let Some(r) = &self.renderer else { return };
+        let (rows, cols) = r.grid_size();
+        let (cw, ch) = (r.cell.0.round() as u16, r.cell.1.round() as u16);
+        self.apply_grid(rows, cols, cw, ch);
     }
 
     /// Mirror of the TUI's `handle_frame`, minus TUI-only concerns
@@ -1004,6 +1009,12 @@ impl GuiApp {
                     self.send(T_NEW_PANE, 0, br#"{"kind":"agent","agent":"claude"}"#)
                 }
             }
+        }
+
+        // Size the pty to the focused pane's measured terminal widget (else
+        // the window-derived fallback).
+        if let Some((rows, cols, cw, ch)) = self.ui_state.term_grid {
+            self.apply_grid(rows, cols, cw, ch);
         }
 
         if let Some(r) = self.renderer.as_mut() {

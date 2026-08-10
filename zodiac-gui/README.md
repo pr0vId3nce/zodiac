@@ -59,12 +59,17 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
 
 ## Fonts
 
-The system font database is loaded via fontconfig (cosmic-text's default).
-The monospace family is chosen by, in order: `ZODIAC_GUI_FONT=<family>`,
-`fc-match monospace`, the first monospaced face known to fontdb. Cell width
-is the *measured* advance of that face at 15 px (× scale factor) — the same
-number cosmic-text lays rows out with, so bg quads and glyphs stay aligned
-across wide rows.
+**egui UI/screens**: rendered in **JetBrains Mono Nerd Font** — resolved via
+`fc-match` and loaded into egui as both the proportional and monospace family
+(so the Nerd glyphs cover the UI's symbols). `ZODIAC_GUI_UI_FONT=<family>`
+overrides it; if neither resolves, egui keeps its built-in font.
+
+**Terminal mode** (the wgpu grid): the system font database is loaded via
+fontconfig (cosmic-text's default). The monospace family is chosen by, in
+order: `ZODIAC_GUI_FONT=<family>`, `fc-match monospace`, the first monospaced
+face known to fontdb. Cell width is the *measured* advance of that face at
+15 px (× scale factor) — the same number cosmic-text lays rows out with, so
+bg quads and glyphs stay aligned across wide rows.
 
 ## NixOS / running
 

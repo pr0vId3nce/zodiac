@@ -1058,6 +1058,9 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 // bridge, bound to the just-created window.
                 let win = self.renderer.as_ref().unwrap().window.clone();
                 crate::theme::apply(&self.egui_ctx);
+                if let Some(ttf) = crate::font::egui_ui_font() {
+                    crate::theme::set_fonts(&self.egui_ctx, ttf);
+                }
                 self.egui_state = Some(egui_winit::State::new(
                     self.egui_ctx.clone(),
                     egui::ViewportId::ROOT,

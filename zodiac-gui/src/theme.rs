@@ -113,3 +113,22 @@ pub fn apply(ctx: &egui::Context) {
 
     ctx.set_visuals(v);
 }
+
+/// Install `ttf` as egui's proportional *and* monospace family, so the whole
+/// GUI renders in one face (JetBrains Mono Nerd Font by default). egui's
+/// built-in emoji fallback is kept after it.
+pub fn set_fonts(ctx: &egui::Context, ttf: Vec<u8>) {
+    use std::sync::Arc;
+    let mut defs = egui::FontDefinitions::default();
+    defs.font_data.insert(
+        "zodiac".to_owned(),
+        Arc::new(egui::FontData::from_owned(ttf)),
+    );
+    for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+        defs.families
+            .entry(fam)
+            .or_default()
+            .insert(0, "zodiac".to_owned());
+    }
+    ctx.set_fonts(defs);
+}

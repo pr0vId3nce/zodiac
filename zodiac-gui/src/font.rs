@@ -123,3 +123,27 @@ fn fc_match(pattern: &str) -> Option<String> {
     let first = s.split(',').next()?.trim().to_string();
     (!first.is_empty()).then_some(first)
 }
+
+/// The TTF file `fc-match` resolves for a family/pattern.
+fn fc_match_file(pattern: &str) -> Option<std::path::PathBuf> {
+    let out = std::process::Command::new("fc-match")
+        .args([pattern, "--format", "%{file}"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    (!s.is_empty()).then(|| std::path::PathBuf::from(s))
+}
+
+/// The TTF bytes for the egui UI/screen font. JetBrains Mono Nerd Font by
+/// default (`ZODIAC_GUI_UI_FONT` overrides the family); the Nerd glyphs cover
+/// the UI's symbols. `None` if fontconfig can't resolve or the file can't be
+/// read — egui then keeps its built-in font.
+pub fn egui_ui_font() -> Option<Vec<u8>> {
+    let fam =
+        std::env::var("ZODIAC_GUI_UI_FONT").unwrap_or_else(|_| "JetBrainsMono Nerd Font".into());
+    let path = fc_match_file(&fam).or_else(|| fc_match_file("monospace"))?;
+    std::fs::read(path).ok()
+}

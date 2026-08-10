@@ -302,7 +302,7 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
     // Body.
     let show_term = d.term_active || !p.is_agent();
     if show_term {
-        terminal_view(ui, d, p);
+        terminal_view(ui, p);
     } else {
         transcript_view(ui, p);
         composer(ui, p);
@@ -447,38 +447,97 @@ fn composer(ui: &mut egui::Ui, p: &CPane) {
         });
 }
 
-/// Terminal-mode body: the rendered-screen tail from state until the real
-/// grid/kitty compositing lands (task #26b).
-fn terminal_view(ui: &mut egui::Ui, d: &UiData, p: &CPane) {
+/// Terminal-mode body: the pane's live vt100 screen, painted cell-by-cell
+/// as a fixed monospace grid (bg quads + glyphs + block cursor) reusing
+/// `palette::cell_colors`. Kitty graphics are not composited here yet — that
+/// needs the GPU grid renderer drawn into egui (task #26b, follow-on).
+fn terminal_view(ui: &mut egui::Ui, p: &CPane) {
+    use crate::palette::{cell_colors, CellStyle};
+    let c32 = |c: [u8; 3]| Color32::from_rgb(c[0], c[1], c[2]);
+    let font = egui::FontId::monospace(13.0);
+    let (cw, ch) = ui.fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
+    let screen = p.parser.screen();
+    let (rows, cols) = screen.size();
     egui::Frame::NONE
-        .inner_margin(Margin::same(14))
+        .fill(c32(crate::palette::DEFAULT_BG))
+        .inner_margin(Margin::same(12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
-            let tail: Vec<&String> = d.ps(p).map(|s| s.tail.iter().collect()).unwrap_or_default();
-            if tail.is_empty() {
-                ui.label(
-                    RichText::new("terminal mode — live grid compositing lands next (26b)")
-                        .color(theme::TEXT_FAINT)
-                        .size(13.0),
-                );
-            } else {
-                egui::ScrollArea::vertical()
-                    .id_salt("term")
-                    .auto_shrink([false, false])
-                    .show(ui, |ui| {
-                        for line in tail {
-                            ui.add(
-                                Label::new(
-                                    RichText::new(line)
-                                        .color(theme::TEXT_BODY)
-                                        .size(13.0)
-                                        .monospace(),
-                                )
-                                .truncate(),
+            egui::ScrollArea::both()
+                .id_salt("term")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    let (rect, _) = ui.allocate_exact_size(
+                        egui::vec2(cols as f32 * cw, rows as f32 * ch),
+                        Sense::hover(),
+                    );
+                    let painter = ui.painter_at(rect);
+                    let o = rect.min;
+                    for row in 0..rows {
+                        for col in 0..cols {
+                            let Some(cell) = screen.cell(row, col) else {
+                                continue;
+                            };
+                            if cell.is_wide_continuation() {
+                                continue;
+                            }
+                            let style = CellStyle {
+                                fg: cell.fgcolor(),
+                                bg: cell.bgcolor(),
+                                bold: cell.bold(),
+                                dim: cell.dim(),
+                                inverse: cell.inverse(),
+                            };
+                            let (fg, bg) = cell_colors(&style);
+                            let x = o.x + col as f32 * cw;
+                            let y = o.y + row as f32 * ch;
+                            if let Some(bg) = bg {
+                                painter.rect_filled(
+                                    Rect::from_min_size(
+                                        egui::pos2(x, y),
+                                        egui::vec2(cw + 0.5, ch + 0.5),
+                                    ),
+                                    CornerRadius::ZERO,
+                                    c32(bg),
+                                );
+                            }
+                            let contents = cell.contents();
+                            if !contents.is_empty() && contents != " " {
+                                painter.text(
+                                    egui::pos2(x, y),
+                                    egui::Align2::LEFT_TOP,
+                                    contents,
+                                    font.clone(),
+                                    c32(fg),
+                                );
+                            }
+                            if cell.underline() {
+                                painter.rect_filled(
+                                    Rect::from_min_size(
+                                        egui::pos2(x, y + ch - 1.5),
+                                        egui::vec2(cw, 1.0),
+                                    ),
+                                    CornerRadius::ZERO,
+                                    c32(fg),
+                                );
+                            }
+                        }
+                    }
+                    // Block cursor.
+                    if !screen.hide_cursor() && p.scroll == 0 {
+                        let (r, c) = screen.cursor_position();
+                        if r < rows && c < cols {
+                            painter.rect_filled(
+                                Rect::from_min_size(
+                                    egui::pos2(o.x + c as f32 * cw, o.y + r as f32 * ch),
+                                    egui::vec2(cw, ch),
+                                ),
+                                CornerRadius::ZERO,
+                                Color32::from_rgba_unmultiplied(230, 230, 230, 90),
                             );
                         }
-                    });
-            }
+                    }
+                });
         });
 }
 

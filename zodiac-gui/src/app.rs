@@ -74,6 +74,8 @@ pub struct GuiApp {
     egui_ctx: egui::Context,
     /// winit→egui input bridge; created in `resumed` once the window exists.
     egui_state: Option<egui_winit::State>,
+    /// Which screen the GUI is showing (app-shell router, task #24).
+    screen: crate::ui::Screen,
 }
 
 impl GuiApp {
@@ -108,6 +110,7 @@ impl GuiApp {
             clipboard: None,
             egui_ctx: egui::Context::default(),
             egui_state: None,
+            screen: crate::ui::Screen::Observatory,
         }
     }
 
@@ -903,6 +906,7 @@ impl GuiApp {
                 panes: &self.panes,
                 state: self.state.as_ref(),
                 active: self.active,
+                screen: self.screen,
             };
             crate::ui::build(ui, &data, &mut actions);
         });
@@ -930,6 +934,11 @@ impl GuiApp {
         for a in actions {
             match a {
                 crate::ui::UiAction::Focus(i) => self.focus(i),
+                crate::ui::UiAction::Open(i) => {
+                    self.focus(i);
+                    self.screen = crate::ui::Screen::Focused;
+                }
+                crate::ui::UiAction::Back => self.screen = crate::ui::Screen::Observatory,
                 crate::ui::UiAction::NewShell => self.send(T_NEW_PANE, 0, &[]),
                 crate::ui::UiAction::NewAgent => {
                     self.send(T_NEW_PANE, 0, br#"{"kind":"agent","agent":"claude"}"#)

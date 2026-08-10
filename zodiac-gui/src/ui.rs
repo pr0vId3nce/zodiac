@@ -12,11 +12,24 @@ use zodiac::protocol::{PaneState, SessionState};
 
 use crate::theme;
 
+/// Which screen the GUI is showing (app-shell router, task #24).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Screen {
+    /// The pane-card home (`draw_home`'s successor).
+    Observatory,
+    /// One focused pane (the active pane).
+    Focused,
+}
+
 /// Things the UI wants the app to do after a frame. Applied by `redraw`
 /// once egui's borrows are released.
 pub enum UiAction {
-    /// Focus the pane at this index.
+    /// Focus the pane at this index (T_FOCUS + active), staying on the grid.
     Focus(usize),
+    /// Focus the pane and open the focused-pane screen.
+    Open(usize),
+    /// Return to the Observatory.
+    Back,
     /// Spawn a new shell pane.
     NewShell,
     /// Spawn a new claude agent pane.
@@ -29,6 +42,7 @@ pub struct UiData<'a> {
     pub panes: &'a [CPane],
     pub state: Option<&'a SessionState>,
     pub active: usize,
+    pub screen: Screen,
 }
 
 impl UiData<'_> {
@@ -94,7 +108,91 @@ fn clip(s: &str, max: usize) -> String {
 /// integration a root `&mut Ui`; panels are shown into it.
 pub fn build(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
     title_bar(ui, d);
-    observatory(ui, d, actions);
+    match d.screen {
+        Screen::Observatory => observatory(ui, d, actions),
+        Screen::Focused => focused(ui, d, actions),
+    }
+}
+
+/// The focused-pane screen (task #24 shell; the full sidebar + transcript +
+/// activity rail land in task #26). For now: a pane header with a back
+/// affordance and a transcript-tail preview from live state. Esc returns.
+fn focused(root: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
+    if root.input(|i| i.key_pressed(egui::Key::Escape)) {
+        actions.push(UiAction::Back);
+    }
+    egui::CentralPanel::default()
+        .frame(
+            Frame::NONE
+                .fill(theme::BG_WINDOW)
+                .inner_margin(Margin::same(0)),
+        )
+        .show(root, |ui| {
+            let Some(p) = d.panes.get(d.active) else {
+                ui.centered_and_justified(|ui| {
+                    ui.label(RichText::new("no pane").color(theme::TEXT_FAINT));
+                });
+                return;
+            };
+            let ps = d.ps(p);
+            let si = d.si(p);
+            // Header.
+            Frame::NONE
+                .fill(theme::BG_CHROME)
+                .inner_margin(Margin::symmetric(16, 10))
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        sigil_tile(ui, d.active + 1, si);
+                        ui.add_space(10.0);
+                        ui.label(
+                            RichText::new(clip(&p.name, 40))
+                                .color(theme::TEXT_PRIMARY)
+                                .size(16.0)
+                                .strong(),
+                        );
+                        if let Some(agent) = ps.and_then(|s| s.agent.as_deref()) {
+                            agent_chip(ui, agent, ps.and_then(|s| s.version.as_deref()));
+                        }
+                        status_pill(ui, si, theme::STATUS_WORD[si]);
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if ui
+                                .button(RichText::new("← observatory").size(12.5))
+                                .clicked()
+                            {
+                                actions.push(UiAction::Back);
+                            }
+                        });
+                    });
+                });
+            // Body: transcript-tail preview (full transcript/terminal: #26).
+            egui::Frame::NONE
+                .inner_margin(Margin::same(18))
+                .show(ui, |ui| {
+                    let tail: Vec<&String> =
+                        ps.map(|s| s.tail.iter().collect()).unwrap_or_default();
+                    if tail.is_empty() {
+                        ui.label(
+                            RichText::new("No transcript yet.")
+                                .color(theme::TEXT_FAINT)
+                                .size(13.5),
+                        );
+                    } else {
+                        egui::ScrollArea::vertical().show(ui, |ui| {
+                            for line in tail {
+                                ui.add(
+                                    Label::new(
+                                        RichText::new(line)
+                                            .color(theme::TEXT_BODY)
+                                            .size(13.0)
+                                            .monospace(),
+                                    )
+                                    .truncate(),
+                                );
+                            }
+                        });
+                    }
+                });
+        });
 }
 
 /// The 52px title bar: amber mark, "zodiac", session chip, host vitals.
@@ -416,7 +514,7 @@ fn pane_card(ui: &mut egui::Ui, d: &UiData, i: usize, p: &CPane, actions: &mut V
         .on_hover_cursor(egui::CursorIcon::PointingHand)
         .clicked()
     {
-        actions.push(UiAction::Focus(i));
+        actions.push(UiAction::Open(i));
     }
 }
 

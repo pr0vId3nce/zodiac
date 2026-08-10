@@ -983,6 +983,7 @@ impl GuiApp {
                 }
                 crate::ui::UiAction::Back => self.screen = crate::ui::Screen::Observatory,
                 crate::ui::UiAction::SaveSettings => self.settings.save(),
+                crate::ui::UiAction::Raise => self.send(T_RESTORE, 0, &[]),
                 crate::ui::UiAction::ToggleTerm(id) => {
                     if !self.term_mode.remove(&id) {
                         self.term_mode.insert(id);

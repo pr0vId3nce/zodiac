@@ -34,6 +34,8 @@ pub enum Overlay {
     Pairing,
     /// The Oracle chat panel (Alt+O).
     Oracle,
+    /// Raise-the-last-session dialog (Alt+Shift+R).
+    Raise,
 }
 
 /// Mutable UI state egui edits in place across frames (buffers + overlays).
@@ -69,6 +71,8 @@ pub enum UiAction {
     Perm(u64, bool),
     /// A settings control changed — persist config.json.
     SaveSettings,
+    /// Raise the last session (server reopens missing panes) — T_RESTORE.
+    Raise,
     /// Spawn a new shell pane.
     NewShell,
     /// Spawn a new claude agent pane.
@@ -168,6 +172,9 @@ pub fn build(
     if ui.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::O)) {
         st.overlay = Overlay::Oracle;
     }
+    if ui.input(|i| i.modifiers.alt && i.modifiers.shift && i.key_pressed(egui::Key::R)) {
+        st.overlay = Overlay::Raise;
+    }
     if d.screen != Screen::Focused {
         st.term_grid = None;
     }
@@ -181,8 +188,149 @@ pub fn build(
         Overlay::Settings => settings_dialog(ui, st, settings, actions),
         Overlay::Pairing => pairing_dialog(ui, d, st),
         Overlay::Oracle => oracle_dialog(ui, st),
+        Overlay::Raise => raise_dialog(ui, d, st, actions),
         Overlay::None => {}
     }
+}
+
+/// Raise-the-last-session dialog (Alt+Shift+R): reads the on-disk snapshot
+/// (`zodiac::snapshot::best`) and lists the panes it would reopen; "Raise
+/// them" sends one `T_RESTORE` (the server reopens all missing panes and
+/// replays each pane's restore command — it's all-or-nothing at the protocol
+/// level, so this is a preview + commit, not per-pane selection).
+fn raise_dialog(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<UiAction>) {
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        st.overlay = Overlay::None;
+    }
+    let screen = ui
+        .ctx()
+        .input(|i| i.raw.screen_rect)
+        .unwrap_or_else(|| ui.max_rect());
+    ui.painter().rect_filled(
+        screen,
+        CornerRadius::ZERO,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 140),
+    );
+    let snap = zodiac::snapshot::best(d.session);
+    let mut close = false;
+    egui::Area::new(egui::Id::new("raise"))
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            Frame::NONE
+                .fill(theme::BG_CARD)
+                .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
+                .corner_radius(CornerRadius::same(14))
+                .inner_margin(Margin::same(20))
+                .show(ui, |ui| {
+                    ui.set_width(620.0);
+                    ui.label(
+                        RichText::new("Raise the last session")
+                            .color(theme::TEXT_PRIMARY)
+                            .size(18.0)
+                            .strong(),
+                    );
+                    match &snap {
+                        Some(s) if !s.panes.is_empty() => {
+                            let age = now_secs().saturating_sub(s.saved_at);
+                            ui.label(
+                                RichText::new(format!(
+                                    "Snapshot from {} ago · panes already running are left alone.",
+                                    fmt_uptime(age * 1000)
+                                ))
+                                .color(theme::TEXT_FAINT)
+                                .size(12.5),
+                            );
+                            ui.add_space(12.0);
+                            egui::ScrollArea::vertical()
+                                .max_height(340.0)
+                                .show(ui, |ui| {
+                                    for sp in &s.panes {
+                                        Frame::NONE.inner_margin(Margin::symmetric(4, 6)).show(
+                                            ui,
+                                            |ui| {
+                                                ui.horizontal(|ui| {
+                                                    ui.label(
+                                                        RichText::new(roman(sp.index.max(1)))
+                                                            .color(theme::AMBER)
+                                                            .size(13.0)
+                                                            .monospace(),
+                                                    );
+                                                    ui.add_space(8.0);
+                                                    ui.vertical(|ui| {
+                                                        ui.label(
+                                                            RichText::new(clip(&sp.name, 40))
+                                                                .color(theme::TEXT_PRIMARY)
+                                                                .size(13.5)
+                                                                .strong(),
+                                                        );
+                                                        let cmd = sp
+                                                            .restore_command(None)
+                                                            .unwrap_or_else(|| {
+                                                                sp.cwd.clone().unwrap_or_default()
+                                                            });
+                                                        ui.add(
+                                                            Label::new(
+                                                                RichText::new(clip(&cmd, 76))
+                                                                    .color(theme::TEXT_DIM)
+                                                                    .size(11.5)
+                                                                    .monospace(),
+                                                            )
+                                                            .truncate(),
+                                                        );
+                                                    });
+                                                });
+                                            },
+                                        );
+                                    }
+                                });
+                            ui.add_space(14.0);
+                            ui.horizontal(|ui| {
+                                ui.label(
+                                    RichText::new(format!("{} panes", s.panes.len()))
+                                        .color(theme::TEXT_FAINT)
+                                        .size(12.0),
+                                );
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    if amber_button(ui, "Raise them").clicked() {
+                                        actions.push(UiAction::Raise);
+                                        close = true;
+                                    }
+                                    ui.add_space(8.0);
+                                    if ui.button(RichText::new("Cancel").size(13.0)).clicked() {
+                                        close = true;
+                                    }
+                                });
+                            });
+                        }
+                        _ => {
+                            ui.add_space(20.0);
+                            ui.label(
+                                RichText::new("no saved session to raise")
+                                    .color(theme::TEXT_FAINT)
+                                    .size(14.0),
+                            );
+                            ui.add_space(20.0);
+                            ui.vertical_centered(|ui| {
+                                if amber_button(ui, "Close").clicked() {
+                                    close = true;
+                                }
+                            });
+                        }
+                    }
+                });
+        });
+    if close {
+        st.overlay = Overlay::None;
+    }
+}
+
+/// Seconds since the Unix epoch (0 if the clock is before it).
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
 }
 
 /// The Oracle panel (Alt+O): the CSS-gradient orb + status + slash chips and

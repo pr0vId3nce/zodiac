@@ -705,7 +705,8 @@ impl GuiApp {
             let is = |lit: &str| matches!(&ev.logical_key, Key::Character(s) if s.eq_ignore_ascii_case(lit));
             if ctrl_or_cmd && shift && is("c") {
                 if let Some(text) = self.terminal_selection() {
-                    self.copy_to_clipboard(text);
+                    self.egui_ctx.copy_text(text);
+                    self.request_redraw();
                 }
                 return;
             }
@@ -785,16 +786,6 @@ impl GuiApp {
             self.clipboard = arboard::Clipboard::new().ok();
         }
         self.clipboard.as_mut().and_then(|cb| cb.get_text().ok())
-    }
-
-    /// Copy `text` to the system clipboard (lazy-initializing the handle).
-    fn copy_to_clipboard(&mut self, text: String) {
-        if self.clipboard.is_none() {
-            self.clipboard = arboard::Clipboard::new().ok();
-        }
-        if let Some(cb) = self.clipboard.as_mut() {
-            let _ = cb.set_text(text);
-        }
     }
 
     /// Send `text` to the active pty pane as a paste (bracketed when the app
@@ -1179,12 +1170,11 @@ impl GuiApp {
                 }
                 crate::ui::UiAction::Raise => self.send(T_RESTORE, 0, &[]),
                 crate::ui::UiAction::CopyText(s) => {
-                    if self.clipboard.is_none() {
-                        self.clipboard = arboard::Clipboard::new().ok();
-                    }
-                    if let Some(cb) = self.clipboard.as_mut() {
-                        let _ = cb.set_text(s);
-                    }
+                    // Go through egui's clipboard (the one that works for
+                    // transcript label copy) rather than a separate arboard
+                    // handle, which doesn't hold a Wayland selection reliably.
+                    self.egui_ctx.copy_text(s);
+                    self.request_redraw();
                 }
                 crate::ui::UiAction::DragWindow => {
                     if let Some(r) = &self.renderer {
@@ -1297,7 +1287,11 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 let win = self.renderer.as_ref().unwrap().window.clone();
                 crate::theme::apply(&self.egui_ctx, &self.settings.theme);
                 if let Some(ttf) = crate::font::egui_ui_font() {
-                    crate::theme::set_fonts(&self.egui_ctx, ttf);
+                    crate::theme::set_fonts(
+                        &self.egui_ctx,
+                        ttf,
+                        crate::font::egui_fallback_fonts(),
+                    );
                 }
                 self.egui_state = Some(egui_winit::State::new(
                     self.egui_ctx.clone(),

@@ -147,3 +147,30 @@ pub fn egui_ui_font() -> Option<Vec<u8>> {
     let path = fc_match_file(&fam).or_else(|| fc_match_file("monospace"))?;
     std::fs::read(path).ok()
 }
+
+/// Extra fallback faces appended after the primary font so the terminal can
+/// render prompt glyphs the main font lacks — broad Nerd/symbol coverage
+/// (Symbols Nerd Font), a wide Unicode net (DejaVu Sans), and a *monochrome*
+/// emoji face if one is installed. Color-emoji faces (e.g. Noto Color Emoji)
+/// are skipped: egui's text engine can't rasterize color glyphs, so a color
+/// face would still render a blank/box — install a monochrome emoji font and
+/// it is picked up here automatically.
+pub fn egui_fallback_fonts() -> Vec<(String, Vec<u8>)> {
+    let mut out = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for fam in ["Symbols Nerd Font", "DejaVu Sans", "Noto Emoji"] {
+        let Some(path) = fc_match_file(fam) else {
+            continue;
+        };
+        if path.to_string_lossy().to_lowercase().contains("color") {
+            continue; // a color-emoji face egui can't rasterize
+        }
+        if !seen.insert(path.clone()) {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(&path) {
+            out.push((format!("fallback-{fam}"), bytes));
+        }
+    }
+    out
+}

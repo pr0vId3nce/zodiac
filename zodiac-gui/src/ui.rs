@@ -1098,7 +1098,7 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
     // Body: the view is determined by the pane kind (see the header note).
     let show_term = !p.is_agent();
     if show_term {
-        terminal_view(ui, st, p, actions);
+        terminal_view(ui, st, p);
     } else {
         // A pending permission takes over the bottom bar and raises a modal
         // question popup; otherwise the composer sits there. Transcript fills
@@ -1725,6 +1725,14 @@ fn composer_bar(ui: &mut egui::Ui, p: &CPane, composer: &mut String, actions: &m
                             .font(egui::FontId::proportional(14.0))
                             .text_color(theme::TEXT_BODY);
                         let resp = ui.add(edit);
+                        // A bare "/" (when you're not already typing here) jumps
+                        // to the composer and starts a slash command, like the
+                        // agent TUIs. cursor_at_end (egui default) drops the
+                        // caret after the "/".
+                        if !resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Slash)) {
+                            composer.push('/');
+                            resp.request_focus();
+                        }
                         if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                             submit = true;
                         }
@@ -1959,7 +1967,7 @@ pub(crate) fn term_selection_text(p: &CPane, sel: Option<TermSel>) -> Option<Str
     }
 }
 
-fn terminal_view(ui: &mut egui::Ui, st: &mut UiState, p: &CPane, actions: &mut Vec<UiAction>) {
+fn terminal_view(ui: &mut egui::Ui, st: &mut UiState, p: &CPane) {
     use crate::palette::{cell_colors, CellStyle};
     let c32 = |c: [u8; 3]| Color32::from_rgb(c[0], c[1], c[2]);
     let font = egui::FontId::monospace(13.0);
@@ -2014,7 +2022,7 @@ fn terminal_view(ui: &mut egui::Ui, st: &mut UiState, p: &CPane, actions: &mut V
                         }
                         if resp.drag_stopped() {
                             if let Some(text) = term_selection_text(p, st.term_sel) {
-                                actions.push(UiAction::CopyText(text));
+                                ui.ctx().copy_text(text);
                             }
                         }
                         // A plain click (no drag) clears the selection.
@@ -2831,20 +2839,24 @@ fn amber_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
 /// order matches pane order (and thus the focus index).
 fn card_grid(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
     let gap = 14.0;
-    let avail = ui.available_width();
-    let min_card = 300.0;
-    let cols = (((avail + gap) / (min_card + gap)).floor() as usize).max(1);
-    let card_w = ((avail - gap * (cols as f32 - 1.0)) / cols as f32).max(min_card.min(avail));
     egui::ScrollArea::vertical().show(ui, |ui| {
+        // Measure inside the scroll area so the width already excludes the
+        // scrollbar; column count and card width then tile it exactly, with
+        // the gap living in item_spacing so there's no trailing overflow that
+        // pushes the last card off the right edge.
+        let avail = ui.available_width();
+        let min_card = 300.0;
+        let cols = (((avail + gap) / (min_card + gap)).floor() as usize).max(1);
+        let card_w = (((avail - gap * (cols as f32 - 1.0)) / cols as f32).floor()).max(1.0);
         let items: Vec<(usize, &CPane)> = d.panes.iter().enumerate().collect();
         for row in items.chunks(cols) {
             ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = gap;
                 for (i, p) in row {
                     ui.allocate_ui(egui::vec2(card_w, 0.0), |ui| {
                         ui.set_width(card_w);
                         pane_card(ui, d, *i, p, actions);
                     });
-                    ui.add_space(gap);
                 }
             });
             ui.add_space(gap);

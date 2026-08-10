@@ -224,20 +224,29 @@ pub fn apply(ctx: &egui::Context, theme: &str) {
 }
 
 /// Install `ttf` as egui's proportional *and* monospace family, so the whole
-/// GUI renders in one face (JetBrains Mono Nerd Font by default). egui's
-/// built-in emoji fallback is kept after it.
-pub fn set_fonts(ctx: &egui::Context, ttf: Vec<u8>) {
+/// GUI renders in one face (JetBrains Mono Nerd Font by default). `fallbacks`
+/// (name, bytes) are inserted just after it — broad Nerd/symbol/emoji coverage
+/// for terminal prompts — and egui's built-in faces are kept after those.
+pub fn set_fonts(ctx: &egui::Context, ttf: Vec<u8>, fallbacks: Vec<(String, Vec<u8>)>) {
     use std::sync::Arc;
     let mut defs = egui::FontDefinitions::default();
     defs.font_data.insert(
         "zodiac".to_owned(),
         Arc::new(egui::FontData::from_owned(ttf)),
     );
+    let mut names = vec!["zodiac".to_owned()];
+    for (name, bytes) in fallbacks {
+        defs.font_data
+            .insert(name.clone(), Arc::new(egui::FontData::from_owned(bytes)));
+        names.push(name);
+    }
+    // Put our faces at the front (primary, then fallbacks), keeping egui's
+    // built-ins after for anything still uncovered.
     for fam in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
-        defs.families
-            .entry(fam)
-            .or_default()
-            .insert(0, "zodiac".to_owned());
+        let list = defs.families.entry(fam).or_default();
+        for (i, name) in names.iter().enumerate() {
+            list.insert(i, name.clone());
+        }
     }
     ctx.set_fonts(defs);
 }

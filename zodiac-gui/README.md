@@ -44,6 +44,8 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
 - **Alt+N** — new agent (structured) pane; **Alt+Shift+N** — new shell pane.
   **Alt+←/→** (or **Alt+↑/↓** with side tabs) and **Alt+1–9** switch panes;
   **Alt+W** closes the active pane.
+- **/** — in a structured agent pane, jumps to the composer and starts a slash
+  command (when you're not already typing there).
 - **Copy / paste** — in the **transcript**, drag to select across turns and
   **Ctrl/⌘+C** copies; paste into the composer with **Ctrl/⌘+V**. In the
   **terminal**, drag to select (hold **Shift** to select even when a TUI is

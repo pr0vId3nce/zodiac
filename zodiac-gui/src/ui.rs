@@ -30,6 +30,8 @@ pub enum Overlay {
     Palette,
     /// Settings dialog (⌘,): grouped config editor.
     Settings,
+    /// Pair-a-phone dialog: astrolabe pairing QR.
+    Pairing,
 }
 
 /// Mutable UI state egui edits in place across frames (buffers + overlays).
@@ -76,6 +78,8 @@ pub struct UiData<'a> {
     pub screen: Screen,
     /// The active pane is showing terminal mode (vs. native transcript).
     pub term_active: bool,
+    /// The server's current pairing token (for the Pair-phone QR).
+    pub pairing_token: &'a str,
 }
 
 impl UiData<'_> {
@@ -163,7 +167,161 @@ pub fn build(
     match st.overlay {
         Overlay::Palette => palette(ui, d, st, actions),
         Overlay::Settings => settings_dialog(ui, st, settings, actions),
+        Overlay::Pairing => pairing_dialog(ui, d, st),
         Overlay::None => {}
+    }
+}
+
+/// Read the astrolabe bridge endpoint `(url, cid, name)` from
+/// `~/.local/state/astrolabe/endpoint.json` (mirrors the TUI).
+fn read_bridge_endpoint() -> Option<(String, String, String)> {
+    let base = std::env::var_os("XDG_STATE_HOME")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| {
+            std::path::PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+                .join(".local/state")
+        });
+    let raw = std::fs::read_to_string(base.join("astrolabe").join("endpoint.json")).ok()?;
+    let v: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    Some((
+        v.get("url")?.as_str()?.to_string(),
+        v.get("cid")?.as_str()?.to_string(),
+        v.get("name")?.as_str()?.to_string(),
+    ))
+}
+
+/// Percent-encode a query-param value (mirrors the TUI's `url_encode`).
+fn url_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'.' | b'_' | b'~' => {
+                out.push(b as char)
+            }
+            _ => out.push_str(&format!("%{b:02X}")),
+        }
+    }
+    out
+}
+
+/// Pair-a-phone dialog: renders the astrolabe pairing URL as a QR (qrcode →
+/// egui rects), with the URL below. "no bridge detected" when the endpoint
+/// file is absent. No network calls.
+fn pairing_dialog(ui: &mut egui::Ui, d: &UiData, st: &mut UiState) {
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        st.overlay = Overlay::None;
+    }
+    let screen = ui
+        .ctx()
+        .input(|i| i.raw.screen_rect)
+        .unwrap_or_else(|| ui.max_rect());
+    ui.painter().rect_filled(
+        screen,
+        CornerRadius::ZERO,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 140),
+    );
+    let endpoint = read_bridge_endpoint();
+    let mut close = false;
+    egui::Area::new(egui::Id::new("pairing"))
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            Frame::NONE
+                .fill(theme::BG_CARD)
+                .stroke(Stroke::new(1.0, fade(theme::AMBER, 0.3)))
+                .corner_radius(CornerRadius::same(14))
+                .inner_margin(Margin::same(20))
+                .show(ui, |ui| {
+                    ui.set_width(420.0);
+                    ui.vertical_centered(|ui| {
+                        ui.label(
+                            RichText::new("Pair a phone")
+                                .color(theme::TEXT_PRIMARY)
+                                .size(18.0)
+                                .strong(),
+                        );
+                        ui.label(
+                            RichText::new("astrolabe · over your tailnet")
+                                .color(theme::TEXT_FAINT)
+                                .size(12.0),
+                        );
+                        ui.add_space(14.0);
+                        match (&endpoint, d.pairing_token.is_empty()) {
+                            (Some((url, cid, name)), false) => {
+                                let pair_url = format!(
+                                    "{url}/?t={}&cid={}&name={}",
+                                    url_encode(d.pairing_token),
+                                    url_encode(cid),
+                                    url_encode(name),
+                                );
+                                qr(ui, &pair_url);
+                                ui.add_space(12.0);
+                                ui.add(
+                                    Label::new(
+                                        RichText::new(&pair_url)
+                                            .color(theme::TEXT_DIM)
+                                            .size(11.0)
+                                            .monospace(),
+                                    )
+                                    .wrap(),
+                                );
+                            }
+                            _ => {
+                                ui.add_space(30.0);
+                                ui.label(
+                                    RichText::new("no bridge detected")
+                                        .color(theme::TEXT_FAINT)
+                                        .size(14.0),
+                                );
+                                ui.label(
+                                    RichText::new("start astrolabe on this machine, then re-open")
+                                        .color(theme::TEXT_GHOST)
+                                        .size(12.0),
+                                );
+                                ui.add_space(30.0);
+                            }
+                        }
+                        ui.add_space(14.0);
+                        if amber_button(ui, "Done").clicked() {
+                            close = true;
+                        }
+                    });
+                });
+        });
+    if close {
+        st.overlay = Overlay::None;
+    }
+}
+
+/// Render a QR of `data` as black modules on a white quiet-zone tile.
+fn qr(ui: &mut egui::Ui, data: &str) {
+    let Ok(code) = qrcode::QrCode::new(data.as_bytes()) else {
+        ui.label(RichText::new("QR encode failed").color(theme::TEXT_FAINT));
+        return;
+    };
+    let colors = code.to_colors();
+    let n = code.width();
+    let quiet = 2usize;
+    let side = n + quiet * 2;
+    let px = 6.0f32;
+    let (rect, _) = ui.allocate_exact_size(
+        egui::vec2(side as f32 * px, side as f32 * px),
+        Sense::hover(),
+    );
+    let painter = ui.painter_at(rect);
+    painter.rect_filled(rect, CornerRadius::same(6), Color32::WHITE);
+    for y in 0..n {
+        for x in 0..n {
+            if colors[y * n + x] == qrcode::Color::Dark {
+                let px0 = rect.min.x + (x + quiet) as f32 * px;
+                let py0 = rect.min.y + (y + quiet) as f32 * px;
+                painter.rect_filled(
+                    Rect::from_min_size(egui::pos2(px0, py0), egui::vec2(px, px)),
+                    CornerRadius::ZERO,
+                    Color32::BLACK,
+                );
+            }
+        }
     }
 }
 
@@ -1085,6 +1243,9 @@ fn title_bar(root: &mut egui::Ui, d: &UiData, st: &mut UiState) {
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if chrome_btn(ui, "settings") {
                         st.overlay = Overlay::Settings;
+                    }
+                    if chrome_btn(ui, "pair phone") {
+                        st.overlay = Overlay::Pairing;
                     }
                     if chrome_btn(ui, "⌘K find pane") {
                         st.overlay = Overlay::Palette;

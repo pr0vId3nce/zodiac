@@ -3814,6 +3814,7 @@ dependencies = [
  "glyphon",
  "png",
  "pollster",
+ "qrcode",
  "serde_json",
  "vt100",
  "wgpu",

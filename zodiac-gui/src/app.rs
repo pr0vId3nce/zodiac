@@ -917,6 +917,11 @@ impl GuiApp {
                 active: self.active,
                 screen: self.screen,
                 term_active: active_id.is_some_and(|id| self.term_mode.contains(&id)),
+                pairing_token: self
+                    .state
+                    .as_ref()
+                    .map(|s| s.pairing_token.as_str())
+                    .unwrap_or(""),
             };
             crate::ui::build(
                 ui,

@@ -70,6 +70,10 @@ pub struct GuiApp {
     /// System clipboard handle for OSC 52 write-through (roadmap 4.7),
     /// opened lazily on the first T_CLIPBOARD.
     clipboard: Option<arboard::Clipboard>,
+    /// egui context (ADR 0006): the native GUI layer runs every redraw.
+    egui_ctx: egui::Context,
+    /// winit→egui input bridge; created in `resumed` once the window exists.
+    egui_state: Option<egui_winit::State>,
 }
 
 impl GuiApp {
@@ -102,6 +106,8 @@ impl GuiApp {
             next_anim: None,
             next_query: Some(Instant::now()), // poll state right away
             clipboard: None,
+            egui_ctx: egui::Context::default(),
+            egui_state: None,
         }
     }
 
@@ -880,34 +886,59 @@ impl GuiApp {
     }
 
     fn redraw(&mut self) {
-        // Computed before borrowing the renderer mutably.
-        let settings_rows = self.settings_open.then(|| self.settings_view_rows());
-        let settings_cursor = self.settings_row;
-        let Some(r) = self.renderer.as_mut() else {
-            return;
+        // The native GUI layer (ADR 0006): run egui for one frame, then hand
+        // its tessellated jobs to the renderer's egui present path.
+        let win = match self.renderer.as_ref() {
+            Some(r) => r.window.clone(),
+            None => return,
         };
-        let settings_view = settings_rows
-            .as_ref()
-            .map(|rows| crate::render::SettingsView {
-                rows,
-                cursor: settings_cursor,
-            });
-        let out = r.render(
-            &self.panes,
-            self.active,
-            self.state.as_ref(),
-            &self.session,
-            &mut self.anim,
-            Instant::now(),
-            settings_view,
-        );
-        self.tab_hits = out.tab_hits;
-        // Animation timer (4.2): armed only while a visible image runs.
-        self.next_anim = out.next_anim;
-        if let Some(s) = out.agent_scroll {
-            if let Some(p) = self.panes.get_mut(self.active) {
-                p.agent.scroll = s;
+        if self.egui_state.is_none() {
+            return;
+        }
+        let raw = self.egui_state.as_mut().unwrap().take_egui_input(&win);
+        let mut actions: Vec<crate::ui::UiAction> = Vec::new();
+        let full = self.egui_ctx.run_ui(raw, |ui| {
+            let data = crate::ui::UiData {
+                session: &self.session,
+                panes: &self.panes,
+                state: self.state.as_ref(),
+                active: self.active,
+            };
+            crate::ui::build(ui, &data, &mut actions);
+        });
+        self.egui_state
+            .as_mut()
+            .unwrap()
+            .handle_platform_output(&win, full.platform_output);
+        let ppp = full.pixels_per_point;
+        let jobs = self.egui_ctx.tessellate(full.shapes, ppp);
+
+        // Drive the WaitUntil timer from egui's repaint request: zero delay
+        // means "animate now", a bounded delay schedules the next frame, and
+        // anything longer (egui's idle sentinel) disarms the timer.
+        let delay = full
+            .viewport_output
+            .get(&egui::ViewportId::ROOT)
+            .map(|v| v.repaint_delay);
+        self.next_anim = match delay {
+            Some(d) if d.is_zero() => Some(Instant::now()),
+            Some(d) if d < Duration::from_secs(24 * 3600) => Instant::now().checked_add(d),
+            _ => None,
+        };
+
+        // Apply UI actions now that egui's borrows are released.
+        for a in actions {
+            match a {
+                crate::ui::UiAction::Focus(i) => self.focus(i),
+                crate::ui::UiAction::NewShell => self.send(T_NEW_PANE, 0, &[]),
+                crate::ui::UiAction::NewAgent => {
+                    self.send(T_NEW_PANE, 0, br#"{"kind":"agent","agent":"claude"}"#)
+                }
             }
+        }
+
+        if let Some(r) = self.renderer.as_mut() {
+            r.paint_egui(&jobs, full.textures_delta, ppp);
         }
     }
 }
@@ -954,6 +985,18 @@ impl ApplicationHandler<UserEvent> for GuiApp {
         match Renderer::new(window, fonts) {
             Ok(r) => {
                 self.renderer = Some(r);
+                // Bring up the egui layer (ADR 0006): theme + winit input
+                // bridge, bound to the just-created window.
+                let win = self.renderer.as_ref().unwrap().window.clone();
+                crate::theme::apply(&self.egui_ctx);
+                self.egui_state = Some(egui_winit::State::new(
+                    self.egui_ctx.clone(),
+                    egui::ViewportId::ROOT,
+                    win.as_ref(),
+                    Some(win.scale_factor() as f32),
+                    None,
+                    None,
+                ));
                 // Honor all saved settings (tabs, bg, scale, tab style)
                 // before the first sync/draw; also sends the grid size.
                 self.apply_settings();
@@ -990,6 +1033,17 @@ impl ApplicationHandler<UserEvent> for GuiApp {
         _id: winit::window::WindowId,
         event: WindowEvent,
     ) {
+        // Feed the event to egui first (ADR 0006). When egui consumes it,
+        // the keystroke/click belongs to a widget, not to a pane's pty.
+        let win = self.renderer.as_ref().map(|r| r.window.clone());
+        let mut consumed = false;
+        if let (Some(st), Some(win)) = (self.egui_state.as_mut(), win.as_ref()) {
+            let resp = st.on_window_event(win, &event);
+            if resp.repaint {
+                win.request_redraw();
+            }
+            consumed = resp.consumed;
+        }
         match event {
             WindowEvent::CloseRequested => {
                 self.send(T_DETACH, 0, &[]);
@@ -1011,13 +1065,15 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 self.request_redraw();
             }
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
-            WindowEvent::KeyboardInput { event, .. } => self.on_key(event),
-            WindowEvent::Ime(Ime::Commit(text)) => self.on_ime(text),
+            WindowEvent::KeyboardInput { event, .. } if !consumed => self.on_key(event),
+            WindowEvent::Ime(Ime::Commit(text)) if !consumed => self.on_ime(text),
             WindowEvent::CursorMoved { position, .. } => {
                 self.cursor_px = (position.x, position.y);
             }
-            WindowEvent::MouseWheel { delta, .. } => self.on_wheel(delta),
-            WindowEvent::MouseInput { state, button, .. } => self.on_click(state, button),
+            WindowEvent::MouseWheel { delta, .. } if !consumed => self.on_wheel(delta),
+            WindowEvent::MouseInput { state, button, .. } if !consumed => {
+                self.on_click(state, button)
+            }
             WindowEvent::DroppedFile(path) => self.on_drop(path),
             WindowEvent::RedrawRequested => self.redraw(),
             _ => {}

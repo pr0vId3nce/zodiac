@@ -4,6 +4,14 @@
 //! and renders the active pane with wgpu + glyphon per ADR 0004 — including
 //! zodiac's first actual pixel decode of the kitty image mirror.
 
+// Transitional during the ADR-0006 native rebuild: the legacy grid renderer
+// (`render::Renderer::render` and its tab/settings/grid/agent builders) is
+// parked while egui owns the screens. It is reintroduced verbatim as the
+// per-pane *terminal mode* (task #26) and the grouped settings page (task
+// #28); until then those paths are unreferenced. Removed once terminal mode
+// re-consumes them.
+#![allow(dead_code)]
+
 mod anim;
 mod app;
 mod font;
@@ -12,6 +20,8 @@ mod keys;
 mod palette;
 mod placeholder;
 mod render;
+mod theme;
+mod ui;
 
 use app::{GuiApp, UserEvent};
 use zodiac::protocol::{read_frame, write_frame, T_ATTACH};

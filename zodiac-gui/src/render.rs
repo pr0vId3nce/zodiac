@@ -259,6 +259,9 @@ pub struct Renderer {
     viewport: Viewport,
     text_main: TextRenderer,
     text_overlay: TextRenderer,
+    /// egui paint backend (ADR 0006): the native GUI's widgets/screens are
+    /// tessellated by egui and rendered into this same surface.
+    egui_rend: egui_wgpu::Renderer,
     grid_buf: TextBuffer,
     top_buf: TextBuffer,
     bottom_buf: TextBuffer,
@@ -347,6 +350,8 @@ impl Renderer {
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
         let text_overlay =
             TextRenderer::new(&mut atlas, &device, wgpu::MultisampleState::default(), None);
+        let egui_rend =
+            egui_wgpu::Renderer::new(&device, format, egui_wgpu::RendererOptions::default());
         let metrics = Metrics::new(font_px, cell.1);
         let mkbuf = |wrap: Wrap, fs: &mut FontSystem| {
             let mut b = TextBuffer::new(fs, metrics);
@@ -541,6 +546,7 @@ impl Renderer {
             viewport,
             text_main,
             text_overlay,
+            egui_rend,
             grid_buf,
             top_buf,
             bottom_buf,
@@ -586,6 +592,85 @@ impl Renderer {
         };
         self.queue
             .write_buffer(&self.globals_buf, 0, bytemuck::bytes_of(&globals));
+    }
+
+    /// Paint one egui frame into the surface (ADR 0006). This is the native
+    /// GUI's present path: upload texture deltas, build egui's vertex/index
+    /// buffers, clear to the themed backdrop, render the tessellated jobs,
+    /// then present. The legacy grid renderer (`render`) is retained for the
+    /// per-pane terminal mode (task #26) and is not on this path.
+    pub fn paint_egui(
+        &mut self,
+        jobs: &[egui::ClippedPrimitive],
+        mut deltas: egui::TexturesDelta,
+        pixels_per_point: f32,
+    ) {
+        for (id, deltas_for_tex) in &deltas.set {
+            for delta in deltas_for_tex {
+                self.egui_rend
+                    .update_texture(&self.device, &self.queue, *id, delta);
+            }
+        }
+        let screen = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [self.config.width, self.config.height],
+            pixels_per_point,
+        };
+        use wgpu::CurrentSurfaceTexture as CST;
+        let tex = match self.surface.get_current_texture() {
+            CST::Success(t) | CST::Suboptimal(t) => t,
+            _ => {
+                self.surface.configure(&self.device, &self.config);
+                self.window.request_redraw();
+                return;
+            }
+        };
+        let view = tex.texture.create_view(&Default::default());
+        let mut encoder = self
+            .device
+            .create_command_encoder(&wgpu::CommandEncoderDescriptor {
+                label: Some("egui"),
+            });
+        let user_bufs =
+            self.egui_rend
+                .update_buffers(&self.device, &self.queue, &mut encoder, jobs, &screen);
+        {
+            let bg = rgba(self.bg, 1.0);
+            let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("egui"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: bg[0] as f64,
+                            g: bg[1] as f64,
+                            b: bg[2] as f64,
+                            a: 1.0,
+                        }),
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            // egui-wgpu wants a 'static pass (wgpu 30 provides forget_lifetime).
+            let mut pass = pass.forget_lifetime();
+            self.egui_rend.render(&mut pass, jobs, &screen);
+        }
+        self.queue.submit(
+            user_bufs
+                .into_iter()
+                .chain(std::iter::once(encoder.finish())),
+        );
+        self.queue.present(tex);
+        for id in &deltas.free {
+            self.egui_rend.free_texture(id);
+        }
+        // Deltas are applied; drain so epaint's drop-guard is satisfied.
+        deltas.clear();
     }
 
     /// Re-measure the font at a new OS scale factor (folding in the user

@@ -1,13 +1,14 @@
-//! egui UI for the native GUI (ADR 0006). This is the first screen of the
-//! rebuild — an Observatory-lite that lists the session's panes from live
-//! state — and, more importantly, the proof that the egui layer paints into
-//! our wgpu surface with the design tokens and reports interactions back.
-//! The richer screens (full Observatory cards, focused pane, oracle,
-//! palette, settings, dialogs) grow from here per tasks #24–#29.
+//! egui UI for the native GUI (ADR 0006). Screen 1 of the rebuild — the
+//! Observatory (`draw_home`'s successor): the session's panes as a
+//! responsive card grid drawn from the server's `T_STATE`, with the design
+//! tokens and the five status colors. The remaining screens (focused pane,
+//! oracle, palette, settings, dialogs) grow from here per tasks #24–#29.
 
-use egui::{Align, Color32, CornerRadius, Frame, Layout, Margin, RichText, Sense, Stroke};
+use egui::{
+    Align, Color32, CornerRadius, Frame, Label, Layout, Margin, Rect, RichText, Sense, Stroke,
+};
 use zodiac::client_core::CPane;
-use zodiac::protocol::SessionState;
+use zodiac::protocol::{PaneState, SessionState};
 
 use crate::theme;
 
@@ -31,16 +32,25 @@ pub struct UiData<'a> {
 }
 
 impl UiData<'_> {
-    /// Server status string for a pane (`idle` when unknown).
-    fn status(&self, p: &CPane) -> &str {
+    /// The server's `PaneState` for a client pane, matched by id.
+    fn ps(&self, p: &CPane) -> Option<&PaneState> {
         self.state
             .and_then(|s| s.panes.iter().find(|sp| sp.id == p.id))
-            .map(|sp| sp.status.as_str())
-            .unwrap_or("idle")
+    }
+
+    /// Server status string (`idle` when unknown).
+    fn status(&self, p: &CPane) -> &str {
+        self.ps(p).map(|sp| sp.status.as_str()).unwrap_or("idle")
+    }
+
+    /// The 0..5 status index, honoring the live thinking flag.
+    fn si(&self, p: &CPane) -> usize {
+        let thinking = self.ps(p).map(|sp| sp.thinking).unwrap_or(false);
+        theme::status_index(self.status(p), thinking)
     }
 }
 
-/// Roman numeral for a 1-based index (the sigil in the handoff's card tiles).
+/// Roman numeral for a 1-based index (the sigil in the card tiles).
 fn roman(mut n: usize) -> String {
     const M: &[(usize, &str)] = &[(10, "X"), (9, "IX"), (5, "V"), (4, "IV"), (1, "I")];
     let mut s = String::new();
@@ -56,6 +66,30 @@ fn roman(mut n: usize) -> String {
     s
 }
 
+/// Compact uptime like the header's `↑2h 14m`.
+fn fmt_age(ms: u64) -> String {
+    let s = ms / 1000;
+    let (h, m) = (s / 3600, (s % 3600) / 60);
+    if h > 0 {
+        format!("↑{h}h {m}m")
+    } else if m > 0 {
+        format!("↑{m}m")
+    } else {
+        format!("↑{s}s")
+    }
+}
+
+/// One line, clipped to `max` chars with an ellipsis.
+fn clip(s: &str, max: usize) -> String {
+    let s = s.replace(['\n', '\r'], " ");
+    if s.chars().count() <= max {
+        s
+    } else {
+        let cut: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{cut}…")
+    }
+}
+
 /// Build the frame's UI, pushing any resulting actions. egui 0.36 hands the
 /// integration a root `&mut Ui`; panels are shown into it.
 pub fn build(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
@@ -63,7 +97,7 @@ pub fn build(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
     observatory(ui, d, actions);
 }
 
-/// The 52px title bar: amber mark, "zodiac", the session chip.
+/// The 52px title bar: amber mark, "zodiac", session chip, host vitals.
 fn title_bar(root: &mut egui::Ui, d: &UiData) {
     egui::Panel::top("titlebar")
         .exact_size(52.0)
@@ -84,12 +118,17 @@ fn title_bar(root: &mut egui::Ui, d: &UiData) {
                 );
                 ui.add_space(12.0);
                 session_chip(ui, d.session);
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if let Some(h) = d.state.and_then(|s| s.host.as_ref()) {
+                        vitals(ui, h);
+                    }
+                });
             });
         });
 }
 
-/// The 22px amber-gradient mark with a `❯` — approximated for now with a
-/// flat amber tile (the gradient mesh lands with the app-shell task #24).
+/// The 22px amber-gradient mark with a `❯` — a flat amber tile for now (the
+/// gradient mesh lands with the app-shell task #24).
 fn mark(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::hover());
     ui.painter()
@@ -117,8 +156,37 @@ fn session_chip(ui: &mut egui::Ui, session: &str) {
         });
 }
 
-/// Observatory-lite: pane count + status tally, then a clickable list of
-/// pane cards drawn from live state.
+/// Host vitals on the right of the title bar: uptime, cpu%, mem%.
+fn vitals(ui: &mut egui::Ui, h: &zodiac::protocol::HostVitals) {
+    let meta = |ui: &mut egui::Ui, s: String| {
+        ui.label(
+            RichText::new(s)
+                .color(theme::TEXT_DIM)
+                .size(12.0)
+                .monospace(),
+        );
+    };
+    meta(ui, format!("mem {}%", h.mem_pct));
+    ui.add_space(10.0);
+    meta(ui, format!("cpu {}%", h.cpu_pct));
+    ui.add_space(10.0);
+    meta(ui, format!("up {}", fmt_uptime(h.uptime_ms)));
+}
+
+/// Coarse host uptime like `3d 4h` / `4h 12m` / `12m`.
+fn fmt_uptime(ms: u64) -> String {
+    let s = ms / 1000;
+    let (d, h, m) = (s / 86400, (s % 86400) / 3600, (s % 3600) / 60);
+    if d > 0 {
+        format!("{d}d {h}h")
+    } else if h > 0 {
+        format!("{h}h {m}m")
+    } else {
+        format!("{m}m")
+    }
+}
+
+/// Observatory: summary strip + responsive card grid from live state.
 fn observatory(root: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
     egui::CentralPanel::default()
         .frame(
@@ -140,12 +208,7 @@ fn observatory(root: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
                 });
                 return;
             }
-            egui::ScrollArea::vertical().show(ui, |ui| {
-                for (i, p) in d.panes.iter().enumerate() {
-                    pane_card(ui, d, i, p, actions);
-                    ui.add_space(10.0);
-                }
-            });
+            card_grid(ui, d, actions);
         });
 }
 
@@ -164,7 +227,7 @@ fn summary_strip(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
 
         let mut counts = [0usize; 5];
         for p in d.panes {
-            counts[theme::status_index(d.status(p), false)] += 1;
+            counts[d.si(p)] += 1;
         }
         for (idx, n) in counts.iter().enumerate() {
             if *n == 0 {
@@ -218,16 +281,44 @@ fn amber_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     ui.add(btn)
 }
 
-/// One pane card: sigil tile, name, agent, status pill; click to focus.
+/// Responsive card grid: as many ~300px columns as fit, row-major, so card
+/// order matches pane order (and thus the focus index).
+fn card_grid(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
+    let gap = 14.0;
+    let avail = ui.available_width();
+    let min_card = 300.0;
+    let cols = (((avail + gap) / (min_card + gap)).floor() as usize).max(1);
+    let card_w = ((avail - gap * (cols as f32 - 1.0)) / cols as f32).max(min_card.min(avail));
+    egui::ScrollArea::vertical().show(ui, |ui| {
+        let items: Vec<(usize, &CPane)> = d.panes.iter().enumerate().collect();
+        for row in items.chunks(cols) {
+            ui.horizontal_top(|ui| {
+                for (i, p) in row {
+                    ui.allocate_ui(egui::vec2(card_w, 0.0), |ui| {
+                        ui.set_width(card_w);
+                        pane_card(ui, d, *i, p, actions);
+                    });
+                    ui.add_space(gap);
+                }
+            });
+            ui.add_space(gap);
+        }
+    });
+}
+
+/// One pane card: sigil tile, name, agent+version chip, status pill, cwd,
+/// one-line subtitle, and a transcript-tail well. Click to focus; a 2px
+/// status rail runs down the left edge.
 fn pane_card(ui: &mut egui::Ui, d: &UiData, i: usize, p: &CPane, actions: &mut Vec<UiAction>) {
-    let status = d.status(p);
-    let si = theme::status_index(status, false);
+    let ps = d.ps(p);
+    let si = d.si(p);
     let sel = i == d.active;
+    let idle = si == 4;
     let fill = if sel {
         theme::BG_SELECTED
     } else if si == 0 {
         theme::BG_CARD_ALERT
-    } else if si == 4 {
+    } else if idle {
         theme::BG_CARD_IDLE
     } else {
         theme::BG_CARD
@@ -237,45 +328,89 @@ fn pane_card(ui: &mut egui::Ui, d: &UiData, i: usize, p: &CPane, actions: &mut V
     } else {
         theme::LINE_BORDER
     };
-    let inner = Frame::NONE
+    let fr = Frame::NONE
         .fill(fill)
         .stroke(Stroke::new(1.0, border))
         .corner_radius(CornerRadius::same(12))
         .inner_margin(Margin::same(14))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            // Header row.
             ui.horizontal(|ui| {
                 sigil_tile(ui, i + 1, si);
                 ui.add_space(10.0);
                 ui.vertical(|ui| {
-                    ui.label(
-                        RichText::new(&p.name)
-                            .color(if si == 4 {
-                                theme::TEXT_DIM
-                            } else {
-                                theme::TEXT_PRIMARY
-                            })
-                            .size(15.0)
-                            .strong(),
-                    );
-                    let sub = if p.is_agent() {
-                        p.kind.clone()
-                    } else {
-                        "shell".into()
-                    };
-                    ui.label(
-                        RichText::new(sub)
-                            .color(theme::TEXT_FAINT)
-                            .size(11.5)
-                            .monospace(),
-                    );
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new(clip(&p.name, 22))
+                                .color(if idle {
+                                    theme::TEXT_DIM
+                                } else {
+                                    theme::TEXT_PRIMARY
+                                })
+                                .size(15.0)
+                                .strong(),
+                        );
+                        if let Some(agent) = ps.and_then(|s| s.agent.as_deref()) {
+                            agent_chip(ui, agent, ps.and_then(|s| s.version.as_deref()));
+                        }
+                    });
+                    if let Some(cwd) = ps.and_then(|s| s.cwd.as_deref()) {
+                        ui.label(
+                            RichText::new(clip(cwd, 40))
+                                .color(theme::TEXT_FAINT)
+                                .size(11.5)
+                                .monospace(),
+                        );
+                    }
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    status_pill(ui, si, theme::STATUS_WORD[si]);
+                    let age = ps.map(|s| fmt_age(s.uptime_ms)).unwrap_or_default();
+                    status_pill(ui, si, &format!("{} {age}", theme::STATUS_WORD[si]));
                 });
             });
+            ui.add_space(8.0);
+            // Summary line.
+            let summary = ps
+                .and_then(|s| s.subtitle.clone())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| {
+                    if idle {
+                        "Idle shell — nothing running.".into()
+                    } else {
+                        String::new()
+                    }
+                });
+            if !summary.is_empty() {
+                ui.label(
+                    RichText::new(clip(&summary, 80))
+                        .color(if idle {
+                            theme::TEXT_FAINT
+                        } else {
+                            theme::TEXT_BODY
+                        })
+                        .size(13.5),
+                );
+                ui.add_space(8.0);
+            }
+            // Transcript-tail well.
+            let tail: Vec<&String> = ps
+                .map(|s| s.tail.iter().rev().take(4).collect())
+                .unwrap_or_default();
+            if !tail.is_empty() {
+                tail_well(ui, &tail, si, border);
+            }
         });
-    if inner
+
+    // 2px status rail down the left edge of the card.
+    let r = fr.response.rect;
+    ui.painter().rect_filled(
+        Rect::from_min_size(r.min, egui::vec2(2.0, r.height())),
+        CornerRadius::same(2),
+        theme::STATUS_RAIL[si],
+    );
+
+    if fr
         .response
         .interact(Sense::click())
         .on_hover_cursor(egui::CursorIcon::PointingHand)
@@ -283,6 +418,58 @@ fn pane_card(ui: &mut egui::Ui, d: &UiData, i: usize, p: &CPane, actions: &mut V
     {
         actions.push(UiAction::Focus(i));
     }
+}
+
+/// The agent+version chip in mono, in a bordered box.
+fn agent_chip(ui: &mut egui::Ui, agent: &str, version: Option<&str>) {
+    let label = match version {
+        Some(v) if !v.is_empty() => format!("{agent} {}", clip(v, 8)),
+        _ => agent.to_string(),
+    };
+    Frame::NONE
+        .stroke(Stroke::new(1.0, theme::LINE_BORDER))
+        .corner_radius(CornerRadius::same(5))
+        .inner_margin(Margin::symmetric(5, 1))
+        .show(ui, |ui| {
+            ui.label(
+                RichText::new(label)
+                    .color(theme::TEXT_DIM)
+                    .size(11.0)
+                    .monospace(),
+            );
+        });
+}
+
+/// The transcript excerpt well: a faint panel with a status-colored left
+/// border; earlier rows dim, the last row in the status text color.
+fn tail_well(ui: &mut egui::Ui, tail_rev: &[&String], si: usize, border: Color32) {
+    Frame::NONE
+        .fill(Color32::from_rgba_unmultiplied(255, 255, 255, 5))
+        .stroke(Stroke::new(1.0, border))
+        .corner_radius(CornerRadius::same(6))
+        .inner_margin(Margin::symmetric(8, 6))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            // tail_rev is newest-first; show oldest-first with the newest last.
+            let n = tail_rev.len();
+            for (k, line) in tail_rev.iter().rev().enumerate() {
+                let last = k + 1 == n;
+                let col = if last {
+                    theme::STATUS_TEXT[si]
+                } else {
+                    theme::TEXT_FAINT
+                };
+                ui.add(
+                    Label::new(
+                        RichText::new(clip(line, 64))
+                            .color(col)
+                            .size(11.5)
+                            .monospace(),
+                    )
+                    .truncate(),
+                );
+            }
+        });
 }
 
 /// The 30px rounded sigil tile with the roman numeral, tinted by status.

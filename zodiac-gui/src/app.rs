@@ -936,6 +936,7 @@ impl GuiApp {
                     .as_ref()
                     .map(|s| s.pairing_token.as_str())
                     .unwrap_or(""),
+                motion: self.settings.gui_motion != "off",
             };
             crate::ui::build(
                 ui,
@@ -984,6 +985,20 @@ impl GuiApp {
                 crate::ui::UiAction::Back => self.screen = crate::ui::Screen::Observatory,
                 crate::ui::UiAction::SaveSettings => self.settings.save(),
                 crate::ui::UiAction::Raise => self.send(T_RESTORE, 0, &[]),
+                crate::ui::UiAction::DragWindow => {
+                    if let Some(r) = &self.renderer {
+                        let _ = r.window.drag_window();
+                    }
+                }
+                crate::ui::UiAction::Minimize => {
+                    if let Some(r) = &self.renderer {
+                        r.window.set_minimized(true);
+                    }
+                }
+                crate::ui::UiAction::Quit => {
+                    self.send(T_DETACH, 0, &[]);
+                    self.want_quit = true;
+                }
                 crate::ui::UiAction::ToggleTerm(id) => {
                     if !self.term_mode.remove(&id) {
                         self.term_mode.insert(id);
@@ -1061,6 +1076,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
         }
         let attrs = winit::window::Window::default_attributes()
             .with_title(format!("zodiac — {}", self.session))
+            .with_decorations(false) // custom chrome: our title bar owns move/min/close
             .with_inner_size(winit::dpi::LogicalSize::new(1100.0, 720.0));
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),

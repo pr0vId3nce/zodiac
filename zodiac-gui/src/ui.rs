@@ -73,6 +73,12 @@ pub enum UiAction {
     SaveSettings,
     /// Raise the last session (server reopens missing panes) — T_RESTORE.
     Raise,
+    /// Custom window chrome: start an interactive window move.
+    DragWindow,
+    /// Custom window chrome: minimize the window.
+    Minimize,
+    /// Custom window chrome: close the window (detach + exit).
+    Quit,
     /// Spawn a new shell pane.
     NewShell,
     /// Spawn a new claude agent pane.
@@ -90,6 +96,8 @@ pub struct UiData<'a> {
     pub term_active: bool,
     /// The server's current pairing token (for the Pair-phone QR).
     pub pairing_token: &'a str,
+    /// Animations enabled (Motion setting != "off").
+    pub motion: bool,
 }
 
 impl UiData<'_> {
@@ -178,7 +186,7 @@ pub fn build(
     if d.screen != Screen::Focused {
         st.term_grid = None;
     }
-    title_bar(ui, d, st);
+    title_bar(ui, d, st, actions);
     match d.screen {
         Screen::Observatory => observatory(ui, d, actions),
         Screen::Focused => focused(ui, d, st, actions),
@@ -187,7 +195,7 @@ pub fn build(
         Overlay::Palette => palette(ui, d, st, actions),
         Overlay::Settings => settings_dialog(ui, st, settings, actions),
         Overlay::Pairing => pairing_dialog(ui, d, st),
-        Overlay::Oracle => oracle_dialog(ui, st),
+        Overlay::Oracle => oracle_dialog(ui, st, d.motion),
         Overlay::Raise => raise_dialog(ui, d, st, actions),
         Overlay::None => {}
     }
@@ -336,7 +344,7 @@ fn now_secs() -> u64 {
 /// The Oracle panel (Alt+O): the CSS-gradient orb + status + slash chips and
 /// an input row. Presentational — the GUI has no chat wiring yet and makes no
 /// network calls (chat send/receive is a follow-on).
-fn oracle_dialog(ui: &mut egui::Ui, st: &mut UiState) {
+fn oracle_dialog(ui: &mut egui::Ui, st: &mut UiState, motion: bool) {
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         st.overlay = Overlay::None;
     }
@@ -362,7 +370,7 @@ fn oracle_dialog(ui: &mut egui::Ui, st: &mut UiState) {
                 .show(ui, |ui| {
                     ui.set_width(520.0);
                     // Orb.
-                    orb(ui, 180.0);
+                    orb(ui, 180.0, motion);
                     ui.add_space(6.0);
                     ui.vertical_centered(|ui| {
                         ui.label(
@@ -438,7 +446,7 @@ fn oracle_dialog(ui: &mut egui::Ui, st: &mut UiState) {
 
 /// The Oracle orb: a radial gradient approximated by concentric filled
 /// circles (edge → core), with the highlight offset up-left like the mock.
-fn orb(ui: &mut egui::Ui, h: f32) {
+fn orb(ui: &mut egui::Ui, h: f32, motion: bool) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), Sense::hover());
     let painter = ui.painter_at(rect);
     painter.rect_filled(
@@ -492,9 +500,11 @@ fn orb(ui: &mut egui::Ui, h: f32) {
         r,
         Stroke::new(1.0, Color32::from_rgba_unmultiplied(255, 255, 255, 34)),
     );
-    // Keep animating (drift is a follow-on; a gentle repaint keeps it live).
-    ui.ctx()
-        .request_repaint_after(std::time::Duration::from_millis(66));
+    // Keep animating (drift is a follow-on) unless Motion is off.
+    if motion {
+        ui.ctx()
+            .request_repaint_after(std::time::Duration::from_millis(66));
+    }
 }
 
 /// Read the astrolabe bridge endpoint `(url, cid, name)` from
@@ -1481,6 +1491,14 @@ fn settings_dialog(
                         &[("cards", "cards"), ("list", "list")],
                         actions,
                     );
+                    choice_row(
+                        ui,
+                        "Motion",
+                        &mut s.gui_motion,
+                        "full",
+                        &[("full", "full"), ("reduced", "reduced"), ("off", "off")],
+                        actions,
+                    );
                     ui.add_space(14.0);
                     group_label(ui, "BEHAVIOR");
                     toggle_row(ui, "Connection watchdog", &mut s.connection_watch, actions);
@@ -1579,7 +1597,7 @@ fn toggle_row(ui: &mut egui::Ui, label: &str, field: &mut bool, actions: &mut Ve
 
 /// The 52px title bar: amber mark, "zodiac", session chip, chrome buttons,
 /// host vitals.
-fn title_bar(root: &mut egui::Ui, d: &UiData, st: &mut UiState) {
+fn title_bar(root: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<UiAction>) {
     egui::Panel::top("titlebar")
         .exact_size(52.0)
         .frame(
@@ -1591,15 +1609,31 @@ fn title_bar(root: &mut egui::Ui, d: &UiData, st: &mut UiState) {
             ui.horizontal_centered(|ui| {
                 mark(ui);
                 ui.add_space(8.0);
-                ui.label(
-                    RichText::new("zodiac")
-                        .color(theme::TEXT_PRIMARY)
-                        .size(15.0)
-                        .strong(),
+                // The wordmark doubles as the window drag handle (custom
+                // chrome — no OS titlebar).
+                let word = ui.add(
+                    egui::Label::new(
+                        RichText::new("zodiac")
+                            .color(theme::TEXT_PRIMARY)
+                            .size(15.0)
+                            .strong(),
+                    )
+                    .sense(Sense::click_and_drag()),
                 );
+                if word.drag_started() {
+                    actions.push(UiAction::DragWindow);
+                }
                 ui.add_space(12.0);
                 session_chip(ui, d.session);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    // Window controls (right-most).
+                    if win_btn(ui, "✕", theme::STATUS_RAIL[0]) {
+                        actions.push(UiAction::Quit);
+                    }
+                    if win_btn(ui, "–", theme::TEXT_DIM) {
+                        actions.push(UiAction::Minimize);
+                    }
+                    ui.add_space(6.0);
                     if chrome_btn(ui, "settings") {
                         st.overlay = Overlay::Settings;
                     }
@@ -1621,6 +1655,17 @@ fn title_bar(root: &mut egui::Ui, d: &UiData, st: &mut UiState) {
                 });
             });
         });
+}
+
+/// A borderless window-control glyph button (minimize / close).
+fn win_btn(ui: &mut egui::Ui, glyph: &str, color: Color32) -> bool {
+    let btn = egui::Button::new(RichText::new(glyph).color(color).size(15.0))
+        .fill(Color32::TRANSPARENT)
+        .stroke(Stroke::NONE)
+        .corner_radius(CornerRadius::same(6));
+    let r = ui.add(btn);
+    ui.add_space(4.0);
+    r.clicked()
 }
 
 /// A bordered chrome button (title-bar controls). Returns true on click.

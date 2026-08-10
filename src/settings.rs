@@ -127,6 +127,10 @@ pub struct Settings {
     /// title). GUI-only.
     #[serde(default)]
     pub gui_spinner_pos: String,
+    /// Native-GUI animation level (ADR 0006): "full" (default), "reduced", or
+    /// "off". Scales/disables the oracle orb + working animations. GUI-only.
+    #[serde(default)]
+    pub gui_motion: String,
     /// Hide the keybinding hints in the bottom status bar (they stay
     /// visible in the settings page's Controls column).
     #[serde(default)]

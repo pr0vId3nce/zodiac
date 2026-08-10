@@ -41,15 +41,49 @@ pub enum ARole {
     Error,
 }
 
+/// A tool invocation and (once it returns) its output, kept whole for the
+/// GUI's expandable box — the real command and result, not the 48-char
+/// `tool_compact` teaser the flat `log` stores.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct ToolCall {
+    /// The `tool_use` id, used to match the later `tool_result` back to it.
+    pub id: String,
+    pub name: String,
+    /// The full, human-readable invocation (e.g. a whole Bash command).
+    pub command: String,
+    /// The tool's output, filled in when the matching result arrives.
+    pub result: Option<String>,
+    pub is_error: bool,
+}
+
+/// A richer transcript item for the GUI. The TUI keeps reading the flat
+/// `AgentUi::log`; the GUI reads `items`, which preserves what `log`
+/// collapses: thinking prose, and each tool's real command + result. Both
+/// are folded from the same NDJSON in `apply_line`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ChatItem {
+    User(String),
+    Assistant(String),
+    Thinking(String),
+    Tool(ToolCall),
+    Error(String),
+}
+
 /// Client-side view state for one agent pane: the parsed transcript, the
 /// streaming tail, pending permission requests, and the prompt editor.
 #[derive(Default)]
 pub struct AgentUi {
     pub log: Vec<(ARole, String)>,
+    /// The GUI transcript: typed items that keep tool commands+results and
+    /// thinking prose (see [`ChatItem`]). Folded alongside `log`.
+    pub items: Vec<ChatItem>,
     /// Assistant text still streaming in (shown at the transcript tail
     /// until the completed block replaces it).
     pub stream: String,
-    /// A thinking block is open — shown as a dim marker, never as text.
+    /// Reasoning text still streaming in from `thinking_delta` (shown live
+    /// until the finished thinking block replaces it as a `ChatItem`).
+    pub think_stream: String,
+    /// A thinking block is open — drives the live "thinking" affordance.
     pub thinking: bool,
     /// Wrapped-line offset from the bottom; 0 = follow the tail.
     pub scroll: usize,
@@ -69,7 +103,8 @@ impl AgentUi {
         match v.get("type").and_then(|t| t.as_str()) {
             Some("zodiac_user") => {
                 if let Some(t) = s(v, "text") {
-                    self.log.push((ARole::User, t));
+                    self.log.push((ARole::User, t.clone()));
+                    self.items.push(ChatItem::User(t));
                 }
             }
             Some("assistant") => {
@@ -81,18 +116,63 @@ impl AgentUi {
                     match b.get("type").and_then(|t| t.as_str()) {
                         Some("text") => {
                             if let Some(t) = s(b, "text") {
-                                self.log.push((ARole::Assistant, t));
+                                self.log.push((ARole::Assistant, t.clone()));
+                                self.items.push(ChatItem::Assistant(t));
                             }
                             // The completed block replaces the partial.
                             self.stream.clear();
                             self.thinking = false;
                         }
+                        Some("thinking") => {
+                            // The finished reasoning block, kept as text for
+                            // the GUI's collapsible thinking panel.
+                            let t = s(b, "thinking").unwrap_or_default();
+                            if !t.trim().is_empty() {
+                                self.items.push(ChatItem::Thinking(t));
+                            }
+                            self.think_stream.clear();
+                            self.thinking = false;
+                        }
                         Some("tool_use") => {
                             let name = s(b, "name").unwrap_or_else(|| "tool".into());
-                            let arg = b.get("input").map(tool_compact).unwrap_or_default();
+                            let input = b.get("input").cloned().unwrap_or(serde_json::Value::Null);
+                            let arg = tool_compact(&input);
                             self.log.push((ARole::Tool, format!("{name}({arg})")));
+                            self.items.push(ChatItem::Tool(ToolCall {
+                                id: s(b, "id").unwrap_or_default(),
+                                name,
+                                command: tool_command(&input),
+                                result: None,
+                                is_error: false,
+                            }));
                         }
                         _ => {}
+                    }
+                }
+            }
+            // Native `user` messages carry tool *results* (the real user
+            // prompt is echoed separately as `zodiac_user`). Match each result
+            // back to its call so the GUI shows command + output together.
+            Some("user") => {
+                let blocks = v
+                    .get("message")
+                    .and_then(|m| m.get("content"))
+                    .and_then(|c| c.as_array());
+                for b in blocks.into_iter().flatten() {
+                    if b.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
+                        continue;
+                    }
+                    let id = s(b, "tool_use_id").unwrap_or_default();
+                    let text = tool_result_text(b);
+                    let is_err = b.get("is_error").and_then(|e| e.as_bool()) == Some(true);
+                    for item in self.items.iter_mut().rev() {
+                        if let ChatItem::Tool(tc) = item {
+                            if tc.id == id && tc.result.is_none() {
+                                tc.result = Some(text);
+                                tc.is_error = is_err;
+                                break;
+                            }
+                        }
                     }
                 }
             }
@@ -115,12 +195,22 @@ impl AgentUi {
                                 }
                                 self.thinking = false;
                             }
-                            Some("thinking_delta") => self.thinking = true,
+                            Some("thinking_delta") => {
+                                if let Some(t) = d
+                                    .get("thinking")
+                                    .or_else(|| d.get("text"))
+                                    .and_then(|t| t.as_str())
+                                {
+                                    self.think_stream.push_str(t);
+                                }
+                                self.thinking = true;
+                            }
                             _ => {}
                         }
                     }
                     Some("message_stop") => {
                         self.stream.clear();
+                        self.think_stream.clear();
                         self.thinking = false;
                     }
                     _ => {}
@@ -129,9 +219,11 @@ impl AgentUi {
             Some("result") => {
                 if v.get("is_error").and_then(|e| e.as_bool()) == Some(true) {
                     let msg = s(v, "result").unwrap_or_else(|| "turn failed".into());
-                    self.log.push((ARole::Error, msg));
+                    self.log.push((ARole::Error, msg.clone()));
+                    self.items.push(ChatItem::Error(msg));
                 }
                 self.stream.clear();
+                self.think_stream.clear();
                 self.thinking = false;
             }
             Some("zodiac_perm_resolved") => {
@@ -153,11 +245,13 @@ impl AgentUi {
                 {
                     if b.get("type").and_then(|t| t.as_str()) == Some("text") {
                         if let Some(t) = s(b, "text") {
-                            self.log.push((ARole::Assistant, t));
+                            self.log.push((ARole::Assistant, t.clone()));
+                            self.items.push(ChatItem::Assistant(t));
                         }
                     }
                 }
                 self.stream.clear();
+                self.think_stream.clear();
                 self.thinking = false;
             }
             Some("message_update") => {
@@ -172,6 +266,7 @@ impl AgentUi {
             }
             Some("turn_end") | Some("agent_end") => {
                 self.stream.clear();
+                self.think_stream.clear();
                 self.thinking = false;
             }
             _ => {}
@@ -195,6 +290,40 @@ pub fn tool_compact(input: &serde_json::Value) -> String {
         v => v.to_string(),
     };
     truncate(&text.replace(['\n', '\r'], " "), 48)
+}
+
+/// A tool call's full, human-readable invocation for the GUI's expandable
+/// box — the real command, not the 48-char `tool_compact` teaser. Bash uses
+/// its `command`; otherwise the first string value (file_path, pattern, url…)
+/// or, failing that, the whole input pretty-printed.
+pub fn tool_command(input: &serde_json::Value) -> String {
+    if let Some(cmd) = input.get("command").and_then(|c| c.as_str()) {
+        return cmd.to_string();
+    }
+    match input {
+        serde_json::Value::Object(m) => m
+            .values()
+            .find_map(|v| v.as_str())
+            .map(str::to_string)
+            .unwrap_or_else(|| serde_json::to_string_pretty(input).unwrap_or_default()),
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        v => v.to_string(),
+    }
+}
+
+/// The text of a `tool_result` content block, joining an array of text parts
+/// and ignoring non-text (image) parts.
+fn tool_result_text(block: &serde_json::Value) -> String {
+    match block.get("content") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(a)) => a
+            .iter()
+            .filter_map(|c| c.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
 }
 
 pub struct CPane {
@@ -690,5 +819,104 @@ mod kitty_kbd_tests {
         );
         // Plain Enter stays legacy \r.
         assert!(encode_key_kitty(&key(KeyCode::Enter, KeyModifiers::NONE), 1).is_none());
+    }
+}
+
+#[cfg(test)]
+mod apply_line_tests {
+    use super::*;
+    use serde_json::json;
+
+    fn fold(lines: &[serde_json::Value]) -> AgentUi {
+        let mut ui = AgentUi::default();
+        for l in lines {
+            ui.apply_line(l);
+        }
+        ui
+    }
+
+    #[test]
+    fn tool_command_prefers_bash_command() {
+        let cmd = tool_command(&json!({"command": "ls -la", "description": "list"}));
+        assert_eq!(cmd, "ls -la");
+        // No `command` key: fall back to the first string value.
+        let path = tool_command(&json!({"file_path": "/etc/hosts"}));
+        assert_eq!(path, "/etc/hosts");
+    }
+
+    #[test]
+    fn thinking_prose_is_captured() {
+        let ui = fold(&[json!({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "thinking", "thinking": "let me reason"},
+                {"type": "text", "text": "here's the answer"},
+            ]}
+        })]);
+        assert_eq!(
+            ui.items,
+            vec![
+                ChatItem::Thinking("let me reason".into()),
+                ChatItem::Assistant("here's the answer".into()),
+            ]
+        );
+        // The flat log the TUI reads is unchanged — thinking never enters it.
+        assert_eq!(ui.log, vec![(ARole::Assistant, "here's the answer".into())]);
+    }
+
+    #[test]
+    fn tool_call_and_result_are_paired() {
+        let ui = fold(&[
+            json!({
+                "type": "assistant",
+                "message": {"content": [
+                    {"type": "tool_use", "id": "t1", "name": "Bash",
+                     "input": {"command": "echo hi"}},
+                ]}
+            }),
+            json!({
+                "type": "user",
+                "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "t1", "content": "hi\n"},
+                ]}
+            }),
+        ]);
+        assert_eq!(
+            ui.items,
+            vec![ChatItem::Tool(ToolCall {
+                id: "t1".into(),
+                name: "Bash".into(),
+                command: "echo hi".into(),
+                result: Some("hi\n".into()),
+                is_error: false,
+            })]
+        );
+        // The user prompt is NOT echoed from the native tool-result message.
+        assert!(!ui.log.iter().any(|(r, _)| *r == ARole::User));
+    }
+
+    #[test]
+    fn error_result_flags_the_tool() {
+        let ui = fold(&[
+            json!({
+                "type": "assistant",
+                "message": {"content": [
+                    {"type": "tool_use", "id": "t9", "name": "Bash",
+                     "input": {"command": "false"}},
+                ]}
+            }),
+            json!({
+                "type": "user",
+                "message": {"content": [
+                    {"type": "tool_result", "tool_use_id": "t9",
+                     "content": [{"type": "text", "text": "boom"}], "is_error": true},
+                ]}
+            }),
+        ]);
+        let ChatItem::Tool(tc) = &ui.items[0] else {
+            panic!("expected a tool item");
+        };
+        assert_eq!(tc.result.as_deref(), Some("boom"));
+        assert!(tc.is_error);
     }
 }

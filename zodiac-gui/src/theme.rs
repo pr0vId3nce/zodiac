@@ -34,6 +34,10 @@ pub const AMBER: Color32 = Color32::from_rgb(0xe0, 0xa8, 0x48);
 pub const AMBER_HOVER: Color32 = Color32::from_rgb(0xf0, 0xc6, 0x7e);
 pub const VIOLET: Color32 = Color32::from_rgb(0xa8, 0x74, 0xf0);
 pub const VIOLET_TEXT: Color32 = Color32::from_rgb(0xc5, 0xa3, 0xf7);
+/// Claude Code's warm thinking orange — the rotating status word and the
+/// `⏺` recap bullet. `ORANGE_DIM` is the softer tone for thinking prose.
+pub const ORANGE: Color32 = Color32::from_rgb(0xff, 0x8c, 0x2b);
+pub const ORANGE_DIM: Color32 = Color32::from_rgb(0xc9, 0x8a, 0x54);
 
 // --- Status colors --------------------------------------------------------
 // Index order: needs_input, thinking, working, finished, idle — the same

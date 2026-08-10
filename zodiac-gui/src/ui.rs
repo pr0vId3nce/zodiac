@@ -177,6 +177,19 @@ fn clip(s: &str, max: usize) -> String {
     }
 }
 
+/// Clip multi-line text to at most `max` lines, noting how many were dropped
+/// (keeps a huge tool result from blowing up the transcript).
+fn clip_lines(s: &str, max: usize) -> String {
+    let lines: Vec<&str> = s.lines().collect();
+    if lines.len() <= max {
+        return s.to_string();
+    }
+    let extra = lines.len() - max;
+    let mut out = lines[..max].join("\n");
+    out.push_str(&format!("\n… (+{extra} more lines)"));
+    out
+}
+
 /// Build the frame's UI, pushing any resulting actions. egui 0.36 hands the
 /// integration a root `&mut Ui`; panels are shown into it.
 pub fn build(
@@ -1065,9 +1078,38 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
     }
 }
 
-/// Native agent transcript: user/assistant/tool/error turns + streaming tail.
+/// Playful gerunds shown next to the spinner while a turn is thinking —
+/// the Claude Code "orange sayings" ported to the GUI.
+const THINKING_WORDS: &[&str] = &[
+    "Cogitating",
+    "Percolating",
+    "Pondering",
+    "Ruminating",
+    "Musing",
+    "Deliberating",
+    "Contemplating",
+    "Noodling",
+    "Conjuring",
+    "Synthesizing",
+    "Distilling",
+    "Puzzling",
+    "Marinating",
+    "Simmering",
+    "Scheming",
+];
+
+/// A braille spinner frame for the current egui time (80ms cadence).
+fn spinner_frame(t: f64) -> char {
+    const F: &[char] = &['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+    F[((t * 12.5) as usize) % F.len()]
+}
+
+/// Native agent transcript: typed turns (user/assistant/thinking/tool/error)
+/// from [`zodiac::client_core::ChatItem`] plus the live streaming tail. This
+/// is the rich view — expandable tool boxes, collapsible thinking prose,
+/// fenced-code blocks, and the orange thinking sayings.
 fn transcript_view(ui: &mut egui::Ui, p: &CPane) {
-    use zodiac::client_core::ARole;
+    use zodiac::client_core::ChatItem;
     egui::ScrollArea::vertical()
         .id_salt("transcript")
         .stick_to_bottom(true)
@@ -1075,29 +1117,56 @@ fn transcript_view(ui: &mut egui::Ui, p: &CPane) {
         .show(ui, |ui| {
             ui.add_space(12.0);
             let inner = 22.0;
-            for (role, text) in &p.agent.log {
-                match role {
-                    ARole::User => turn_user(ui, text, inner),
-                    ARole::Assistant => turn_agent(ui, "✦", theme::VIOLET, text, inner),
-                    ARole::Tool => turn_tool(ui, text, inner),
-                    ARole::Error => turn_agent(ui, "✗", theme::STATUS_RAIL[0], text, inner),
+            for (i, item) in p.agent.items.iter().enumerate() {
+                match item {
+                    ChatItem::User(t) => turn_user(ui, t, inner),
+                    ChatItem::Assistant(t) => turn_assistant(ui, t, inner),
+                    ChatItem::Thinking(t) => turn_thinking(ui, p.id, i, t, inner),
+                    ChatItem::Tool(tc) => turn_tool_box(ui, p.id, i, tc, inner),
+                    ChatItem::Error(t) => turn_agent(ui, "✗", theme::STATUS_RAIL[0], t, inner),
                 }
                 ui.add_space(10.0);
             }
-            if p.agent.thinking {
-                indent(ui, inner, |ui| {
-                    ui.label(
-                        RichText::new("● ● ●  thinking")
-                            .color(theme::VIOLET_TEXT)
-                            .size(13.0),
-                    );
-                });
+            // Live tail: reasoning still streaming, then the thinking sayings,
+            // then in-flight assistant text.
+            if !p.agent.think_stream.is_empty() {
+                turn_thinking_live(ui, &p.agent.think_stream, inner);
+                ui.add_space(10.0);
+            } else if p.agent.thinking {
+                thinking_indicator(ui, inner);
+                ui.add_space(10.0);
             }
             if !p.agent.stream.is_empty() {
-                turn_agent(ui, "✦", theme::VIOLET, &p.agent.stream, inner);
+                turn_assistant(ui, &p.agent.stream, inner);
             }
             ui.add_space(12.0);
         });
+}
+
+/// The live "· Cogitating…" saying in warm orange, with a braille spinner
+/// that advances off egui's clock (repaint scheduled so it animates).
+fn thinking_indicator(ui: &mut egui::Ui, inner: f32) {
+    let t = ui.input(|i| i.time);
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(80));
+    let word = THINKING_WORDS[((t / 1.6) as usize) % THINKING_WORDS.len()];
+    indent(ui, inner, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(spinner_frame(t))
+                    .color(theme::ORANGE)
+                    .size(14.0)
+                    .monospace(),
+            );
+            ui.add_space(6.0);
+            ui.label(
+                RichText::new(format!("{word}…"))
+                    .color(theme::ORANGE)
+                    .italics()
+                    .size(13.5),
+            );
+        });
+    });
 }
 
 /// A left-indented block.
@@ -1140,28 +1209,214 @@ fn turn_agent(ui: &mut egui::Ui, glyph: &str, col: Color32, text: &str, inner: f
     });
 }
 
-/// Tool-call: a compact mono card.
-fn turn_tool(ui: &mut egui::Ui, text: &str, inner: f32) {
+/// Assistant turn: Claude Code's warm `⏺` recap bullet + prose, with any
+/// fenced code broken out into its own monospace box.
+fn turn_assistant(ui: &mut egui::Ui, text: &str, inner: f32) {
+    ui.horizontal_top(|ui| {
+        ui.add_space(inner - 18.0);
+        ui.label(RichText::new("⏺").color(theme::ORANGE).size(14.0));
+        ui.add_space(6.0);
+        ui.vertical(|ui| {
+            ui.set_max_width(ui.available_width());
+            render_body(ui, text);
+        });
+    });
+}
+
+/// Render prose, breaking ``` fenced blocks out into monospace code boxes.
+fn render_body(ui: &mut egui::Ui, text: &str) {
+    fn flush(ui: &mut egui::Ui, lines: &[&str], code: bool) {
+        let joined = lines.join("\n");
+        if joined.trim().is_empty() {
+            return;
+        }
+        if code {
+            code_box(ui, joined.trim_matches('\n'));
+        } else {
+            ui.label(
+                RichText::new(joined.trim_matches('\n'))
+                    .color(theme::TEXT_BODY)
+                    .size(14.5),
+            );
+        }
+    }
+    let mut in_code = false;
+    let mut buf: Vec<&str> = Vec::new();
+    for line in text.split('\n') {
+        if line.trim_start().starts_with("```") {
+            flush(ui, &buf, in_code);
+            buf.clear();
+            in_code = !in_code;
+            continue;
+        }
+        buf.push(line);
+    }
+    flush(ui, &buf, in_code);
+}
+
+/// A monospace code box: bordered, horizontally scrollable so long lines
+/// don't wrap.
+fn code_box(ui: &mut egui::Ui, code: &str) {
+    Frame::NONE
+        .fill(theme::bg_raised())
+        .stroke(Stroke::new(1.0, theme::LINE_BORDER))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::symmetric(10, 8))
+        .outer_margin(Margin::symmetric(0, 3))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            egui::ScrollArea::horizontal()
+                .id_salt(egui::Id::new(("code", code.len(), code.as_ptr() as usize)))
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(code)
+                            .color(theme::TEXT_BODY)
+                            .size(12.5)
+                            .monospace(),
+                    );
+                });
+        });
+}
+
+/// A tool result box: capped height with a scroll, red-tinted on error.
+fn result_box(ui: &mut egui::Ui, text: &str, is_error: bool) {
+    let col = if is_error {
+        theme::STATUS_TEXT[0]
+    } else {
+        theme::TEXT_DIM
+    };
+    Frame::NONE
+        .fill(theme::bg_panel())
+        .stroke(Stroke::new(1.0, theme::LINE_HAIRLINE))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::symmetric(10, 8))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            egui::ScrollArea::vertical()
+                .id_salt(egui::Id::new(("res", text.len(), text.as_ptr() as usize)))
+                .max_height(240.0)
+                .show(ui, |ui| {
+                    ui.label(
+                        RichText::new(clip_lines(text, 400))
+                            .color(col)
+                            .size(12.0)
+                            .monospace(),
+                    );
+                });
+        });
+}
+
+/// A finished reasoning block: a collapsible orange panel, closed by default.
+fn turn_thinking(ui: &mut egui::Ui, pane: u64, idx: usize, text: &str, inner: f32) {
     indent(ui, inner, |ui| {
+        let id = ui.make_persistent_id(("think", pane, idx));
+        egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
+            .show_header(ui, |ui| {
+                ui.label(RichText::new("✳ thinking").color(theme::ORANGE).size(12.5));
+            })
+            .body(|ui| {
+                ui.label(
+                    RichText::new(text)
+                        .color(theme::ORANGE_DIM)
+                        .italics()
+                        .size(12.5),
+                );
+            });
+    });
+}
+
+/// Reasoning still streaming in: orange prose under a live spinner header.
+fn turn_thinking_live(ui: &mut egui::Ui, text: &str, inner: f32) {
+    let t = ui.input(|i| i.time);
+    ui.ctx()
+        .request_repaint_after(std::time::Duration::from_millis(80));
+    indent(ui, inner, |ui| {
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(spinner_frame(t))
+                    .color(theme::ORANGE)
+                    .size(13.0)
+                    .monospace(),
+            );
+            ui.add_space(6.0);
+            ui.label(RichText::new("thinking").color(theme::ORANGE).size(12.5));
+        });
+        ui.label(
+            RichText::new(text)
+                .color(theme::ORANGE_DIM)
+                .italics()
+                .size(12.5),
+        );
+    });
+}
+
+/// A tool call as an expandable box: the header shows the tool + a one-line
+/// command teaser; expanding reveals the full command and its output
+/// (red-tinted on error). Collapsed by default.
+fn turn_tool_box(
+    ui: &mut egui::Ui,
+    pane: u64,
+    idx: usize,
+    tc: &zodiac::client_core::ToolCall,
+    inner: f32,
+) {
+    indent(ui, inner, |ui| {
+        let edge = if tc.is_error {
+            fade(theme::STATUS_RAIL[0], 0.5)
+        } else {
+            theme::LINE_BORDER
+        };
         Frame::NONE
             .fill(theme::bg_chrome())
-            .stroke(Stroke::new(1.0, theme::LINE_BORDER))
+            .stroke(Stroke::new(1.0, edge))
             .corner_radius(CornerRadius::same(10))
             .inner_margin(Margin::symmetric(10, 7))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    ui.label(RichText::new("⏺").color(theme::accent()).size(12.0));
+                let id = ui.make_persistent_id(("tool", pane, idx));
+                let accent = if tc.is_error {
+                    theme::STATUS_RAIL[0]
+                } else {
+                    theme::accent()
+                };
+                egui::collapsing_header::CollapsingState::load_with_default_open(
+                    ui.ctx(),
+                    id,
+                    false,
+                )
+                .show_header(ui, |ui| {
+                    ui.label(RichText::new("⏺").color(accent).size(12.0));
                     ui.add_space(6.0);
+                    ui.label(
+                        RichText::new(&tc.name)
+                            .color(theme::TEXT_DIM)
+                            .size(12.5)
+                            .strong()
+                            .monospace(),
+                    );
+                    ui.add_space(8.0);
+                    let teaser = clip(tc.command.lines().next().unwrap_or(""), 72);
                     ui.add(
                         Label::new(
-                            RichText::new(text)
-                                .color(theme::TEXT_DIM)
+                            RichText::new(teaser)
+                                .color(theme::TEXT_FAINT)
                                 .size(12.0)
                                 .monospace(),
                         )
                         .truncate(),
                     );
+                })
+                .body(|ui| {
+                    ui.add_space(4.0);
+                    if !tc.command.trim().is_empty() {
+                        code_box(ui, tc.command.trim_matches('\n'));
+                    }
+                    if let Some(res) = &tc.result {
+                        if !res.trim().is_empty() {
+                            ui.add_space(6.0);
+                            result_box(ui, res.trim_matches('\n'), tc.is_error);
+                        }
+                    }
                 });
             });
     });

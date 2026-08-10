@@ -1194,6 +1194,26 @@ fn activity_rail(ui: &mut egui::Ui, d: &UiData) {
         return;
     };
     let ps = d.ps(p);
+    // Activity: output-rate histogram (last ~10 min of buckets).
+    ui.label(
+        RichText::new("ACTIVITY")
+            .color(theme::TEXT_GHOST)
+            .size(11.0)
+            .strong(),
+    );
+    ui.add_space(8.0);
+    let vals = rate_vals(p);
+    if vals.iter().any(|v| *v > 0) {
+        sparkline(ui, &vals, theme::STATUS_RAIL[2], 44.0, 6.0, 2.0);
+        ui.label(
+            RichText::new("output rate · last 10m")
+                .color(theme::TEXT_GHOST)
+                .size(11.0),
+        );
+    } else {
+        ui.label(RichText::new("idle").color(theme::TEXT_GHOST).size(12.0));
+    }
+    ui.add_space(16.0);
     ui.label(
         RichText::new("SESSION")
             .color(theme::TEXT_GHOST)
@@ -1739,6 +1759,12 @@ fn pane_card(ui: &mut egui::Ui, d: &UiData, i: usize, p: &CPane, actions: &mut V
             if !tail.is_empty() {
                 tail_well(ui, &tail, si, border);
             }
+            // Footer: output-rate sparkline.
+            let vals = rate_vals(p);
+            if vals.iter().any(|v| *v > 0) {
+                ui.add_space(8.0);
+                sparkline(ui, &vals, theme::STATUS_RAIL[si], 16.0, 3.0, 1.0);
+            }
         });
 
     // 2px status rail down the left edge of the card.
@@ -1833,6 +1859,44 @@ fn sigil_tile(ui: &mut egui::Ui, n1: usize, si: usize) {
         egui::FontId::proportional(13.0),
         col,
     );
+}
+
+/// An output-rate sparkline: `vals` newest-last, drawn as bottom-anchored
+/// bars (opacity 0.35→1 by value) in `color`, right-aligned in a strip of
+/// the given height. Nothing is drawn when there's no output.
+fn sparkline(ui: &mut egui::Ui, vals: &[u32], color: Color32, height: f32, bar_w: f32, gap: f32) {
+    let want = ((ui.available_width() + gap) / (bar_w + gap))
+        .floor()
+        .max(1.0) as usize;
+    let start = vals.len().saturating_sub(want);
+    let shown = &vals[start..];
+    let max = shown.iter().copied().max().unwrap_or(0).max(1) as f32;
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), height), Sense::hover());
+    let painter = ui.painter_at(rect);
+    for (i, &v) in shown.iter().enumerate() {
+        if v == 0 {
+            continue;
+        }
+        let frac = (v as f32 / max).clamp(0.0, 1.0);
+        let h = (frac * height).max(1.0);
+        let x = rect.left() + i as f32 * (bar_w + gap);
+        let a = (0.35 + 0.65 * frac).clamp(0.0, 1.0);
+        let mut c = color;
+        c = Color32::from_rgba_unmultiplied(c.r(), c.g(), c.b(), (a * 255.0) as u8);
+        painter.rect_filled(
+            Rect::from_min_size(egui::pos2(x, rect.bottom() - h), egui::vec2(bar_w, h)),
+            CornerRadius::ZERO,
+            c,
+        );
+    }
+}
+
+/// Collect a pane's rate buckets plus the in-progress bucket, newest last.
+fn rate_vals(p: &CPane) -> Vec<u32> {
+    let mut v: Vec<u32> = p.rate.iter().copied().collect();
+    v.push(p.rate_cur);
+    v
 }
 
 /// Blend a status color toward the ground at the given alpha, so pills read

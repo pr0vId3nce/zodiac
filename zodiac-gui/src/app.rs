@@ -227,6 +227,10 @@ impl GuiApp {
                 let active_id = self.panes.get(self.active).map(|p| p.id);
                 if let Some(p) = self.panes.iter_mut().find(|p| p.id == f.id) {
                     p.parser.process(&f.data);
+                    // Output-rate buckets for the activity sparklines (task
+                    // #33): mirror the TUI — roll the bucket, then count bytes.
+                    p.rate_tick();
+                    p.rate_cur = p.rate_cur.saturating_add(f.data.len() as u32);
                     p.last_output = Some(Instant::now());
                     let bell = p.poll_bell();
                     if Some(f.id) != active_id {
@@ -902,6 +906,11 @@ impl GuiApp {
     }
 
     fn redraw(&mut self) {
+        // Roll output-rate buckets so idle panes decay toward zero even
+        // without new output (task #33; time-gated inside rate_tick).
+        for p in &mut self.panes {
+            p.rate_tick();
+        }
         // The native GUI layer (ADR 0006): run egui for one frame, then hand
         // its tessellated jobs to the renderer's egui present path.
         let win = match self.renderer.as_ref() {

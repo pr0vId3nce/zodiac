@@ -1,74 +1,61 @@
 # zodiac-gui
 
-The GUI client for zodiac (roadmap Phase 3, tasks 3.3–3.6): a third client
-on the existing session socket, sharing `zodiac::client_core` with the TUI.
-Rendering stack per `../docs/decisions/0004-gui-stack.md`, pinned exactly:
-winit 0.30.13 + wgpu 30.0.0 + glyphon 0.12.0 (cosmic-text 0.19.0).
+The GUI client for zodiac: a third client on the session socket, sharing
+`zodiac::client_core` with the TUI.
+
+**Native rebuild (ADR 0006).** Following the "TUI → GUI Overhaul" design
+handoff, the client is a native **egui 0.36** app painted into the existing
+wgpu-30 surface (egui tracks our exact `wgpu =30.0.0` pin, so the kitty grid
+renderer stays intact). egui owns the screens — Observatory, focused pane
+(sidebar + native transcript + activity rail), command palette, settings,
+pair-phone, oracle — and the original wgpu grid renderer (ADR 0004: winit
+0.30.13 + wgpu 30.0.0 + glyphon 0.12.0) is reused as the per-pane **terminal
+mode**.
 
 ```sh
 nix develop --command cargo run --release -p zodiac-gui [session]   # default: main
 ```
 
-## What v1 does
+## Screens & keys
+
+- **Observatory** (home) — a responsive card grid of the session's panes from
+  live `T_STATE`: sigil tile, agent+version chip, cwd, one-line subtitle,
+  transcript-tail well, status pill, left status rail. Click a card to open it.
+- **Focused pane** — sidebar (pane list, click to switch) · main · activity
+  rail. The header carries a **transcript | terminal** toggle (per-pane,
+  remembered; shells are always terminal). Transcript renders agent turns
+  natively (user bubbles, ✦ assistant, ⏺ tool cards, streaming tail, thinking);
+  the composer sends to the agent (Enter / **Send** → `T_AGENT_INPUT`) and a
+  "needs you" card answers permission requests (**Approve / Deny** →
+  `T_PERM_RESP`). Terminal mode paints the live vt100 grid. **Esc** returns.
+- **⌘K / Ctrl+K** — command palette (fuzzy pane jump; ↑/↓, Enter, Esc).
+- **⌘, / Ctrl+,** — settings (grouped; edits real `config.json` keys, persists).
+- **Alt+O** — the Oracle panel (gradient orb; presentational for now).
+- Title-bar buttons: **⌘K find pane**, **oracle**, **pair phone**, **settings**.
+  Pair-phone renders the astrolabe pairing QR from the endpoint + token.
+
+## How it renders
 
 - **Attach**: `connect_or_spawn(session)`, then the gfx-capable `T_ATTACH`
-  payload (`[1, cell_w, cell_h]` in px from the measured font metrics), so
-  panes' PTYs report pixel dimensions and the server mirrors kitty graphics.
-  Frames are read on a socket thread and injected into the winit loop;
-  per-pane state is the same `CPane` the TUI uses.
-- **Grid renderer (3.3)**: the active pane's vt100 screen, full-window minus
-  a 1-line tab bar and 1-line status bar. Per-cell bg quads (instanced rect
-  pipeline), glyphon text with the xterm-256 palette and bold / italic /
-  dim / underline / inverse mapping, block cursor. Damage-driven: text is
-  re-shaped only when the cell signature changes; redraws happen on server
-  frames / input / resize, never on a timer; the atlas is never trimmed per
-  frame (S3 findings).
-- **Input (3.4)**: winit keys → crossterm `KeyEvent` → `encode_key`
-  (honoring the pane's application-cursor mode) → `T_INPUT`. IME commits
-  are sent as utf8. Wheel/click go through `encode_mouse` honoring the
-  pane's mouse protocol mode/encoding (→ `T_MOUSE`, or `T_INPUT` for old
-  servers), with the alternate-scroll arrow fallback and local scrollback
-  otherwise. **Ctrl+PageUp / Ctrl+PageDown switch panes** (same spirit as
-  the TUI's Alt bindings, but chosen to never collide with pty input);
-  clicking a tab focuses it. Everything else goes to the pane.
-- **Graphics blit (3.5)**: the first actual pixel decode in zodiac —
-  `T_GFX_IMG` payloads (format 100 = PNG via the `png` crate, 24/32 raw,
-  zlib honored via `flate2`) become RGBA8 textures cached by
-  (pane, img, ver), drawn per `VisPlacement` with source-rect crops,
-  z < 0 under the text pass, z ≥ 0 over it, clipped to the grid.
-- **Agent panes**: transcript rendered as text (❯ user, ✦ assistant,
-  ⏺ tool, ✗ error) with the streaming tail, a local one-line prompt
-  (Enter → `T_AGENT_INPUT`), and a centered permission modal answered with
-  y/n (→ `T_PERM_RESP`).
-- **Chrome (3.6)**: tab bar with status dots (working / needs_input / done /
-  idle) and active highlight; status line with session, pane title, grid.
-
-## Keys / settings
-
-- **Ctrl+PageUp / Ctrl+PageDown** — previous / next pane.
-- **Alt+←/→** (top tabs) or **Alt+↑/↓** (side tabs) — previous / next pane.
-- **Alt+1 … Alt+9** — jump straight to a pane by number.
-- **Alt+N** — new shell pane; **Alt+Shift+N** — new claude agent pane.
-- **Alt+W** — close the active pane (kills its process).
-- **Ctrl+S** — open the fullscreen settings page (Esc closes). ↑/↓ select a
-  row, ←/→ or Enter cycle its value; changes persist to
-  `~/.config/zodiac/config.json` and apply live.
-
-Settings rows (all GUI-only keys the TUI/server ignore):
-
-- **Pane tabs** — `top` (bar across the top) or `side` (left column).
-- **Background** — pane backdrop preset: `oled` (#000, default),
-  `charcoal`, `midnight`, `slate`.
-- **Tab bar bg** — the chrome behind the tab names + status bar; same
-  presets (default `slate`).
-- **Scale** — font scale 75%–200% (on top of the OS scale factor).
-- **Tab markers** — the glyph before each tab name: `dots`, `arabic`,
-  `roman`, or `zodiac` (white/text-presentation sigils, ♈–♓).
-- **Spinner position** — while a tab's agent is working a braille spinner
-  shows: `replace` the marker, `both`, or at the `end` of the title.
-- **Spinner color** / **Glow color** — named colors.
-- **Glow speed** — the bright band sweeping over a working tab's title:
-  `off`, `slow`, `normal`, `fast`, `zippy`.
+  payload (`[1, cell_w, cell_h]` in px), so panes' PTYs report pixel
+  dimensions and the server mirrors kitty graphics. Frames are read on a
+  socket thread and injected into the winit loop; per-pane state is the same
+  `CPane` the TUI uses.
+- **egui layer**: each redraw runs `egui::Context::run_ui` and hands the
+  tessellated jobs to `Renderer::paint_egui`, which uploads texture deltas,
+  builds egui's buffers, clears to the themed backdrop, and renders into the
+  same wgpu surface. Window events feed egui first (`egui_winit`), so a
+  focused widget's keys don't leak to a pane's pty. The `WaitUntil` timer is
+  driven by egui's `repaint_delay`.
+- **Terminal mode** (the legacy ADR-0004 path): the pane's vt100 screen —
+  per-cell bg quads, glyphs, underline, block cursor — reusing
+  `palette::cell_colors` for the xterm-256 + SGR fold. The instanced-rect +
+  textured-quad + glyphon machinery in `render.rs` is retained for this and
+  for kitty-graphics compositing (a follow-on: kitty images aren't yet drawn
+  inside terminal mode).
+- **Design tokens** (`theme.rs`): the handoff's ground/chrome/text/accent
+  palette folded into egui `Visuals`, with the five status colors carried
+  verbatim from `src/theme.rs` (thinking → violet, idle text override).
 
 ## Fonts
 
@@ -90,15 +77,25 @@ those libraries on `LD_LIBRARY_PATH` yourself.
 Testing hook: `ZODIAC_GUI_EXIT_AFTER_MS=<ms>` detaches and exits after the
 delay (used by unattended smoke tests).
 
-## Not in v1 (known gaps)
+## Known gaps / deferred (native rebuild)
 
-- `cpu-render` softbuffer fallback (ADR 0004 stretch goal) — GPU path only.
-- Selection/clipboard, pane create/close/rename/move from the GUI, the home
-  page, zoom, settings, chat panel — the TUI remains the full-featured
-  client; the GUI is a viewer/driver of existing panes.
-- Shaped-line (per-BufferLine) caching: damage granularity is per-screen,
-  which already holds 60 fps at the S3 pathological load.
-- Proportional fonts for agent transcripts (Phase 4).
+- **Kitty graphics inside terminal mode** — the grid shows text + colors but
+  not images; compositing the wgpu image pipeline into egui is a follow-on.
+- **Terminal-mode pty resize** — renders the pane's existing screen size; the
+  pty isn't yet resized to the terminal widget.
+- **Output-rate sparklines / activity histogram** — blocked: `PaneState`
+  carries no rate buckets (needs a server/protocol addition).
+- **Instrument Sans** — the UI uses egui's default proportional font; the OFL
+  TTF isn't vendored yet (not installed system-wide).
+- **Raise-the-last-session** dialog — the GUI doesn't receive the restore
+  snapshot, so it's not built.
+- **Oracle chat** — the panel is presentational; send/receive wiring is a
+  follow-on.
+- **Custom window chrome** — the app draws its own title bar but keeps the OS
+  titlebar (removing it would strand min/max/close on non-tiling WMs until
+  custom controls land).
+- **Settings**: full 33-row parity and the Motion slider (no config key) are
+  pending; a curated functional subset persists today.
 
 ## Fonts
 

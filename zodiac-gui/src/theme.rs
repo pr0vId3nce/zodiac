@@ -74,18 +74,123 @@ pub fn status_index(status: &str, thinking: bool) -> usize {
     }
 }
 
-/// Fold the design tokens into egui's dark visuals: grounds, borders,
-/// selection, rounded widgets, and body text as the default color.
-pub fn apply(ctx: &egui::Context) {
+// --- Theme palette (the `theme` config key) ------------------------------
+// Ground colors + accent vary by theme; text/line/status stay constant (they
+// read on every ground). The active palette lives in a thread-local (egui is
+// single-threaded) that `apply()` sets and the `bg_*()` / `accent()`
+// accessors read, so a theme change takes effect live everywhere.
+#[derive(Clone, Copy)]
+pub struct Palette {
+    pub bg_window: Color32,
+    pub bg_chrome: Color32,
+    pub bg_panel: Color32,
+    pub bg_card: Color32,
+    pub bg_card_idle: Color32,
+    pub bg_card_alert: Color32,
+    pub bg_raised: Color32,
+    pub bg_selected: Color32,
+    pub accent: Color32,
+    pub accent_hover: Color32,
+}
+
+/// "slate · brass" — the default (the module constants).
+const NIGHT: Palette = Palette {
+    bg_window: BG_WINDOW,
+    bg_chrome: BG_CHROME,
+    bg_panel: BG_PANEL,
+    bg_card: BG_CARD,
+    bg_card_idle: BG_CARD_IDLE,
+    bg_card_alert: BG_CARD_ALERT,
+    bg_raised: BG_RAISED,
+    bg_selected: BG_SELECTED,
+    accent: AMBER,
+    accent_hover: AMBER_HOVER,
+};
+
+/// True-black grounds shared by the OLED themes (accent filled in per theme).
+const fn oled(accent: Color32, accent_hover: Color32) -> Palette {
+    Palette {
+        bg_window: Color32::BLACK,
+        bg_chrome: Color32::from_rgb(0x0a, 0x0a, 0x0c),
+        bg_panel: Color32::from_rgb(0x06, 0x06, 0x08),
+        bg_card: Color32::from_rgb(0x0d, 0x0d, 0x10),
+        bg_card_idle: Color32::from_rgb(0x07, 0x07, 0x09),
+        bg_card_alert: Color32::from_rgb(0x14, 0x0a, 0x0a),
+        bg_raised: Color32::from_rgb(0x12, 0x12, 0x16),
+        bg_selected: Color32::from_rgb(0x1c, 0x1c, 0x22),
+        accent,
+        accent_hover,
+    }
+}
+
+/// The palette for a `theme` config value.
+pub fn palette_for(name: &str) -> Palette {
+    match name {
+        "oled-orange" => oled(
+            Color32::from_rgb(0xff, 0x87, 0x00),
+            Color32::from_rgb(0xff, 0xa9, 0x4d),
+        ),
+        "oled-green" => oled(
+            Color32::from_rgb(0x34, 0xd3, 0x99),
+            Color32::from_rgb(0x6e, 0xe7, 0xb3),
+        ),
+        _ => NIGHT,
+    }
+}
+
+thread_local! {
+    static CUR: std::cell::Cell<Palette> = const { std::cell::Cell::new(NIGHT) };
+}
+
+fn cur() -> Palette {
+    CUR.with(|c| c.get())
+}
+
+pub fn bg_window() -> Color32 {
+    cur().bg_window
+}
+pub fn bg_chrome() -> Color32 {
+    cur().bg_chrome
+}
+pub fn bg_panel() -> Color32 {
+    cur().bg_panel
+}
+pub fn bg_card() -> Color32 {
+    cur().bg_card
+}
+pub fn bg_card_idle() -> Color32 {
+    cur().bg_card_idle
+}
+pub fn bg_card_alert() -> Color32 {
+    cur().bg_card_alert
+}
+pub fn bg_raised() -> Color32 {
+    cur().bg_raised
+}
+pub fn bg_selected() -> Color32 {
+    cur().bg_selected
+}
+pub fn accent() -> Color32 {
+    cur().accent
+}
+pub fn accent_hover() -> Color32 {
+    cur().accent_hover
+}
+
+/// Fold the design tokens into egui's dark visuals for the given `theme`:
+/// grounds, borders, selection, rounded widgets, body text as default color.
+pub fn apply(ctx: &egui::Context, theme: &str) {
+    let p = palette_for(theme);
+    CUR.with(|c| c.set(p));
     let mut v = Visuals::dark();
-    v.panel_fill = BG_WINDOW;
-    v.window_fill = BG_CHROME;
-    v.extreme_bg_color = BG_RAISED;
-    v.faint_bg_color = BG_RAISED;
+    v.panel_fill = p.bg_window;
+    v.window_fill = p.bg_chrome;
+    v.extreme_bg_color = p.bg_raised;
+    v.faint_bg_color = p.bg_raised;
     v.override_text_color = Some(TEXT_BODY);
     v.window_stroke = Stroke::new(1.0, LINE_BORDER);
-    v.selection.bg_fill = BG_SELECTED;
-    v.selection.stroke = Stroke::new(1.0, AMBER);
+    v.selection.bg_fill = p.bg_selected;
+    v.selection.stroke = Stroke::new(1.0, p.accent);
 
     let cr = CornerRadius::same(8);
     let w = &mut v.widgets;
@@ -100,16 +205,16 @@ pub fn apply(ctx: &egui::Context) {
     }
     w.noninteractive.bg_stroke = Stroke::new(1.0, LINE_HAIRLINE);
     w.noninteractive.fg_stroke = Stroke::new(1.0, TEXT_DIM);
-    w.inactive.bg_fill = BG_RAISED;
-    w.inactive.weak_bg_fill = BG_RAISED;
+    w.inactive.bg_fill = p.bg_raised;
+    w.inactive.weak_bg_fill = p.bg_raised;
     w.inactive.bg_stroke = Stroke::new(1.0, LINE_BORDER_STRONG);
     w.inactive.fg_stroke = Stroke::new(1.0, TEXT_DIM);
     w.hovered.bg_stroke = Stroke::new(1.0, LINE_HOVER);
     w.hovered.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
-    w.hovered.weak_bg_fill = BG_SELECTED;
+    w.hovered.weak_bg_fill = p.bg_selected;
     w.active.bg_stroke = Stroke::new(1.0, LINE_HOVER);
     w.active.fg_stroke = Stroke::new(1.0, TEXT_PRIMARY);
-    w.active.weak_bg_fill = BG_SELECTED;
+    w.active.weak_bg_fill = p.bg_selected;
 
     ctx.set_visuals(v);
 }

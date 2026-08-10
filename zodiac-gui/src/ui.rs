@@ -76,6 +76,8 @@ pub enum UiAction {
     SaveSettings,
     /// Raise the last session (server reopens missing panes) — T_RESTORE.
     Raise,
+    /// Copy text to the system clipboard (e.g. the pairing URL).
+    CopyText(String),
     /// Custom window chrome: start an interactive window move.
     DragWindow,
     /// Custom window chrome: minimize the window.
@@ -101,6 +103,10 @@ pub struct UiData<'a> {
     pub pairing_token: &'a str,
     /// Animations enabled (Motion setting != "off").
     pub motion: bool,
+    /// Sigil numeral style (card_numeral): "roman" | "arabic" | "zodiac".
+    pub numeral: &'a str,
+    /// Observatory layout (home_view): "cards" | "list".
+    pub home_view: &'a str,
 }
 
 impl UiData<'_> {
@@ -136,6 +142,15 @@ fn roman(mut n: usize) -> String {
         s.push('·');
     }
     s
+}
+
+/// The sigil label for tab/card index `n` in the chosen numeral style.
+fn numeral(style: &str, n: usize) -> String {
+    match style {
+        "arabic" => n.to_string(),
+        "zodiac" => crate::palette::marker("zodiac", n),
+        _ => roman(n),
+    }
 }
 
 /// Compact uptime like the header's `↑2h 14m`.
@@ -197,7 +212,7 @@ pub fn build(
     match st.overlay {
         Overlay::Palette => palette(ui, d, st, actions),
         Overlay::Settings => settings_dialog(ui, st, settings, actions),
-        Overlay::Pairing => pairing_dialog(ui, d, st),
+        Overlay::Pairing => pairing_dialog(ui, d, st, actions),
         Overlay::Oracle => oracle_dialog(ui, st, d.motion),
         Overlay::Raise => raise_dialog(ui, d, st, actions),
         Overlay::None => {}
@@ -240,7 +255,7 @@ fn raise_dialog(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut V
         .order(egui::Order::Foreground)
         .show(ui.ctx(), |ui| {
             Frame::NONE
-                .fill(theme::BG_CARD)
+                .fill(theme::bg_card())
                 .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
                 .corner_radius(CornerRadius::same(14))
                 .inner_margin(Margin::same(20))
@@ -273,10 +288,13 @@ fn raise_dialog(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut V
                                             |ui| {
                                                 ui.horizontal(|ui| {
                                                     ui.label(
-                                                        RichText::new(roman(sp.index.max(1)))
-                                                            .color(theme::AMBER)
-                                                            .size(13.0)
-                                                            .monospace(),
+                                                        RichText::new(numeral(
+                                                            d.numeral,
+                                                            sp.index.max(1),
+                                                        ))
+                                                        .color(theme::accent())
+                                                        .size(13.0)
+                                                        .monospace(),
                                                     );
                                                     ui.add_space(8.0);
                                                     ui.vertical(|ui| {
@@ -404,51 +422,34 @@ fn oracle_dialog(ui: &mut egui::Ui, st: &mut UiState, motion: bool) {
                         .inner_margin(Margin::symmetric(18, 10))
                         .show(ui, |ui| {
                             ui.set_width(ui.available_width());
-                            // Slash-command chips (visual).
-                            ui.horizontal_wrapped(|ui| {
-                                for c in ["/why 3", "/read 1", "/wake", "/sleep"] {
-                                    Frame::NONE
-                                        .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
-                                        .corner_radius(CornerRadius::same(7))
-                                        .inner_margin(Margin::symmetric(8, 3))
-                                        .show(ui, |ui| {
-                                            ui.label(
-                                                RichText::new(c)
-                                                    .color(theme::VIOLET_TEXT)
-                                                    .size(12.0)
-                                                    .monospace(),
-                                            );
-                                        });
-                                    ui.add_space(6.0);
-                                }
-                            });
-                            ui.add_space(10.0);
-                            // Input row (visual placeholder).
-                            Frame::NONE
-                                .fill(theme::BG_RAISED)
-                                .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
-                                .corner_radius(CornerRadius::same(10))
-                                .inner_margin(Margin::symmetric(12, 9))
-                                .show(ui, |ui| {
-                                    ui.set_width(ui.available_width());
-                                    ui.horizontal(|ui| {
-                                        ui.label(
-                                            RichText::new("❯").color(theme::VIOLET).size(14.0),
-                                        );
-                                        ui.label(
-                                            RichText::new(
-                                                "ask the oracle… (chat wiring is a follow-on)",
-                                            )
-                                            .color(theme::TEXT_GHOST)
-                                            .size(13.0),
-                                        );
-                                    });
-                                });
-                            ui.add_space(10.0);
                             ui.vertical_centered(|ui| {
-                                if amber_button(ui, "Close").clicked() {
-                                    close = true;
-                                }
+                                ui.label(
+                                    RichText::new(
+                                        "The Oracle answers over an OpenAI-compatible endpoint on \
+                                         your tailnet. Set chat_endpoint and chat_model, then \
+                                         enable the chat panel.",
+                                    )
+                                    .color(theme::TEXT_FAINT)
+                                    .size(12.5),
+                                );
+                                ui.add_space(6.0);
+                                ui.label(
+                                    RichText::new("commands · /why  /read  /wake  /sleep")
+                                        .color(theme::TEXT_GHOST)
+                                        .size(12.0)
+                                        .monospace(),
+                                );
+                                ui.add_space(12.0);
+                                ui.horizontal(|ui| {
+                                    ui.add_space((ui.available_width() - 190.0).max(0.0) / 2.0);
+                                    if amber_button(ui, "Open Settings").clicked() {
+                                        st.overlay = Overlay::Settings;
+                                    }
+                                    ui.add_space(8.0);
+                                    if ui.button(RichText::new("Close").size(13.0)).clicked() {
+                                        close = true;
+                                    }
+                                });
                             });
                         });
                 });
@@ -556,7 +557,7 @@ fn url_encode(s: &str) -> String {
 /// Pair-a-phone dialog: renders the astrolabe pairing URL as a QR (qrcode →
 /// egui rects), with the URL below. "no bridge detected" when the endpoint
 /// file is absent. No network calls.
-fn pairing_dialog(ui: &mut egui::Ui, d: &UiData, st: &mut UiState) {
+fn pairing_dialog(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<UiAction>) {
     if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         st.overlay = Overlay::None;
     }
@@ -576,8 +577,8 @@ fn pairing_dialog(ui: &mut egui::Ui, d: &UiData, st: &mut UiState) {
         .order(egui::Order::Foreground)
         .show(ui.ctx(), |ui| {
             Frame::NONE
-                .fill(theme::BG_CARD)
-                .stroke(Stroke::new(1.0, fade(theme::AMBER, 0.3)))
+                .fill(theme::bg_card())
+                .stroke(Stroke::new(1.0, fade(theme::accent(), 0.3)))
                 .corner_radius(CornerRadius::same(14))
                 .inner_margin(Margin::same(20))
                 .show(ui, |ui| {
@@ -614,6 +615,10 @@ fn pairing_dialog(ui: &mut egui::Ui, d: &UiData, st: &mut UiState) {
                                     )
                                     .wrap(),
                                 );
+                                ui.add_space(8.0);
+                                if amber_button(ui, "Copy link").clicked() {
+                                    actions.push(UiAction::CopyText(pair_url.clone()));
+                                }
                             }
                             _ => {
                                 ui.add_space(30.0);
@@ -769,7 +774,7 @@ fn palette(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<Ui
         .order(egui::Order::Foreground)
         .show(ui.ctx(), |ui| {
             Frame::NONE
-                .fill(theme::BG_CARD)
+                .fill(theme::bg_card())
                 .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
                 .corner_radius(CornerRadius::same(14))
                 .inner_margin(Margin::same(8))
@@ -777,7 +782,7 @@ fn palette(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<Ui
                     ui.set_width(600.0);
                     // Query row.
                     ui.horizontal(|ui| {
-                        ui.label(RichText::new("⌕").color(theme::AMBER).size(16.0));
+                        ui.label(RichText::new("⌕").color(theme::accent()).size(16.0));
                         let edit = egui::TextEdit::singleline(&mut st.palette_query)
                             .frame(Frame::NONE)
                             .desired_width(f32::INFINITY)
@@ -797,7 +802,7 @@ fn palette(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<Ui
                         let sel = row == st.palette_sel;
                         let rr = Frame::NONE
                             .fill(if sel {
-                                theme::BG_SELECTED
+                                theme::bg_selected()
                             } else {
                                 Color32::TRANSPARENT
                             })
@@ -807,8 +812,8 @@ fn palette(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<Ui
                                 ui.set_width(ui.available_width());
                                 ui.horizontal(|ui| {
                                     ui.label(
-                                        RichText::new(roman(idx + 1))
-                                            .color(theme::AMBER)
+                                        RichText::new(numeral(d.numeral, idx + 1))
+                                            .color(theme::accent())
                                             .size(13.0)
                                             .monospace(),
                                     );
@@ -859,7 +864,7 @@ fn focused(root: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
         .resizable(false)
         .frame(
             Frame::NONE
-                .fill(theme::BG_CHROME)
+                .fill(theme::bg_chrome())
                 .inner_margin(Margin::same(10)),
         )
         .show(root, |ui| sidebar(ui, d, actions));
@@ -868,14 +873,14 @@ fn focused(root: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
         .resizable(false)
         .frame(
             Frame::NONE
-                .fill(theme::BG_PANEL)
+                .fill(theme::bg_panel())
                 .inner_margin(Margin::same(14)),
         )
         .show(root, |ui| activity_rail(ui, d));
     egui::CentralPanel::default()
         .frame(
             Frame::NONE
-                .fill(theme::BG_WINDOW)
+                .fill(theme::bg_window())
                 .inner_margin(Margin::same(0)),
         )
         .show(root, |ui| main_pane(ui, d, st, actions));
@@ -898,7 +903,7 @@ fn sidebar(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
                 let sel = i == d.active;
                 let fr = Frame::NONE
                     .fill(if sel {
-                        theme::BG_SELECTED
+                        theme::bg_selected()
                     } else {
                         Color32::TRANSPARENT
                     })
@@ -908,9 +913,9 @@ fn sidebar(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
                         ui.set_width(ui.available_width());
                         ui.horizontal(|ui| {
                             ui.label(
-                                RichText::new(roman(i + 1))
+                                RichText::new(numeral(d.numeral, i + 1))
                                     .color(if sel {
-                                        theme::AMBER
+                                        theme::accent()
                                     } else {
                                         theme::STATUS_TEXT[si]
                                     })
@@ -998,11 +1003,11 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
     let si = d.si(p);
     // Header.
     Frame::NONE
-        .fill(theme::BG_CHROME)
+        .fill(theme::bg_chrome())
         .inner_margin(Margin::symmetric(16, 10))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                sigil_tile(ui, d.active + 1, si);
+                sigil_tile(ui, d.active + 1, si, d.numeral);
                 ui.add_space(10.0);
                 ui.label(
                     RichText::new(clip(&p.name, 40))
@@ -1049,13 +1054,13 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
         // Composer + approvals pinned to the bottom; transcript fills above.
         egui::Panel::bottom("composer")
             .resizable(false)
-            .frame(Frame::NONE.fill(theme::BG_CHROME))
+            .frame(Frame::NONE.fill(theme::bg_chrome()))
             .show(ui, |ui| {
                 approvals(ui, p, actions);
                 composer_bar(ui, p, &mut st.composer, actions);
             });
         egui::CentralPanel::default()
-            .frame(Frame::NONE.fill(theme::BG_WINDOW))
+            .frame(Frame::NONE.fill(theme::bg_window()))
             .show(ui, |ui| transcript_view(ui, p));
     }
 }
@@ -1111,7 +1116,7 @@ fn turn_user(ui: &mut egui::Ui, text: &str, inner: f32) {
     ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
         ui.add_space(inner);
         Frame::NONE
-            .fill(theme::BG_SELECTED)
+            .fill(theme::bg_selected())
             .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
             .corner_radius(CornerRadius::same(12))
             .inner_margin(Margin::symmetric(12, 8))
@@ -1139,14 +1144,14 @@ fn turn_agent(ui: &mut egui::Ui, glyph: &str, col: Color32, text: &str, inner: f
 fn turn_tool(ui: &mut egui::Ui, text: &str, inner: f32) {
     indent(ui, inner, |ui| {
         Frame::NONE
-            .fill(theme::BG_CHROME)
+            .fill(theme::bg_chrome())
             .stroke(Stroke::new(1.0, theme::LINE_BORDER))
             .corner_radius(CornerRadius::same(10))
             .inner_margin(Margin::symmetric(10, 7))
             .show(ui, |ui| {
                 ui.set_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("⏺").color(theme::AMBER).size(12.0));
+                    ui.label(RichText::new("⏺").color(theme::accent()).size(12.0));
                     ui.add_space(6.0);
                     ui.add(
                         Label::new(
@@ -1171,7 +1176,7 @@ fn composer_bar(ui: &mut egui::Ui, p: &CPane, composer: &mut String, actions: &m
             ui.set_width(ui.available_width());
             let mut submit = false;
             Frame::NONE
-                .fill(theme::BG_RAISED)
+                .fill(theme::bg_raised())
                 .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
                 .corner_radius(CornerRadius::same(11))
                 .inner_margin(Margin::symmetric(12, 8))
@@ -1402,13 +1407,17 @@ fn seg(ui: &mut egui::Ui, label: &str, on: bool) -> bool {
     let btn = egui::Button::new(
         RichText::new(label)
             .color(if on {
-                theme::BG_CHROME
+                theme::bg_chrome()
             } else {
                 theme::TEXT_DIM
             })
             .size(12.0),
     )
-    .fill(if on { theme::AMBER } else { theme::BG_RAISED })
+    .fill(if on {
+        theme::accent()
+    } else {
+        theme::bg_raised()
+    })
     .corner_radius(CornerRadius::same(6));
     ui.add(btn).clicked()
 }
@@ -1513,7 +1522,7 @@ fn settings_dialog(
         .order(egui::Order::Foreground)
         .show(ui.ctx(), |ui| {
             Frame::NONE
-                .fill(theme::BG_CARD)
+                .fill(theme::bg_card())
                 .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
                 .corner_radius(CornerRadius::same(14))
                 .inner_margin(Margin::same(20))
@@ -1670,7 +1679,7 @@ fn title_bar(root: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Ve
         .exact_size(52.0)
         .frame(
             Frame::NONE
-                .fill(theme::BG_CHROME)
+                .fill(theme::bg_chrome())
                 .inner_margin(Margin::symmetric(18, 8)),
         )
         .show(root, |ui| {
@@ -1739,7 +1748,7 @@ fn win_btn(ui: &mut egui::Ui, glyph: &str, color: Color32) -> bool {
 /// A bordered chrome button (title-bar controls). Returns true on click.
 fn chrome_btn(ui: &mut egui::Ui, label: &str) -> bool {
     let btn = egui::Button::new(RichText::new(label).color(theme::TEXT_DIM).size(12.5))
-        .fill(theme::BG_CHROME)
+        .fill(theme::bg_chrome())
         .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
         .corner_radius(CornerRadius::same(7));
     let r = ui.add(btn);
@@ -1752,13 +1761,13 @@ fn chrome_btn(ui: &mut egui::Ui, label: &str) -> bool {
 fn mark(ui: &mut egui::Ui) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(22.0, 22.0), Sense::hover());
     ui.painter()
-        .rect_filled(rect, CornerRadius::same(6), theme::AMBER);
+        .rect_filled(rect, CornerRadius::same(6), theme::accent());
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
         "❯",
         egui::FontId::proportional(13.0),
-        theme::BG_CHROME,
+        theme::bg_chrome(),
     );
 }
 
@@ -1811,7 +1820,7 @@ fn observatory(root: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
     egui::CentralPanel::default()
         .frame(
             Frame::NONE
-                .fill(theme::BG_WINDOW)
+                .fill(theme::bg_window())
                 .inner_margin(Margin::same(20)),
         )
         .show(root, |ui| {
@@ -1828,7 +1837,71 @@ fn observatory(root: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
                 });
                 return;
             }
-            card_grid(ui, d, actions);
+            if d.home_view == "list" {
+                card_list(ui, d, actions);
+            } else {
+                card_grid(ui, d, actions);
+            }
+        });
+}
+
+/// Observatory list layout (home_view = "list"): one compact row per pane
+/// (sigil, name, agent, cwd, status pill), click to open.
+fn card_list(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
+    egui::ScrollArea::vertical()
+        .id_salt("home_list")
+        .show(ui, |ui| {
+            for (i, p) in d.panes.iter().enumerate() {
+                let si = d.si(p);
+                let ps = d.ps(p);
+                let fr = Frame::NONE
+                    .fill(theme::bg_card())
+                    .stroke(Stroke::new(1.0, theme::LINE_BORDER))
+                    .corner_radius(CornerRadius::same(9))
+                    .inner_margin(Margin::symmetric(12, 9))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            sigil_tile(ui, i + 1, si, d.numeral);
+                            ui.add_space(10.0);
+                            ui.label(
+                                RichText::new(clip(&p.name, 32))
+                                    .color(theme::TEXT_PRIMARY)
+                                    .size(14.0)
+                                    .strong(),
+                            );
+                            if let Some(agent) = ps.and_then(|s| s.agent.as_deref()) {
+                                agent_chip(ui, agent, ps.and_then(|s| s.version.as_deref()));
+                            }
+                            if let Some(cwd) = ps.and_then(|s| s.cwd.as_deref()) {
+                                ui.label(
+                                    RichText::new(clip(cwd, 40))
+                                        .color(theme::TEXT_FAINT)
+                                        .size(11.5)
+                                        .monospace(),
+                                );
+                            }
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                status_pill(ui, si, theme::STATUS_WORD[si]);
+                            });
+                        });
+                    });
+                let r = fr.response.rect;
+                ui.painter().rect_filled(
+                    Rect::from_min_size(r.min, egui::vec2(2.0, r.height())),
+                    CornerRadius::same(2),
+                    theme::STATUS_RAIL[si],
+                );
+                if fr
+                    .response
+                    .interact(Sense::click())
+                    .on_hover_cursor(egui::CursorIcon::PointingHand)
+                    .clicked()
+                {
+                    actions.push(UiAction::Open(i));
+                }
+                ui.add_space(6.0);
+            }
         });
 }
 
@@ -1892,11 +1965,11 @@ fn status_pill(ui: &mut egui::Ui, idx: usize, text: &str) {
 fn amber_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let btn = egui::Button::new(
         RichText::new(text)
-            .color(theme::BG_CHROME)
+            .color(theme::bg_chrome())
             .size(13.0)
             .strong(),
     )
-    .fill(theme::AMBER)
+    .fill(theme::accent())
     .corner_radius(CornerRadius::same(8));
     ui.add(btn)
 }
@@ -1935,13 +2008,13 @@ fn pane_card(ui: &mut egui::Ui, d: &UiData, i: usize, p: &CPane, actions: &mut V
     let sel = i == d.active;
     let idle = si == 4;
     let fill = if sel {
-        theme::BG_SELECTED
+        theme::bg_selected()
     } else if si == 0 {
-        theme::BG_CARD_ALERT
+        theme::bg_card_alert()
     } else if idle {
-        theme::BG_CARD_IDLE
+        theme::bg_card_idle()
     } else {
-        theme::BG_CARD
+        theme::bg_card()
     };
     let border = if si == 0 {
         fade(theme::STATUS_RAIL[0], 0.25)
@@ -1957,7 +2030,7 @@ fn pane_card(ui: &mut egui::Ui, d: &UiData, i: usize, p: &CPane, actions: &mut V
             ui.set_width(ui.available_width());
             // Header row.
             ui.horizontal(|ui| {
-                sigil_tile(ui, i + 1, si);
+                sigil_tile(ui, i + 1, si, d.numeral);
                 ui.add_space(10.0);
                 ui.vertical(|ui| {
                     ui.horizontal(|ui| {
@@ -2099,7 +2172,7 @@ fn tail_well(ui: &mut egui::Ui, tail_rev: &[&String], si: usize, border: Color32
 }
 
 /// The 30px rounded sigil tile with the roman numeral, tinted by status.
-fn sigil_tile(ui: &mut egui::Ui, n1: usize, si: usize) {
+fn sigil_tile(ui: &mut egui::Ui, n1: usize, si: usize, style: &str) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(30.0, 30.0), Sense::hover());
     ui.painter().rect(
         rect,
@@ -2111,12 +2184,12 @@ fn sigil_tile(ui: &mut egui::Ui, n1: usize, si: usize) {
     let col = if si == 4 {
         theme::TEXT_FAINT
     } else {
-        theme::AMBER
+        theme::accent()
     };
     ui.painter().text(
         rect.center(),
         egui::Align2::CENTER_CENTER,
-        roman(n1),
+        numeral(style, n1),
         egui::FontId::proportional(13.0),
         col,
     );
@@ -2163,7 +2236,7 @@ fn rate_vals(p: &CPane) -> Vec<u32> {
 /// Blend a status color toward the ground at the given alpha, so pills read
 /// as a tint rather than a solid fill (the handoff's `#f8717118` style).
 fn fade(c: Color32, a: f32) -> Color32 {
-    let bg = theme::BG_WINDOW;
+    let bg = theme::bg_window();
     let mix = |x: u8, y: u8| ((y as f32) + ((x as f32) - (y as f32)) * a).round() as u8;
     Color32::from_rgb(mix(c.r(), bg.r()), mix(c.g(), bg.g()), mix(c.b(), bg.b()))
 }

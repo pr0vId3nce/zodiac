@@ -961,6 +961,19 @@ impl GuiApp {
         }
         let raw = self.egui_state.as_mut().unwrap().take_egui_input(&win);
         let mut actions: Vec<crate::ui::UiAction> = Vec::new();
+        // Owned copies so `data` doesn't hold a borrow on `self.settings`
+        // while `build` also takes `&mut self.settings`.
+        let numeral = if self.settings.card_numeral.is_empty() {
+            "roman".to_string()
+        } else {
+            self.settings.card_numeral.clone()
+        };
+        let home_view = if self.settings.home_view.is_empty() {
+            "cards".to_string()
+        } else {
+            self.settings.home_view.clone()
+        };
+        let motion = self.settings.gui_motion != "off";
         let full = self.egui_ctx.run_ui(raw, |ui| {
             let active_id = self.panes.get(self.active).map(|p| p.id);
             let data = crate::ui::UiData {
@@ -975,7 +988,9 @@ impl GuiApp {
                     .as_ref()
                     .map(|s| s.pairing_token.as_str())
                     .unwrap_or(""),
-                motion: self.settings.gui_motion != "off",
+                motion,
+                numeral: numeral.as_str(),
+                home_view: home_view.as_str(),
             };
             crate::ui::build(
                 ui,
@@ -1022,8 +1037,20 @@ impl GuiApp {
                     self.screen = crate::ui::Screen::Focused;
                 }
                 crate::ui::UiAction::Back => self.screen = crate::ui::Screen::Observatory,
-                crate::ui::UiAction::SaveSettings => self.settings.save(),
+                crate::ui::UiAction::SaveSettings => {
+                    self.settings.save();
+                    // Apply theme live so the Theme row takes effect at once.
+                    crate::theme::apply(&self.egui_ctx, &self.settings.theme);
+                }
                 crate::ui::UiAction::Raise => self.send(T_RESTORE, 0, &[]),
+                crate::ui::UiAction::CopyText(s) => {
+                    if self.clipboard.is_none() {
+                        self.clipboard = arboard::Clipboard::new().ok();
+                    }
+                    if let Some(cb) = self.clipboard.as_mut() {
+                        let _ = cb.set_text(s);
+                    }
+                }
                 crate::ui::UiAction::DragWindow => {
                     if let Some(r) = &self.renderer {
                         let _ = r.window.drag_window();
@@ -1133,7 +1160,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 // Bring up the egui layer (ADR 0006): theme + winit input
                 // bridge, bound to the just-created window.
                 let win = self.renderer.as_ref().unwrap().window.clone();
-                crate::theme::apply(&self.egui_ctx);
+                crate::theme::apply(&self.egui_ctx, &self.settings.theme);
                 if let Some(ttf) = crate::font::egui_ui_font() {
                     crate::theme::set_fonts(&self.egui_ctx, ttf);
                 }

@@ -28,6 +28,8 @@ pub enum Overlay {
     None,
     /// Command palette (⌘K): fuzzy pane/action jump.
     Palette,
+    /// Settings dialog (⌘,): grouped config editor.
+    Settings,
 }
 
 /// Mutable UI state egui edits in place across frames (buffers + overlays).
@@ -57,6 +59,8 @@ pub enum UiAction {
     SendAgent(u64),
     /// Answer the pane's first pending permission request (true = allow).
     Perm(u64, bool),
+    /// A settings control changed — persist config.json.
+    SaveSettings,
     /// Spawn a new shell pane.
     NewShell,
     /// Spawn a new claude agent pane.
@@ -135,20 +139,31 @@ fn clip(s: &str, max: usize) -> String {
 
 /// Build the frame's UI, pushing any resulting actions. egui 0.36 hands the
 /// integration a root `&mut Ui`; panels are shown into it.
-pub fn build(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<UiAction>) {
-    // Chrome shortcut: ⌘K / Ctrl+K opens the command palette.
+pub fn build(
+    ui: &mut egui::Ui,
+    d: &UiData,
+    st: &mut UiState,
+    settings: &mut zodiac::settings::Settings,
+    actions: &mut Vec<UiAction>,
+) {
+    // Chrome shortcuts: ⌘K palette, ⌘, settings.
     if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::K)) {
         st.overlay = Overlay::Palette;
         st.palette_query.clear();
         st.palette_sel = 0;
     }
-    title_bar(ui, d);
+    if ui.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Comma)) {
+        st.overlay = Overlay::Settings;
+    }
+    title_bar(ui, d, st);
     match d.screen {
         Screen::Observatory => observatory(ui, d, actions),
         Screen::Focused => focused(ui, d, &mut st.composer, actions),
     }
-    if st.overlay == Overlay::Palette {
-        palette(ui, d, st, actions);
+    match st.overlay {
+        Overlay::Palette => palette(ui, d, st, actions),
+        Overlay::Settings => settings_dialog(ui, st, settings, actions),
+        Overlay::None => {}
     }
 }
 
@@ -875,8 +890,179 @@ fn activity_rail(ui: &mut egui::Ui, d: &UiData) {
     }
 }
 
-/// The 52px title bar: amber mark, "zodiac", session chip, host vitals.
-fn title_bar(root: &mut egui::Ui, d: &UiData) {
+/// Settings dialog (⌘,): grouped editor over the real `config.json` keys.
+/// Every control persists (SaveSettings) so the server/TUI pick it up; the
+/// keys are unchanged, per the handoff. (Full 33-row parity + live GUI theme
+/// re-application are follow-ons.)
+fn settings_dialog(
+    ui: &mut egui::Ui,
+    st: &mut UiState,
+    s: &mut zodiac::settings::Settings,
+    actions: &mut Vec<UiAction>,
+) {
+    if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        st.overlay = Overlay::None;
+    }
+    let screen = ui
+        .ctx()
+        .input(|i| i.raw.screen_rect)
+        .unwrap_or_else(|| ui.max_rect());
+    ui.painter().rect_filled(
+        screen,
+        CornerRadius::ZERO,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 140),
+    );
+    let mut close = false;
+    egui::Area::new(egui::Id::new("settings"))
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            Frame::NONE
+                .fill(theme::BG_CARD)
+                .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
+                .corner_radius(CornerRadius::same(14))
+                .inner_margin(Margin::same(20))
+                .show(ui, |ui| {
+                    ui.set_width(560.0);
+                    ui.label(
+                        RichText::new("Settings")
+                            .color(theme::TEXT_PRIMARY)
+                            .size(19.0)
+                            .strong(),
+                    );
+                    ui.add_space(12.0);
+                    group_label(ui, "APPEARANCE");
+                    choice_row(
+                        ui,
+                        "Theme",
+                        &mut s.theme,
+                        "night",
+                        &[
+                            ("night", "slate·brass"),
+                            ("oled-orange", "oled·orange"),
+                            ("oled-green", "oled·green"),
+                        ],
+                        actions,
+                    );
+                    choice_row(
+                        ui,
+                        "Card numerals",
+                        &mut s.card_numeral,
+                        "zodiac",
+                        &[
+                            ("zodiac", "zodiac"),
+                            ("roman", "roman"),
+                            ("arabic", "arabic"),
+                        ],
+                        actions,
+                    );
+                    choice_row(
+                        ui,
+                        "Home view",
+                        &mut s.home_view,
+                        "cards",
+                        &[("cards", "cards"), ("list", "list")],
+                        actions,
+                    );
+                    ui.add_space(14.0);
+                    group_label(ui, "BEHAVIOR");
+                    toggle_row(ui, "Connection watchdog", &mut s.connection_watch, actions);
+                    toggle_row(
+                        ui,
+                        "Kitty keyboard protocol",
+                        &mut s.kitty_keyboard,
+                        actions,
+                    );
+                    choice_row(
+                        ui,
+                        "Capability floor",
+                        &mut s.capability_floor,
+                        "images",
+                        &[
+                            ("off", "off"),
+                            ("images", "images"),
+                            ("animation", "animation"),
+                        ],
+                        actions,
+                    );
+                    ui.add_space(16.0);
+                    ui.horizontal(|ui| {
+                        ui.label(
+                            RichText::new("~/.config/zodiac/config.json")
+                                .color(theme::TEXT_GHOST)
+                                .size(11.5)
+                                .monospace(),
+                        );
+                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                            if amber_button(ui, "Done").clicked() {
+                                close = true;
+                            }
+                        });
+                    });
+                });
+        });
+    if close {
+        st.overlay = Overlay::None;
+    }
+}
+
+/// An uppercase group heading in a settings dialog.
+fn group_label(ui: &mut egui::Ui, text: &str) {
+    ui.label(
+        RichText::new(text)
+            .color(theme::TEXT_GHOST)
+            .size(11.0)
+            .strong(),
+    );
+    ui.add_space(6.0);
+}
+
+/// A labelled segmented choice bound to a String config key (empty = default).
+fn choice_row(
+    ui: &mut egui::Ui,
+    label: &str,
+    field: &mut String,
+    default: &str,
+    opts: &[(&str, &str)],
+    actions: &mut Vec<UiAction>,
+) {
+    let cur = if field.is_empty() {
+        default
+    } else {
+        field.as_str()
+    };
+    let cur = cur.to_string();
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).color(theme::TEXT_BODY).size(13.5));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            for (val, disp) in opts.iter().rev() {
+                if seg(ui, disp, cur == *val) && cur != *val {
+                    *field = (*val).to_string();
+                    actions.push(UiAction::SaveSettings);
+                }
+                ui.add_space(4.0);
+            }
+        });
+    });
+    ui.add_space(8.0);
+}
+
+/// A labelled boolean toggle bound to a bool config key.
+fn toggle_row(ui: &mut egui::Ui, label: &str, field: &mut bool, actions: &mut Vec<UiAction>) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).color(theme::TEXT_BODY).size(13.5));
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if ui.checkbox(field, "").changed() {
+                actions.push(UiAction::SaveSettings);
+            }
+        });
+    });
+    ui.add_space(8.0);
+}
+
+/// The 52px title bar: amber mark, "zodiac", session chip, chrome buttons,
+/// host vitals.
+fn title_bar(root: &mut egui::Ui, d: &UiData, st: &mut UiState) {
     egui::Panel::top("titlebar")
         .exact_size(52.0)
         .frame(
@@ -897,12 +1083,32 @@ fn title_bar(root: &mut egui::Ui, d: &UiData) {
                 ui.add_space(12.0);
                 session_chip(ui, d.session);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if chrome_btn(ui, "settings") {
+                        st.overlay = Overlay::Settings;
+                    }
+                    if chrome_btn(ui, "⌘K find pane") {
+                        st.overlay = Overlay::Palette;
+                        st.palette_query.clear();
+                        st.palette_sel = 0;
+                    }
+                    ui.add_space(8.0);
                     if let Some(h) = d.state.and_then(|s| s.host.as_ref()) {
                         vitals(ui, h);
                     }
                 });
             });
         });
+}
+
+/// A bordered chrome button (title-bar controls). Returns true on click.
+fn chrome_btn(ui: &mut egui::Ui, label: &str) -> bool {
+    let btn = egui::Button::new(RichText::new(label).color(theme::TEXT_DIM).size(12.5))
+        .fill(theme::BG_CHROME)
+        .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
+        .corner_radius(CornerRadius::same(7));
+    let r = ui.add(btn);
+    ui.add_space(8.0);
+    r.clicked()
 }
 
 /// The 22px amber-gradient mark with a `❯` — a flat amber tile for now (the

@@ -918,7 +918,13 @@ impl GuiApp {
                 screen: self.screen,
                 term_active: active_id.is_some_and(|id| self.term_mode.contains(&id)),
             };
-            crate::ui::build(ui, &data, &mut self.ui_state, &mut actions);
+            crate::ui::build(
+                ui,
+                &data,
+                &mut self.ui_state,
+                &mut self.settings,
+                &mut actions,
+            );
         });
         self.egui_state
             .as_mut()
@@ -957,6 +963,7 @@ impl GuiApp {
                     self.screen = crate::ui::Screen::Focused;
                 }
                 crate::ui::UiAction::Back => self.screen = crate::ui::Screen::Observatory,
+                crate::ui::UiAction::SaveSettings => self.settings.save(),
                 crate::ui::UiAction::ToggleTerm(id) => {
                     if !self.term_mode.remove(&id) {
                         self.term_mode.insert(id);

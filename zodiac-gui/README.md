@@ -22,16 +22,22 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
   live `T_STATE`: sigil tile, agent+version chip, cwd, one-line subtitle,
   transcript-tail well, status pill, left status rail. Click a card to open it.
 - **Focused pane** — sidebar (pane list, click to switch) · main · activity
-  rail. The header carries a **transcript | terminal** toggle (per-pane,
-  remembered; shells are always terminal). Transcript renders agent turns
-  natively with the Claude-Code feel: user bubbles, `⏺` assistant recaps with
+  rail. The view follows the pane **kind** (shown as a chip in the header):
+  agent panes are headless structured NDJSON — no pty — so they render the
+  **transcript**; pty panes (shells, or a TUI you launched) render the live
+  **terminal** grid. There is no toggle: each kind has exactly one real view,
+  so neither can land on an empty black screen. The transcript renders agent
+  turns with the Claude-Code feel: user bubbles, `⏺` assistant recaps with
+  **Markdown** (headings, lists, quotes, **bold**/*italic*/`code`, links) and
   fenced **code in its own boxes**, **expandable tool boxes** (full command +
   collapsed output, red on error), **collapsible thinking** panels plus the live
   orange "Cogitating…" sayings and spinner, and the streaming tail. The composer
   sends to the agent (Enter / **Send** → `T_AGENT_INPUT`). A pending permission
   raises a **modal question popup** navigable by mouse, number keys, ↑/↓ (or
-  j/k), and Enter (Esc denies) → `T_PERM_RESP`. Terminal mode paints the live
-  vt100 grid. **Esc** returns.
+  j/k), and Enter (Esc denies) → `T_PERM_RESP`. When the agent is running a plan
+  (`TodoWrite`), the activity rail shows a **PLAN** panel with a progress bar and
+  the checklist (done struck-through, the in-progress step highlighted). **Esc**
+  returns.
 - **⌘K / Ctrl+K** — command palette (fuzzy pane jump; ↑/↓, Enter, Esc).
 - **⌘, / Ctrl+,** — settings (grouped; edits real `config.json` keys, persists).
 - **Alt+O** — the Oracle panel (gradient orb; presentational for now).

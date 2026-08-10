@@ -205,7 +205,14 @@ impl GuiApp {
                  "content": "exit code 1", "is_error": true},
             ]}}),
             serde_json::json!({"type": "assistant", "message": {"content": [
-                {"type": "text", "text": "Here's the fix:\n```rust\nfn main() {}\n```\nDone."},
+                {"type": "tool_use", "id": "t3", "name": "TodoWrite", "input": {"todos": [
+                    {"content": "Read the failing test", "status": "completed"},
+                    {"content": "Patch the parser", "status": "in_progress"},
+                    {"content": "Re-run the suite", "status": "pending"},
+                ]}},
+            ]}}),
+            serde_json::json!({"type": "assistant", "message": {"content": [
+                {"type": "text", "text": "## Summary\n\nHere's the **fix** with a `helper`:\n\n```rust\nfn main() {}\n```\n\n- one item\n- two *emphasized* item\n\nDone."},
             ]}}),
         ];
         for l in &lines {
@@ -223,7 +230,11 @@ impl GuiApp {
 
     fn send(&mut self, typ: u8, id: u64, data: &[u8]) {
         if write_frame(&mut self.sock, typ, id, data).is_err() {
-            self.exit_msg = Some("zodiac-gui: lost connection to server".into());
+            // Don't clobber a message already set (e.g. the self-test's
+            // "ok" summary just before its final T_DETACH).
+            if self.exit_msg.is_none() {
+                self.exit_msg = Some("zodiac-gui: lost connection to server".into());
+            }
             self.want_quit = true;
         }
     }

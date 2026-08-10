@@ -1035,15 +1035,22 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
                 }
                 status_pill(ui, si, theme::STATUS_WORD[si]);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    // transcript | terminal segmented toggle.
-                    let is_agent = p.is_agent();
-                    let term = d.term_active || !is_agent;
-                    if seg(ui, "terminal", term) && !term && is_agent {
-                        actions.push(UiAction::ToggleTerm(p.id));
-                    }
-                    if seg(ui, "transcript", !term) && term && is_agent {
-                        actions.push(UiAction::ToggleTerm(p.id));
-                    }
+                    // The view follows the pane kind — agent panes are headless
+                    // (structured NDJSON, no pty) so they only have a transcript;
+                    // pty panes only have a terminal. (A toggle used to live here
+                    // and let you pick the empty view, which rendered black.)
+                    let (label, col) = if p.is_agent() {
+                        ("structured", theme::VIOLET_TEXT)
+                    } else {
+                        ("terminal", theme::TEXT_DIM)
+                    };
+                    Frame::NONE
+                        .fill(theme::bg_raised())
+                        .corner_radius(CornerRadius::same(6))
+                        .inner_margin(Margin::symmetric(8, 3))
+                        .show(ui, |ui| {
+                            ui.label(RichText::new(label).color(col).size(11.0));
+                        });
                 });
             });
         });
@@ -1061,8 +1068,8 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
             st.term_grid = Some((rows, cols, cw.round() as u16, ch.round() as u16));
         }
     }
-    // Body.
-    let show_term = d.term_active || !p.is_agent();
+    // Body: the view is determined by the pane kind (see the header note).
+    let show_term = !p.is_agent();
     if show_term {
         terminal_view(ui, st, p);
     } else {
@@ -1234,35 +1241,271 @@ fn turn_assistant(ui: &mut egui::Ui, text: &str, inner: f32) {
     });
 }
 
-/// Render prose, breaking ``` fenced blocks out into monospace code boxes.
+/// Render assistant prose as Markdown: headings, bullet/ordered lists, block
+/// quotes, rules, and inline **bold** / *italic* / `code` / [links]; ```
+/// fenced blocks break out into their own monospace box.
 fn render_body(ui: &mut egui::Ui, text: &str) {
-    fn flush(ui: &mut egui::Ui, lines: &[&str], code: bool) {
-        let joined = lines.join("\n");
-        if joined.trim().is_empty() {
-            return;
-        }
-        if code {
-            code_box(ui, joined.trim_matches('\n'));
-        } else {
-            ui.label(
-                RichText::new(joined.trim_matches('\n'))
-                    .color(theme::TEXT_BODY)
-                    .size(14.5),
-            );
-        }
-    }
     let mut in_code = false;
     let mut buf: Vec<&str> = Vec::new();
     for line in text.split('\n') {
         if line.trim_start().starts_with("```") {
-            flush(ui, &buf, in_code);
-            buf.clear();
-            in_code = !in_code;
+            if in_code {
+                code_box(ui, &buf.join("\n"));
+                buf.clear();
+                in_code = false;
+            } else {
+                in_code = true;
+                buf.clear();
+            }
             continue;
         }
-        buf.push(line);
+        if in_code {
+            buf.push(line);
+            continue;
+        }
+        md_block(ui, line);
     }
-    flush(ui, &buf, in_code);
+    if in_code && !buf.is_empty() {
+        code_box(ui, &buf.join("\n"));
+    }
+}
+
+/// One Markdown block line (heading, list item, quote, rule, or paragraph).
+fn md_block(ui: &mut egui::Ui, line: &str) {
+    let t = line.trim_start();
+    if t.is_empty() {
+        ui.add_space(4.0);
+        return;
+    }
+    if t == "---" || t == "***" || t == "___" {
+        ui.add_space(2.0);
+        ui.separator();
+        return;
+    }
+    if let Some(h) = t.strip_prefix("### ") {
+        md_heading(ui, h, 14.5);
+        return;
+    }
+    if let Some(h) = t.strip_prefix("## ") {
+        md_heading(ui, h, 16.5);
+        return;
+    }
+    if let Some(h) = t.strip_prefix("# ") {
+        md_heading(ui, h, 19.0);
+        return;
+    }
+    if let Some(q) = t.strip_prefix("> ") {
+        ui.horizontal_top(|ui| {
+            let (r, _) = ui.allocate_exact_size(egui::vec2(3.0, 18.0), Sense::hover());
+            ui.painter()
+                .rect_filled(r, CornerRadius::same(1), theme::LINE_BORDER_STRONG);
+            ui.add_space(8.0);
+            ui.vertical(|ui| {
+                ui.set_max_width(ui.available_width());
+                md_line(ui, q, 14.5, theme::TEXT_DIM);
+            });
+        });
+        return;
+    }
+    for pre in ["- ", "* ", "+ "] {
+        if let Some(item) = t.strip_prefix(pre) {
+            md_bullet_row(ui, "•".to_string(), item);
+            return;
+        }
+    }
+    if let Some((num, rest)) = md_split_ordered(t) {
+        md_bullet_row(ui, format!("{num}."), rest);
+        return;
+    }
+    md_line(ui, t.trim_end(), 14.5, theme::TEXT_BODY);
+}
+
+fn md_heading(ui: &mut egui::Ui, text: &str, size: f32) {
+    ui.add_space(3.0);
+    ui.label(
+        RichText::new(text)
+            .color(theme::TEXT_PRIMARY)
+            .size(size)
+            .strong(),
+    );
+    ui.add_space(1.0);
+}
+
+/// A list row: an accent marker + the item's inline-formatted text.
+fn md_bullet_row(ui: &mut egui::Ui, marker: String, item: &str) {
+    ui.horizontal_top(|ui| {
+        ui.add_space(6.0);
+        ui.label(
+            RichText::new(marker)
+                .color(theme::accent())
+                .size(14.0)
+                .monospace(),
+        );
+        ui.add_space(6.0);
+        ui.vertical(|ui| {
+            ui.set_max_width(ui.available_width());
+            md_line(ui, item, 14.5, theme::TEXT_BODY);
+        });
+    });
+}
+
+/// `N. rest` → (N, rest) for an ordered-list item.
+fn md_split_ordered(t: &str) -> Option<(String, &str)> {
+    let digits: String = t.chars().take_while(|c| c.is_ascii_digit()).collect();
+    if digits.is_empty() {
+        return None;
+    }
+    let rest = t[digits.len()..].strip_prefix(". ")?;
+    Some((digits, rest))
+}
+
+/// A run of inline Markdown as a single wrapped, mixed-format label.
+fn md_line(ui: &mut egui::Ui, line: &str, size: f32, base: Color32) {
+    let spans = parse_inline(line);
+    if spans.is_empty() {
+        return;
+    }
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = ui.available_width();
+    for sp in &spans {
+        let color = if sp.code {
+            theme::AMBER
+        } else if sp.link {
+            theme::accent()
+        } else if sp.bold {
+            theme::TEXT_PRIMARY
+        } else {
+            base
+        };
+        let font = if sp.code {
+            egui::FontId::monospace(size - 1.0)
+        } else {
+            egui::FontId::proportional(size)
+        };
+        let mut fmt = egui::TextFormat {
+            font_id: font,
+            color,
+            italics: sp.italic,
+            ..Default::default()
+        };
+        if sp.code {
+            fmt.background = theme::bg_raised();
+        }
+        if sp.link {
+            fmt.underline = Stroke::new(1.0, theme::accent());
+        }
+        job.append(&sp.text, 0.0, fmt);
+    }
+    ui.label(job);
+}
+
+/// One inline-formatted run of Markdown text.
+struct MdSpan {
+    text: String,
+    bold: bool,
+    italic: bool,
+    code: bool,
+    link: bool,
+}
+
+/// Split a line into inline runs: `` `code` ``, **bold**, *italic*/_italic_,
+/// and `[text](url)` links (the URL is dropped; the text is styled).
+fn parse_inline(s: &str) -> Vec<MdSpan> {
+    fn flush(cur: &mut String, spans: &mut Vec<MdSpan>, bold: bool, italic: bool) {
+        if !cur.is_empty() {
+            spans.push(MdSpan {
+                text: std::mem::take(cur),
+                bold,
+                italic,
+                code: false,
+                link: false,
+            });
+        }
+    }
+    let chars: Vec<char> = s.chars().collect();
+    let mut spans = Vec::new();
+    let mut cur = String::new();
+    let mut bold = false;
+    let mut italic = false;
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if c == '`' {
+            flush(&mut cur, &mut spans, bold, italic);
+            let mut j = i + 1;
+            let mut code = String::new();
+            while j < chars.len() && chars[j] != '`' {
+                code.push(chars[j]);
+                j += 1;
+            }
+            if j < chars.len() {
+                spans.push(MdSpan {
+                    text: code,
+                    bold,
+                    italic,
+                    code: true,
+                    link: false,
+                });
+                i = j + 1;
+                continue;
+            }
+            cur.push('`');
+            i += 1;
+            continue;
+        }
+        if c == '[' {
+            if let Some((text, adv)) = parse_link(&chars, i) {
+                flush(&mut cur, &mut spans, bold, italic);
+                spans.push(MdSpan {
+                    text,
+                    bold,
+                    italic,
+                    code: false,
+                    link: true,
+                });
+                i += adv;
+                continue;
+            }
+        }
+        if c == '*' && i + 1 < chars.len() && chars[i + 1] == '*' {
+            flush(&mut cur, &mut spans, bold, italic);
+            bold = !bold;
+            i += 2;
+            continue;
+        }
+        if c == '*' || c == '_' {
+            // Leave `_` inside a word alone (snake_case, file_names).
+            let word_inner = c == '_'
+                && i > 0
+                && chars[i - 1].is_alphanumeric()
+                && i + 1 < chars.len()
+                && chars[i + 1].is_alphanumeric();
+            if word_inner {
+                cur.push(c);
+                i += 1;
+                continue;
+            }
+            flush(&mut cur, &mut spans, bold, italic);
+            italic = !italic;
+            i += 1;
+            continue;
+        }
+        cur.push(c);
+        i += 1;
+    }
+    flush(&mut cur, &mut spans, bold, italic);
+    spans
+}
+
+/// Parse `[text](url)` at `open` ('['); returns (text, chars_consumed).
+fn parse_link(chars: &[char], open: usize) -> Option<(String, usize)> {
+    let close = chars[open + 1..].iter().position(|&c| c == ']')? + open + 1;
+    if chars.get(close + 1) != Some(&'(') {
+        return None;
+    }
+    let end = chars[close + 2..].iter().position(|&c| c == ')')? + close + 2;
+    let text: String = chars[open + 1..close].iter().collect();
+    Some((text, end - open + 1))
 }
 
 /// A monospace code box: bordered, horizontally scrollable so long lines
@@ -1879,6 +2122,104 @@ fn activity_rail(ui: &mut egui::Ui, d: &UiData) {
                 "off".into()
             },
         );
+    }
+    // The agent's live plan (from TodoWrite), pinned to the bottom of the rail
+    // — the empty space below the session facts.
+    if p.is_agent() && !p.agent.todos.is_empty() {
+        ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), 0.0),
+                Layout::top_down(Align::Min),
+                |ui| todo_panel(ui, &p.agent.todos),
+            );
+        });
+    }
+}
+
+/// The PLAN block: a header with a done/total count, a progress bar, and the
+/// todo list (finished struck-through, the in-progress one highlighted).
+fn todo_panel(ui: &mut egui::Ui, todos: &[zodiac::client_core::TodoItem]) {
+    let done = todos.iter().filter(|t| t.done()).count();
+    let total = todos.len();
+    ui.separator();
+    ui.add_space(8.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("PLAN")
+                .color(theme::TEXT_GHOST)
+                .size(11.0)
+                .strong(),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(
+                RichText::new(format!("{done}/{total}"))
+                    .color(if done == total {
+                        theme::STATUS_TEXT[3]
+                    } else {
+                        theme::TEXT_DIM
+                    })
+                    .size(11.0)
+                    .monospace(),
+            );
+        });
+    });
+    ui.add_space(7.0);
+    let frac = if total > 0 {
+        done as f32 / total as f32
+    } else {
+        0.0
+    };
+    progress_bar(ui, frac);
+    ui.add_space(10.0);
+    egui::ScrollArea::vertical()
+        .id_salt("plan_scroll")
+        .max_height(300.0)
+        .auto_shrink([false, true])
+        .show(ui, |ui| {
+            for t in todos {
+                todo_row(ui, t);
+            }
+        });
+}
+
+/// One plan row: a status glyph + the item text.
+fn todo_row(ui: &mut egui::Ui, t: &zodiac::client_core::TodoItem) {
+    let (glyph, gcol, tcol) = if t.done() {
+        ("✓", theme::STATUS_RAIL[3], theme::TEXT_FAINT)
+    } else if t.active() {
+        ("▸", theme::accent(), theme::TEXT_PRIMARY)
+    } else {
+        ("○", theme::TEXT_GHOST, theme::TEXT_DIM)
+    };
+    ui.horizontal_top(|ui| {
+        ui.label(RichText::new(glyph).color(gcol).size(12.0).monospace());
+        ui.add_space(7.0);
+        ui.vertical(|ui| {
+            ui.set_max_width(ui.available_width());
+            let mut rt = RichText::new(t.content.as_str()).color(tcol).size(12.5);
+            if t.done() {
+                rt = rt.strikethrough();
+            }
+            if t.active() {
+                rt = rt.strong();
+            }
+            ui.label(rt);
+        });
+    });
+    ui.add_space(6.0);
+}
+
+/// A thin accent progress bar filled to `frac` (0..1).
+fn progress_bar(ui: &mut egui::Ui, frac: f32) {
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 6.0), Sense::hover());
+    let paint = ui.painter();
+    paint.rect_filled(rect, CornerRadius::same(3), theme::bg_raised());
+    if frac > 0.0 {
+        let fill = Rect::from_min_size(
+            rect.min,
+            egui::vec2(rect.width() * frac.clamp(0.0, 1.0), rect.height()),
+        );
+        paint.rect_filled(fill, CornerRadius::same(3), theme::accent());
     }
 }
 

@@ -69,6 +69,49 @@ pub enum ChatItem {
     Error(String),
 }
 
+/// One entry in the agent's current plan, parsed from the latest `TodoWrite`
+/// tool call. `status` is Claude Code's "pending" | "in_progress" |
+/// "completed".
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct TodoItem {
+    pub content: String,
+    pub status: String,
+}
+
+impl TodoItem {
+    pub fn done(&self) -> bool {
+        self.status == "completed"
+    }
+    pub fn active(&self) -> bool {
+        self.status == "in_progress"
+    }
+}
+
+/// Parse the `todos` array of a `TodoWrite` tool input into a plan list.
+fn parse_todos(input: &serde_json::Value) -> Vec<TodoItem> {
+    input
+        .get("todos")
+        .and_then(|t| t.as_array())
+        .map(|arr| {
+            arr.iter()
+                .map(|t| TodoItem {
+                    content: t
+                        .get("content")
+                        .and_then(|c| c.as_str())
+                        .or_else(|| t.get("activeForm").and_then(|c| c.as_str()))
+                        .unwrap_or("")
+                        .to_string(),
+                    status: t
+                        .get("status")
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("pending")
+                        .to_string(),
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 /// Client-side view state for one agent pane: the parsed transcript, the
 /// streaming tail, pending permission requests, and the prompt editor.
 #[derive(Default)]
@@ -77,6 +120,8 @@ pub struct AgentUi {
     /// The GUI transcript: typed items that keep tool commands+results and
     /// thinking prose (see [`ChatItem`]). Folded alongside `log`.
     pub items: Vec<ChatItem>,
+    /// The agent's current plan, replaced on each `TodoWrite` tool call.
+    pub todos: Vec<TodoItem>,
     /// Assistant text still streaming in (shown at the transcript tail
     /// until the completed block replaces it).
     pub stream: String,
@@ -137,6 +182,11 @@ impl AgentUi {
                             let name = s(b, "name").unwrap_or_else(|| "tool".into());
                             let input = b.get("input").cloned().unwrap_or(serde_json::Value::Null);
                             let arg = tool_compact(&input);
+                            // A TodoWrite call is also the agent's live plan —
+                            // surface it for the activity rail's progress list.
+                            if name == "TodoWrite" {
+                                self.todos = parse_todos(&input);
+                            }
                             self.log.push((ARole::Tool, format!("{name}({arg})")));
                             self.items.push(ChatItem::Tool(ToolCall {
                                 id: s(b, "id").unwrap_or_default(),
@@ -893,6 +943,25 @@ mod apply_line_tests {
         );
         // The user prompt is NOT echoed from the native tool-result message.
         assert!(!ui.log.iter().any(|(r, _)| *r == ARole::User));
+    }
+
+    #[test]
+    fn todowrite_updates_the_plan() {
+        let ui = fold(&[json!({
+            "type": "assistant",
+            "message": {"content": [
+                {"type": "tool_use", "id": "td", "name": "TodoWrite", "input": {"todos": [
+                    {"content": "step one", "status": "completed"},
+                    {"content": "step two", "status": "in_progress"},
+                    {"content": "step three", "status": "pending"},
+                ]}},
+            ]}
+        })]);
+        assert_eq!(ui.todos.len(), 3);
+        assert!(ui.todos[0].done());
+        assert!(ui.todos[1].active());
+        assert_eq!(ui.todos[2].content, "step three");
+        assert!(!ui.todos[2].done() && !ui.todos[2].active());
     }
 
     #[test]

@@ -202,6 +202,17 @@ pub fn build(
         Overlay::Raise => raise_dialog(ui, d, st, actions),
         Overlay::None => {}
     }
+    // A 1px edge border to define the borderless window (decorations are off).
+    let sr = ui
+        .ctx()
+        .input(|i| i.raw.screen_rect)
+        .unwrap_or_else(|| ui.max_rect());
+    ui.painter().rect_stroke(
+        sr.shrink(0.5),
+        CornerRadius::ZERO,
+        Stroke::new(1.0, theme::LINE_BORDER_STRONG),
+        egui::StrokeKind::Inside,
+    );
 }
 
 /// Raise-the-last-session dialog (Alt+Shift+R): reads the on-disk snapshot

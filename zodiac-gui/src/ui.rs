@@ -52,6 +52,9 @@ pub struct UiState {
     /// cell_h_px). The app sends this as `T_RESIZE` so the pty matches the
     /// actual egui terminal widget, not the legacy full-window grid.
     pub term_grid: Option<(u16, u16, u16, u16)>,
+    /// Decoded kitty-image textures for terminal mode, keyed by (pane, img,
+    /// ver). egui owns the GPU upload; we just cache the handle.
+    pub tex_cache: std::collections::HashMap<(u64, u32, u32), egui::TextureHandle>,
 }
 
 /// Things the UI wants the app to do after a frame. Applied by `redraw`
@@ -1030,7 +1033,7 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
     // Body.
     let show_term = d.term_active || !p.is_agent();
     if show_term {
-        terminal_view(ui, p);
+        terminal_view(ui, st, p);
     } else {
         // Composer + approvals pinned to the bottom; transcript fills above.
         egui::Panel::bottom("composer")
@@ -1239,7 +1242,7 @@ fn approvals(ui: &mut egui::Ui, p: &CPane, actions: &mut Vec<UiAction>) {
 /// as a fixed monospace grid (bg quads + glyphs + block cursor) reusing
 /// `palette::cell_colors`. Kitty graphics are not composited here yet — that
 /// needs the GPU grid renderer drawn into egui (task #26b, follow-on).
-fn terminal_view(ui: &mut egui::Ui, p: &CPane) {
+fn terminal_view(ui: &mut egui::Ui, st: &mut UiState, p: &CPane) {
     use crate::palette::{cell_colors, CellStyle};
     let c32 = |c: [u8; 3]| Color32::from_rgb(c[0], c[1], c[2]);
     let font = egui::FontId::monospace(13.0);
@@ -1324,6 +1327,60 @@ fn terminal_view(ui: &mut egui::Ui, p: &CPane) {
                                 Color32::from_rgba_unmultiplied(230, 230, 230, 90),
                             );
                         }
+                    }
+                    // Kitty images (task #32): decode each placement to an
+                    // egui-managed texture (cached by pane/img/ver) and blit it
+                    // over the grid at its cell rect. Unicode-placeholder
+                    // (`virt`) tiling and z-ordering under text are follow-ons.
+                    let scroll = p.scroll as i32;
+                    for vp in &p.gfx.placements {
+                        if vp.virt || vp.cols == 0 || vp.rows == 0 {
+                            continue;
+                        }
+                        let Some(img) = p.images.get(&vp.img) else {
+                            continue;
+                        };
+                        if img.ver != vp.img_ver {
+                            continue;
+                        }
+                        let key = (p.id, vp.img, img.ver);
+                        let tex = if let Some(t) = st.tex_cache.get(&key) {
+                            Some(t.clone())
+                        } else if let Some((iw, ih, rgba)) =
+                            crate::img::decode_rgba(img.format, img.zlib, img.w, img.h, &img.data)
+                        {
+                            let ci = egui::ColorImage::from_rgba_unmultiplied(
+                                [iw as usize, ih as usize],
+                                &rgba,
+                            );
+                            let h = ui.ctx().load_texture(
+                                format!("kitty-{}-{}-{}", p.id, vp.img, img.ver),
+                                ci,
+                                egui::TextureOptions::LINEAR,
+                            );
+                            st.tex_cache.insert(key, h.clone());
+                            Some(h)
+                        } else {
+                            None
+                        };
+                        let Some(tex) = tex else { continue };
+                        let x = o.x + vp.col as f32 * cw + vp.offx as f32;
+                        let y = o.y + (vp.row + scroll) as f32 * ch + vp.offy as f32;
+                        let rect = Rect::from_min_size(
+                            egui::pos2(x, y),
+                            egui::vec2(vp.cols as f32 * cw, vp.rows as f32 * ch),
+                        );
+                        let (sx, sy, sw, sh) = vp.src;
+                        let (iw, ih) = (img.w.max(1) as f32, img.h.max(1) as f32);
+                        let uv = if sw > 0 && sh > 0 {
+                            Rect::from_min_size(
+                                egui::pos2(sx as f32 / iw, sy as f32 / ih),
+                                egui::vec2(sw as f32 / iw, sh as f32 / ih),
+                            )
+                        } else {
+                            Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0))
+                        };
+                        painter.image(tex.id(), rect, uv, Color32::WHITE);
                     }
                 });
         });

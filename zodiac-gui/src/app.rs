@@ -265,6 +265,8 @@ impl GuiApp {
         if idx >= self.panes.len() {
             return;
         }
+        // A terminal selection belongs to the pane it was made in.
+        self.ui_state.term_sel = None;
         self.active = idx;
         let id = {
             let p = &mut self.panes[idx];
@@ -625,12 +627,13 @@ impl GuiApp {
                 Key::Named(NamedKey::ArrowRight) if !side => return next(self),
                 Key::Named(NamedKey::ArrowUp) if side => return prev(self),
                 Key::Named(NamedKey::ArrowDown) if side => return next(self),
-                // Alt+N new shell pane; Alt+Shift+N new claude agent pane.
+                // Alt+N new claude agent pane (structured, the default);
+                // Alt+Shift+N new shell pane.
                 Key::Character(s) if s.eq_ignore_ascii_case("n") => {
                     if self.mods.shift_key() {
-                        self.send(T_NEW_PANE, 0, br#"{"kind":"agent","agent":"claude"}"#);
-                    } else {
                         self.send(T_NEW_PANE, 0, &[]);
+                    } else {
+                        self.send(T_NEW_PANE, 0, br#"{"kind":"agent","agent":"claude"}"#);
                     }
                     return;
                 }
@@ -691,6 +694,31 @@ impl GuiApp {
         if !in_terminal {
             return;
         }
+        // Terminal clipboard: Ctrl/Cmd+Shift+C copies the current selection;
+        // Ctrl/Cmd+Shift+V, Cmd+V, or Shift+Insert pastes into the pty
+        // (bracketed when the app enabled paste mode). These are handled here
+        // rather than sent to the pty, so Ctrl+C stays SIGINT and Ctrl+V stays
+        // literal-next inside the terminal.
+        {
+            let ctrl_or_cmd = self.mods.control_key() || self.mods.super_key();
+            let shift = self.mods.shift_key();
+            let is = |lit: &str| matches!(&ev.logical_key, Key::Character(s) if s.eq_ignore_ascii_case(lit));
+            if ctrl_or_cmd && shift && is("c") {
+                if let Some(text) = self.terminal_selection() {
+                    self.copy_to_clipboard(text);
+                }
+                return;
+            }
+            let paste = (ctrl_or_cmd && shift && is("v"))
+                || (self.mods.super_key() && is("v"))
+                || (shift && matches!(ev.logical_key, Key::Named(NamedKey::Insert)));
+            if paste {
+                if let Some(text) = self.read_clipboard() {
+                    self.paste_to_pane(text);
+                }
+                return;
+            }
+        }
         let Some(ck) = crate::keys::to_key_event(&ev.logical_key, self.mods) else {
             return;
         };
@@ -742,6 +770,49 @@ impl GuiApp {
             };
             self.send_input(id, &bytes);
         }
+        self.request_redraw();
+    }
+
+    /// The text of the current terminal selection (active pane), if any.
+    fn terminal_selection(&self) -> Option<String> {
+        let p = self.panes.get(self.active)?;
+        crate::ui::term_selection_text(p, self.ui_state.term_sel)
+    }
+
+    /// Read the system clipboard (lazy-initializing the handle).
+    fn read_clipboard(&mut self) -> Option<String> {
+        if self.clipboard.is_none() {
+            self.clipboard = arboard::Clipboard::new().ok();
+        }
+        self.clipboard.as_mut().and_then(|cb| cb.get_text().ok())
+    }
+
+    /// Copy `text` to the system clipboard (lazy-initializing the handle).
+    fn copy_to_clipboard(&mut self, text: String) {
+        if self.clipboard.is_none() {
+            self.clipboard = arboard::Clipboard::new().ok();
+        }
+        if let Some(cb) = self.clipboard.as_mut() {
+            let _ = cb.set_text(text);
+        }
+    }
+
+    /// Send `text` to the active pty pane as a paste (bracketed when the app
+    /// enabled paste mode). No-op for agent panes.
+    fn paste_to_pane(&mut self, text: String) {
+        let Some(p) = self.panes.get(self.active) else {
+            return;
+        };
+        if p.is_agent() {
+            return;
+        }
+        let id = p.id;
+        let bytes = if p.parser.screen().bracketed_paste() {
+            format!("\x1b[200~{text}\x1b[201~").into_bytes()
+        } else {
+            text.into_bytes()
+        };
+        self.send_input(id, &bytes);
         self.request_redraw();
     }
 

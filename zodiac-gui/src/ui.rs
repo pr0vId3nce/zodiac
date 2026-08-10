@@ -50,6 +50,8 @@ pub struct UiState {
     pub palette_sel: usize,
     /// Selected option in the permission popup (0 = allow, 1 = deny).
     pub perm_sel: usize,
+    /// An in-progress/last terminal text selection (cleared on pane switch).
+    pub term_sel: Option<TermSel>,
     /// The focused pane's measured terminal-area grid: (rows, cols, cell_w_px,
     /// cell_h_px). The app sends this as `T_RESIZE` so the pty matches the
     /// actual egui terminal widget, not the legacy full-window grid.
@@ -57,6 +59,31 @@ pub struct UiState {
     /// Decoded kitty-image textures for terminal mode, keyed by (pane, img,
     /// ver). egui owns the GPU upload; we just cache the handle.
     pub tex_cache: std::collections::HashMap<(u64, u32, u32), egui::TextureHandle>,
+}
+
+/// A terminal text selection: visible-grid cell coords (row, col) in pane
+/// `pane`, from `anchor` (where the drag began) to `head` (the cursor now).
+#[derive(Clone, Copy)]
+pub struct TermSel {
+    pub pane: u64,
+    pub anchor: (usize, usize),
+    pub head: (usize, usize),
+}
+
+impl TermSel {
+    /// The selection as a normalized (start, end) pair in reading order.
+    pub fn ordered(&self) -> ((usize, usize), (usize, usize)) {
+        if self.anchor <= self.head {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
+    /// Is cell (row, col) within the selection?
+    pub fn contains(&self, row: usize, col: usize) -> bool {
+        let (s, e) = self.ordered();
+        (row, col) >= s && (row, col) <= e
+    }
 }
 
 /// Things the UI wants the app to do after a frame. Applied by `redraw`
@@ -1071,7 +1098,7 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
     // Body: the view is determined by the pane kind (see the header note).
     let show_term = !p.is_agent();
     if show_term {
-        terminal_view(ui, st, p);
+        terminal_view(ui, st, p, actions);
     } else {
         // A pending permission takes over the bottom bar and raises a modal
         // question popup; otherwise the composer sits there. Transcript fills
@@ -1889,7 +1916,50 @@ fn perm_option_row(ui: &mut egui::Ui, num: usize, label: &str, selected: bool) -
 /// as a fixed monospace grid (bg quads + glyphs + block cursor) reusing
 /// `palette::cell_colors`. Kitty graphics are not composited here yet — that
 /// needs the GPU grid renderer drawn into egui (task #26b, follow-on).
-fn terminal_view(ui: &mut egui::Ui, st: &mut UiState, p: &CPane) {
+/// Extract the text inside a terminal selection — one line per grid row with
+/// trailing blanks trimmed, rows joined by newlines.
+pub(crate) fn term_selection_text(p: &CPane, sel: Option<TermSel>) -> Option<String> {
+    let sel = sel?;
+    if sel.pane != p.id {
+        return None;
+    }
+    let (s, e) = sel.ordered();
+    let screen = p.parser.screen();
+    let (rows, cols) = screen.size();
+    let last_row = (e.0).min(rows.saturating_sub(1) as usize);
+    let mut out = String::new();
+    for row in s.0..=last_row {
+        let (c0, c1) = match (row == s.0, row == e.0) {
+            (true, true) => (s.1, e.1),
+            (true, false) => (s.1, cols as usize - 1),
+            (false, true) => (0, e.1),
+            (false, false) => (0, cols as usize - 1),
+        };
+        let mut line = String::new();
+        for col in c0..=c1.min(cols as usize - 1) {
+            if let Some(cell) = screen.cell(row as u16, col as u16) {
+                if !cell.is_wide_continuation() {
+                    let ch = cell.contents();
+                    line.push_str(if ch.is_empty() { " " } else { &ch });
+                }
+            }
+        }
+        while line.ends_with(' ') {
+            line.pop();
+        }
+        if row != last_row {
+            line.push('\n');
+        }
+        out.push_str(&line);
+    }
+    if out.trim().is_empty() {
+        None
+    } else {
+        Some(out)
+    }
+}
+
+fn terminal_view(ui: &mut egui::Ui, st: &mut UiState, p: &CPane, actions: &mut Vec<UiAction>) {
     use crate::palette::{cell_colors, CellStyle};
     let c32 = |c: [u8; 3]| Color32::from_rgb(c[0], c[1], c[2]);
     let font = egui::FontId::monospace(13.0);
@@ -1905,12 +1975,54 @@ fn terminal_view(ui: &mut egui::Ui, st: &mut UiState, p: &CPane) {
                 .id_salt("term")
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
-                    let (rect, _) = ui.allocate_exact_size(
-                        egui::vec2(cols as f32 * cw, rows as f32 * ch),
-                        Sense::hover(),
-                    );
-                    let painter = ui.painter_at(rect);
+                    // Text selection is available when the app isn't grabbing
+                    // the mouse — or, like a real terminal, when Shift is held.
+                    let shift = ui.input(|i| i.modifiers.shift);
+                    let mouse_app = screen.mouse_protocol_mode() != vt100::MouseProtocolMode::None;
+                    let selectable = shift || !mouse_app;
+                    let sense = if selectable {
+                        Sense::click_and_drag()
+                    } else {
+                        Sense::hover()
+                    };
+                    let (rect, resp) = ui
+                        .allocate_exact_size(egui::vec2(cols as f32 * cw, rows as f32 * ch), sense);
                     let o = rect.min;
+                    let cell_at = |pos: egui::Pos2| -> (usize, usize) {
+                        let c = (((pos.x - o.x) / cw).floor() as i32).clamp(0, cols as i32 - 1);
+                        let r = (((pos.y - o.y) / ch).floor() as i32).clamp(0, rows as i32 - 1);
+                        (r as usize, c as usize)
+                    };
+                    if selectable {
+                        if resp.drag_started() {
+                            if let Some(pos) = resp.interact_pointer_pos() {
+                                let a = cell_at(pos);
+                                st.term_sel = Some(TermSel {
+                                    pane: p.id,
+                                    anchor: a,
+                                    head: a,
+                                });
+                            }
+                        } else if resp.dragged() {
+                            if let Some(pos) = resp.interact_pointer_pos() {
+                                if let Some(sel) = st.term_sel.as_mut() {
+                                    if sel.pane == p.id {
+                                        sel.head = cell_at(pos);
+                                    }
+                                }
+                            }
+                        }
+                        if resp.drag_stopped() {
+                            if let Some(text) = term_selection_text(p, st.term_sel) {
+                                actions.push(UiAction::CopyText(text));
+                            }
+                        }
+                        // A plain click (no drag) clears the selection.
+                        if resp.clicked() {
+                            st.term_sel = None;
+                        }
+                    }
+                    let painter = ui.painter_at(rect);
                     for row in 0..rows {
                         for col in 0..cols {
                             let Some(cell) = screen.cell(row, col) else {
@@ -1937,6 +2049,18 @@ fn terminal_view(ui: &mut egui::Ui, st: &mut UiState, p: &CPane) {
                                     ),
                                     CornerRadius::ZERO,
                                     c32(bg),
+                                );
+                            }
+                            if st.term_sel.is_some_and(|s| {
+                                s.pane == p.id && s.contains(row as usize, col as usize)
+                            }) {
+                                painter.rect_filled(
+                                    Rect::from_min_size(
+                                        egui::pos2(x, y),
+                                        egui::vec2(cw + 0.5, ch + 0.5),
+                                    ),
+                                    CornerRadius::ZERO,
+                                    fade(theme::accent(), 0.30),
                                 );
                             }
                             let contents = cell.contents();

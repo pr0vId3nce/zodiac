@@ -41,6 +41,15 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
 - **⌘K / Ctrl+K** — command palette (fuzzy pane jump; ↑/↓, Enter, Esc).
 - **⌘, / Ctrl+,** — settings (grouped; edits real `config.json` keys, persists).
 - **Alt+O** — the Oracle panel (gradient orb; presentational for now).
+- **Alt+N** — new agent (structured) pane; **Alt+Shift+N** — new shell pane.
+  **Alt+←/→** (or **Alt+↑/↓** with side tabs) and **Alt+1–9** switch panes;
+  **Alt+W** closes the active pane.
+- **Copy / paste** — in the **transcript**, drag to select across turns and
+  **Ctrl/⌘+C** copies; paste into the composer with **Ctrl/⌘+V**. In the
+  **terminal**, drag to select (hold **Shift** to select even when a TUI is
+  grabbing the mouse) — release copies, or **Ctrl/⌘+Shift+C**; paste with
+  **Ctrl/⌘+Shift+V**, **⌘+V**, or **Shift+Insert** (bracketed when the app
+  asked for it). `Ctrl+C`/`Ctrl+V` still reach the shell as SIGINT / literal.
 - Title-bar buttons: **⌘K find pane**, **oracle**, **pair phone**, **settings**.
   Pair-phone renders the astrolabe pairing QR from the endpoint + token.
 

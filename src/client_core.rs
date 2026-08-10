@@ -372,11 +372,20 @@ impl CPane {
 }
 
 pub fn connect_or_spawn(session: &str) -> Result<UnixStream> {
+    connect_or_spawn_with(session, std::env::current_exe()?)
+}
+
+/// Like [`connect_or_spawn`], but spawns `server_exe --server <session>` to
+/// start the server when none is listening. The TUI passes its own exe (it
+/// *is* the server binary); the GUI passes the sibling `zodiac` binary,
+/// because `zodiac-gui` is a client only and cannot serve — spawning itself
+/// would recurse on the `--server` argument.
+pub fn connect_or_spawn_with(session: &str, server_exe: std::path::PathBuf) -> Result<UnixStream> {
     let path = socket_path(session);
     if let Ok(s) = UnixStream::connect(&path) {
         return Ok(s);
     }
-    let exe = std::env::current_exe()?;
+    let exe = server_exe;
     let logdir = state_dir(session);
     std::fs::create_dir_all(&logdir)?;
     let log = std::fs::OpenOptions::new()

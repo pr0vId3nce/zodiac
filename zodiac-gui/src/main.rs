@@ -26,6 +26,18 @@ mod ui;
 use app::{GuiApp, UserEvent};
 use zodiac::protocol::{read_frame, write_frame, T_ATTACH};
 
+/// Locate the `zodiac` server binary: the sibling of this executable when
+/// present (the install + dev layout both place `zodiac` next to
+/// `zodiac-gui`), else `zodiac` on `PATH`. `zodiac-gui` is a client only and
+/// cannot serve, so it must start the real server binary rather than itself.
+fn server_binary() -> std::path::PathBuf {
+    std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join("zodiac")))
+        .filter(|p| p.exists())
+        .unwrap_or_else(|| std::path::PathBuf::from("zodiac"))
+}
+
 fn main() -> anyhow::Result<()> {
     let arg = std::env::args().nth(1);
     if matches!(arg.as_deref(), Some("-h") | Some("--help")) {
@@ -44,7 +56,7 @@ fn main() -> anyhow::Result<()> {
     // server's PTYs can report pixel dimensions to inner apps.
     let mut fonts = font::Fonts::load();
     let (cw, ch) = fonts.cell_size(1.0);
-    let mut sock = zodiac::client_core::connect_or_spawn(&session)?;
+    let mut sock = zodiac::client_core::connect_or_spawn_with(&session, server_binary())?;
     let (cw16, ch16) = (cw.round() as u16, ch.round() as u16);
     let hello = [
         1u8, // gfx capable

@@ -26,6 +26,38 @@ pub const RING_CAP: usize = 6 * 1024 * 1024;
 const SYNC_BUF_MAX: usize = 2 * 1024 * 1024;
 const SYNC_DEADLINE: Duration = Duration::from_millis(150);
 
+/// The shell to spawn for a pty pane. Prefers `$SHELL`, but rejects a
+/// `/nix/store/…` value: the GUI launcher runs under `nix develop`, which
+/// points `$SHELL` at a nix-store bash whose Starship prompt leaks the raw
+/// `\[ \]` bash prompt markers. Falls back to the passwd login shell (the
+/// user's real shell — clean even inside a nix env), then `/bin/sh`.
+fn login_shell() -> String {
+    if let Ok(sh) = std::env::var("SHELL") {
+        if !sh.is_empty() && !sh.starts_with("/nix/store/") {
+            return sh;
+        }
+    }
+    passwd_shell().unwrap_or_else(|| "/bin/sh".into())
+}
+
+/// The current user's login shell from the passwd database.
+fn passwd_shell() -> Option<String> {
+    // SAFETY: getpwuid returns a pointer into a libc-owned static buffer; we
+    // copy the shell string out before returning (no further libc calls in
+    // between that could clobber it).
+    unsafe {
+        let pw = libc::getpwuid(libc::getuid());
+        if pw.is_null() || (*pw).pw_shell.is_null() {
+            return None;
+        }
+        let s = std::ffi::CStr::from_ptr((*pw).pw_shell)
+            .to_str()
+            .ok()?
+            .to_string();
+        (!s.is_empty()).then_some(s)
+    }
+}
+
 /// What sits behind a pane: a PTY child (shell/TUI, the default) or a
 /// structured agent process on pipes (roadmap Phase 2, ADR 0002).
 pub enum PaneIo {
@@ -142,7 +174,7 @@ impl SrvPane {
             pixel_height: 0,
         })?;
 
-        let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+        let shell = login_shell();
         let name = name.unwrap_or_else(|| shell.rsplit('/').next().unwrap_or("shell").to_string());
         let mut cmd = CommandBuilder::new(&shell);
         // Login shell: rebuilds env/prompt (starship etc.) from profile files
@@ -150,6 +182,13 @@ impl SrvPane {
         cmd.arg("-l");
         cmd.env("TERM", "xterm-256color");
         cmd.env("COLORTERM", "truecolor");
+        // The GUI's launcher runs it under `nix develop` (for the wgpu libs),
+        // which marks the env as a nix shell. Panes are top-level terminals,
+        // not dev shells: drop the marker so prompts (starship etc.) don't show
+        // a bogus "nix-shell" segment. (The real fix for the prompt is picking
+        // the right shell above — see `login_shell`.)
+        cmd.env_remove("IN_NIX_SHELL");
+        cmd.env_remove("name");
         // A zodiac server started from inside a claude session would pass
         // claude's session markers into every pane — and a claude launched
         // in such a pane then thinks it's a child session and stops saving
@@ -2499,6 +2538,25 @@ mod transcript_entry_tests {
         // The same file answers the model question.
         assert_eq!(model_from_transcript(&path).as_deref(), Some("opus 5"));
         let _ = std::fs::remove_file(&path);
+    }
+}
+
+#[cfg(test)]
+mod login_shell_tests {
+    use super::login_shell;
+
+    /// A pty pane must never inherit a `/nix/store/…` shell — that's the
+    /// `nix develop` launcher artifact whose Starship prompt leaks `\[ \]`.
+    /// (Under the merge gate `$SHELL` *is* the nix-store bash, so this guards
+    /// the exact broken scenario.)
+    #[test]
+    fn never_a_nix_store_shell() {
+        let sh = login_shell();
+        assert!(
+            !sh.starts_with("/nix/store/"),
+            "login_shell() returned a nix-store shell: {sh}"
+        );
+        assert!(!sh.is_empty());
     }
 }
 

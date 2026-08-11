@@ -1726,11 +1726,11 @@ fn composer_bar(ui: &mut egui::Ui, p: &CPane, composer: &mut String, actions: &m
                             .text_color(theme::TEXT_BODY);
                         let resp = ui.add(edit);
                         // A bare "/" (when you're not already typing here) jumps
-                        // to the composer and starts a slash command, like the
-                        // agent TUIs. cursor_at_end (egui default) drops the
-                        // caret after the "/".
+                        // to the composer so you can start typing. It only moves
+                        // focus — the "/" isn't inserted: focus takes effect next
+                        // frame, by which point this frame's "/" text event is
+                        // gone, so the field never types it.
                         if !resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Slash)) {
-                            composer.push('/');
                             resp.request_focus();
                         }
                         if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {

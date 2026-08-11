@@ -1047,29 +1047,6 @@ fn sidebar(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
                 ui.add_space(4.0);
             }
         });
-    ui.add_space(8.0);
-    ui.separator();
-    ui.add_space(6.0);
-    if ui
-        .button(
-            RichText::new("+ new pane")
-                .color(theme::TEXT_DIM)
-                .size(13.0),
-        )
-        .clicked()
-    {
-        actions.push(UiAction::NewShell);
-    }
-    if ui
-        .button(
-            RichText::new("← observatory")
-                .color(theme::TEXT_DIM)
-                .size(13.0),
-        )
-        .clicked()
-    {
-        actions.push(UiAction::Back);
-    }
 }
 
 /// The main column: pane header, then transcript or terminal, then composer.
@@ -1101,14 +1078,16 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
                 }
                 status_pill(ui, si, theme::STATUS_WORD[si]);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    // The view follows the pane kind — agent panes are headless
-                    // (structured NDJSON, no pty) so they only have a transcript;
-                    // pty panes only have a terminal. (A toggle used to live here
-                    // and let you pick the empty view, which rendered black.)
-                    let (label, col) = if p.is_agent() {
-                        ("structured", theme::VIOLET_TEXT)
+                    // Agent panes show their running model (they're headless
+                    // structured NDJSON — no pty); pty panes show "terminal".
+                    // Falls back to "structured" until the model is known.
+                    let (label, col): (String, Color32) = if p.is_agent() {
+                        (
+                            p.agent.model.clone().unwrap_or_else(|| "structured".into()),
+                            theme::VIOLET_TEXT,
+                        )
                     } else {
-                        ("terminal", theme::TEXT_DIM)
+                        ("terminal".to_string(), theme::TEXT_DIM)
                     };
                     Frame::NONE
                         .fill(theme::bg_raised())

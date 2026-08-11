@@ -122,6 +122,9 @@ pub struct AgentUi {
     pub items: Vec<ChatItem>,
     /// The agent's current plan, replaced on each `TodoWrite` tool call.
     pub todos: Vec<TodoItem>,
+    /// The running model as a short display name ("sonnet 4.5"), captured
+    /// from the stream's message envelopes. `None` until the first turn.
+    pub model: Option<String>,
     /// Assistant text still streaming in (shown at the transcript tail
     /// until the completed block replaces it).
     pub stream: String,
@@ -145,6 +148,17 @@ impl AgentUi {
         let s = |v: &serde_json::Value, k: &str| -> Option<String> {
             v.get(k).and_then(|x| x.as_str()).map(str::to_string)
         };
+        // Track the running model from any message envelope (claude sets it on
+        // assistant / message_start events, pi on message_end).
+        if let Some(m) = v
+            .get("message")
+            .or_else(|| v.get("event").and_then(|e| e.get("message")))
+            .and_then(|m| m.get("model"))
+            .and_then(|x| x.as_str())
+            .filter(|m| !m.is_empty())
+        {
+            self.model = Some(short_model(m));
+        }
         match v.get("type").and_then(|t| t.as_str()) {
             Some("zodiac_user") => {
                 if let Some(t) = s(v, "text") {
@@ -340,6 +354,30 @@ pub fn tool_compact(input: &serde_json::Value) -> String {
         v => v.to_string(),
     };
     truncate(&text.replace(['\n', '\r'], " "), 48)
+}
+
+/// A model id as a short display name: `claude-sonnet-4-5-20250929` →
+/// `sonnet 4.5`, dropping the `claude-` prefix and a trailing `-YYYYMMDD`.
+/// Mirrors the server's `short_model_name`.
+fn short_model(id: &str) -> String {
+    let id = id.rsplit('/').next().unwrap_or(id); // drop any `provider/` prefix
+    let id = id.strip_prefix("claude-").unwrap_or(id);
+    let id = match id.len().checked_sub(9) {
+        Some(cut)
+            if id.as_bytes()[cut] == b'-' && id[cut + 1..].chars().all(|c| c.is_ascii_digit()) =>
+        {
+            &id[..cut]
+        }
+        _ => id,
+    };
+    let mut parts = id.split('-');
+    let family = parts.next().unwrap_or(id);
+    let nums: Vec<&str> = parts.collect();
+    if !nums.is_empty() && nums.iter().all(|n| n.chars().all(|c| c.is_ascii_digit())) {
+        format!("{} {}", family, nums.join("."))
+    } else {
+        id.replace('-', " ")
+    }
 }
 
 /// A tool call's full, human-readable invocation for the GUI's expandable
@@ -943,6 +981,20 @@ mod apply_line_tests {
         );
         // The user prompt is NOT echoed from the native tool-result message.
         assert!(!ui.log.iter().any(|(r, _)| *r == ARole::User));
+    }
+
+    #[test]
+    fn captures_and_shortens_model() {
+        let ui = fold(&[json!({
+            "type": "assistant",
+            "message": {
+                "model": "claude-sonnet-4-5-20250929",
+                "content": [{"type": "text", "text": "hi"}],
+            }
+        })]);
+        assert_eq!(ui.model.as_deref(), Some("sonnet 4.5"));
+        // A pi-style `provider/id` keeps its family + drops the provider.
+        assert_eq!(short_model("llama-local/qwen3-32b"), "qwen3 32b");
     }
 
     #[test]

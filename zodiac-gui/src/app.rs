@@ -187,7 +187,7 @@ impl GuiApp {
         p.kind = "agent".into();
         let lines = [
             serde_json::json!({"type": "zodiac_user", "text": "run the tests"}),
-            serde_json::json!({"type": "assistant", "message": {"content": [
+            serde_json::json!({"type": "assistant", "message": {"model": "claude-sonnet-4-5-20250929", "content": [
                 {"type": "thinking", "thinking": "Let me look at the test runner first."},
                 {"type": "text", "text": "I'll run the suite now."},
             ]}}),
@@ -659,6 +659,13 @@ impl GuiApp {
                     if let Some(id) = self.panes.get(self.active).map(|p| p.id) {
                         self.send(T_CLOSE_PANE, id, &[]);
                     }
+                    return;
+                }
+                // Alt+Z returns to the Observatory.
+                Key::Character(s) if s.eq_ignore_ascii_case("z") => {
+                    self.ui_state.overlay = crate::ui::Overlay::None;
+                    self.screen = crate::ui::Screen::Observatory;
+                    self.request_redraw();
                     return;
                 }
                 _ => {}

@@ -20,6 +20,16 @@
     <script>
       if ("serviceWorker" in navigator && window.isSecureContext) {
         navigator.serviceWorker.register("/sw.js").catch(() => {});
+        // The SW skipWaiting()s + claims clients on update, but an already-open
+        // PWA keeps running the old bundle until reloaded — the classic "phone
+        // stuck on stale code after a rebuild" trap. Reload once when a new SW
+        // takes control so the app always runs current code.
+        let reloading = false;
+        navigator.serviceWorker.addEventListener("controllerchange", () => {
+          if (reloading) return;
+          reloading = true;
+          location.reload();
+        });
       }
     </script>
   </body>

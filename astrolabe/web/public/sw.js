@@ -1,6 +1,6 @@
 // Minimal service worker: cache-first for hashed assets, network-first for
 // the shell. Only ever registered in a secure context (https / localhost).
-const CACHE = "astrolabe-v1";
+const CACHE = "astrolabe-v2";
 
 self.addEventListener("install", (e) => self.skipWaiting());
 self.addEventListener("activate", (e) => {

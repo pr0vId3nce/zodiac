@@ -394,6 +394,24 @@ pub fn notify(summary: &str, body: &str) {
         .spawn();
 }
 
+/// Neutralize a string for an AppleScript literal.
+///
+/// This is the one place agent-controlled text (a pane title, a monitor
+/// verdict) becomes part of a script that `osascript` will execute, so a
+/// stray quote must not be able to end the literal — let alone start a new
+/// statement. AppleScript literals also cannot hold a raw newline, which
+/// would otherwise truncate the notification at the first line break.
+///
+/// Compiled everywhere (it is pure string logic) so both CI runners test
+/// it, but only called on macOS.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn applescript_escape(s: &str) -> String {
+    s.replace('\\', "\\\\")
+        .replace('"', "\\\"")
+        .replace('\n', "\\n")
+        .replace('\r', "")
+}
+
 /// macOS has no `notify-send`. `terminal-notifier` is preferred when the
 /// user has it (the alert then carries zodiac's own identity and can be
 /// clicked), and `osascript` is the always-present fallback — it ships with
@@ -414,20 +432,10 @@ pub fn notify(summary: &str, body: &str) {
     if tn.spawn().is_ok() {
         return;
     }
-    // AppleScript string literals take backslash escapes and cannot hold a
-    // raw newline; without this, a pane title containing a quote would
-    // truncate the script rather than notify (and agent output is not
-    // trusted input).
-    fn esc(s: &str) -> String {
-        s.replace('\\', "\\\\")
-            .replace('"', "\\\"")
-            .replace('\n', "\\n")
-            .replace('\r', "")
-    }
     let script = format!(
         "display notification \"{}\" with title \"zodiac\" subtitle \"{}\"",
-        esc(body),
-        esc(summary)
+        applescript_escape(body),
+        applescript_escape(summary)
     );
     let mut osa = Command::new("osascript");
     osa.args(["-e", &script]);
@@ -622,5 +630,19 @@ mod tests {
         seen.sort_unstable();
         seen.dedup();
         assert_eq!(seen.len(), types.len(), "two client frame types collide");
+    }
+
+    /// Agent output reaches the macOS notification path, so a quote in a
+    /// pane title must stay inside the AppleScript literal rather than
+    /// closing it and running whatever follows.
+    #[test]
+    fn applescript_literals_cannot_be_escaped_out_of() {
+        let esc = super::applescript_escape(r#"say "hi" \ then"#);
+        assert_eq!(esc, r#"say \"hi\" \\ then"#);
+        // A backslash is doubled before quotes are escaped, so an input
+        // ending in a backslash can't swallow the closing quote.
+        assert_eq!(super::applescript_escape(r"trail\"), r"trail\\");
+        // Newlines survive as an escape; a bare CR is dropped.
+        assert_eq!(super::applescript_escape("a\r\nb"), "a\\nb");
     }
 }

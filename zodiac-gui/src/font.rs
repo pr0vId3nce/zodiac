@@ -313,3 +313,30 @@ pub fn egui_fallback_fonts() -> Vec<(String, Vec<u8>)> {
     }
     out
 }
+
+#[cfg(all(test, target_os = "macos"))]
+mod mac_tests {
+    /// The macOS UI font must resolve to real bytes. Returning `None` here
+    /// is not a visible failure — egui silently keeps its built-in face and
+    /// the whole app renders in the wrong font, which is exactly how the
+    /// fontconfig path failed before (`fc-match` answers every unknown
+    /// family with an arbitrary one instead of failing).
+    #[test]
+    fn ui_font_resolves_to_a_real_face() {
+        let bytes = super::egui_ui_font().expect("no macOS system mono face found");
+        assert!(bytes.len() > 4096, "font file suspiciously small");
+        // sfnt magic: 0x00010000 (TrueType), "true"/"ttcf", or "OTTO" (CFF).
+        let magic = &bytes[..4];
+        assert!(
+            matches!(magic, [0x00, 0x01, 0x00, 0x00] | b"true" | b"ttcf" | b"OTTO"),
+            "not a font container: {magic:02x?}"
+        );
+    }
+
+    /// An unknown family must fall through to the system face rather than
+    /// resolving to something arbitrary.
+    #[test]
+    fn unknown_family_is_not_silently_substituted() {
+        assert!(super::mac::find_family_file("NoSuchFontFamilyXYZ").is_none());
+    }
+}

@@ -279,6 +279,12 @@ pub struct PaneState {
     /// First line of `<agent> --version`, once probed (cached server-side).
     #[serde(default)]
     pub version: Option<String>,
+    /// The model the agent pane was launched with, as the harness expects it
+    /// (a claude `--model` alias, or a pi `provider/id`). None = harness
+    /// default. Clients that can read the running model from the stream
+    /// (claude) prefer that; this covers harnesses that don't report one (pi).
+    #[serde(default)]
+    pub model: Option<String>,
     /// Claude's live "esc to interrupt" spinner row is on screen.
     #[serde(default)]
     pub thinking: bool,

@@ -1078,12 +1078,18 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
                 }
                 status_pill(ui, si, theme::STATUS_WORD[si]);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    // Agent panes show their running model (they're headless
-                    // structured NDJSON — no pty); pty panes show "terminal".
-                    // Falls back to "structured" until the model is known.
+                    // Agent panes show their model (they're headless structured
+                    // NDJSON — no pty); pty panes show "terminal". Prefer the
+                    // model read live from the stream (claude); fall back to the
+                    // model the pane was launched with (pi doesn't report one),
+                    // else "structured" until it's known.
                     let (label, col): (String, Color32) = if p.is_agent() {
+                        let model = p.agent.model.clone().or_else(|| {
+                            ps.and_then(|s| s.model.as_deref())
+                                .map(zodiac::client_core::short_model)
+                        });
                         (
-                            p.agent.model.clone().unwrap_or_else(|| "structured".into()),
+                            model.unwrap_or_else(|| "structured".into()),
                             theme::VIOLET_TEXT,
                         )
                     } else {

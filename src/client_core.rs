@@ -359,7 +359,7 @@ pub fn tool_compact(input: &serde_json::Value) -> String {
 /// A model id as a short display name: `claude-sonnet-4-5-20250929` →
 /// `sonnet 4.5`, dropping the `claude-` prefix and a trailing `-YYYYMMDD`.
 /// Mirrors the server's `short_model_name`.
-fn short_model(id: &str) -> String {
+pub fn short_model(id: &str) -> String {
     let id = id.rsplit('/').next().unwrap_or(id); // drop any `provider/` prefix
     let id = id.strip_prefix("claude-").unwrap_or(id);
     let id = match id.len().checked_sub(9) {

@@ -1500,6 +1500,9 @@ impl Server {
                             .as_ref()
                             .and_then(|a| self.versions.get(a).cloned().flatten())
                             .filter(|v| !v.is_empty()),
+                        // The launched model (picked in the GUI). Clients that
+                        // read the running model from the stream prefer that.
+                        model: p.agent_rt().and_then(|rt| rt.model.clone()),
                         thinking: p.thinking(),
                         recap: p.recap(agent.as_deref(), text.as_deref()),
                         subtitle: p.subtitle.clone(),

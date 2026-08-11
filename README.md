@@ -49,6 +49,12 @@ is a text-composition modifier there. Fonts resolve by path (SF Mono, then
 Menlo/Monaco) rather than through fontconfig, which on a Mac answers every
 unknown family with an arbitrary face instead of failing.
 
+`scripts/bundle-macos-app.sh` packages the GUI as a real `zodiac.app` —
+icon, bundle identity, retina flag, and the `zodiac` server binary copied
+in beside it so the bundle starts its own session. It also pins `PATH` via
+`LSEnvironment`, because an app launched from Finder inherits a bare one
+and would not find the `claude`/`pi` harnesses at all.
+
 To keep a Mac reachable from the phone across reboots and crashes, install
 both LaunchAgents: `astrolabe/install.sh` for the bridge and
 `scripts/install-macos-agent.sh` for the zodiac session itself. A Mac with

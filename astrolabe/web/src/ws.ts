@@ -40,23 +40,55 @@ class AstrolabeClient {
   private listeners = new Set<() => void>();
   private streams = new Set<StreamListener>();
   private retry: ReturnType<typeof setTimeout> | null = null;
+  /** Reconnect backoff (ms): grows on each failed attempt, resets on open. */
+  private backoff = 1000;
 
   start() {
     if (this.ws) return;
+    // Phones sleep and hop networks constantly — reconnect eagerly whenever
+    // the tab becomes visible or the network comes back, instead of waiting
+    // out the backoff timer.
+    if (typeof window !== "undefined") {
+      const wake = () => {
+        if (!this.ws) {
+          this.backoff = 1000;
+          this.connect();
+        }
+      };
+      window.addEventListener("online", wake);
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "visible") wake();
+      });
+    }
     this.connect();
   }
 
+  private scheduleReconnect() {
+    if (this.retry) clearTimeout(this.retry);
+    const delay = this.backoff;
+    this.backoff = Math.min(this.backoff * 2, 15000); // cap at 15s
+    this.retry = setTimeout(() => this.connect(), delay);
+  }
+
   private connect() {
+    if (this.ws) return; // already connected/connecting
+    if (this.retry) {
+      clearTimeout(this.retry);
+      this.retry = null;
+    }
     const proto = location.protocol === "https:" ? "wss" : "ws";
     const token = getToken();
     const qs = token ? `?t=${encodeURIComponent(token)}` : "";
     const ws = new WebSocket(`${proto}://${location.host}/ws${qs}`);
     this.ws = ws;
-    ws.onopen = () => this.set({ connected: true, unauthorized: false });
+    ws.onopen = () => {
+      this.backoff = 1000; // reset backoff on a good connection
+      this.set({ connected: true, unauthorized: false });
+    };
     ws.onclose = (ev) => {
       this.ws = null;
       this.set({ connected: false, unauthorized: ev.code === 4001 });
-      this.retry = setTimeout(() => this.connect(), 1500);
+      this.scheduleReconnect();
     };
     ws.onerror = () => ws.close();
     ws.onmessage = (ev) => {

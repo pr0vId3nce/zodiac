@@ -1034,8 +1034,11 @@ setInterval(() => {
 }, 30000);
 
 // Bind to the tailscale IP so the UI is tailnet-only. On boot the bridge may
-// start before tailscaled has an address — retry for a while before giving
-// up and binding loopback (systemd Restart= then gets another shot later).
+// start before tailscaled has an address — retry for a while, then fall back
+// to loopback so /healthz still answers locally. `watchHost` below is what
+// actually recovers from that; a service restart never will, because a
+// loopback-bound bridge is a perfectly healthy process that simply has no
+// route in from the phone.
 async function resolveHost(): Promise<string> {
   if (process.env.ASTROLABE_HOST) return process.env.ASTROLABE_HOST;
   for (let i = 0; i < 15; i++) {
@@ -1043,13 +1046,13 @@ async function resolveHost(): Promise<string> {
     if (ip) return ip;
     await new Promise((r) => setTimeout(r, 2000));
   }
-  console.error("astrolabe: no tailscale IPv4 after 30s — binding 127.0.0.1");
+  console.error("astrolabe: no tailscale IPv4 after 30s — binding 127.0.0.1, will rebind when one appears");
   return "127.0.0.1";
 }
 
 const host = await resolveHost();
-const endpointURL = `http://${host}:${PORT}`;
-const identity = publishEndpoint(endpointURL);
+let endpointURL = `http://${host}:${PORT}`;
+let identity = publishEndpoint(endpointURL);
 // endpoint.json is what zodiac's pairing QR advertises, and there is only
 // one of it per machine — so a second bridge (another port, another
 // session) overwrites it, and pairing then points at whichever bridge
@@ -1064,6 +1067,45 @@ setInterval(() => {
   }
 }, 60_000).unref();
 link.start();
-server.listen(PORT, host, () => {
-  console.log(`astrolabe: serving http://${host}:${PORT} → zodiac session '${SESSION}'`);
+
+let boundHost = host;
+server.listen(PORT, boundHost, () => {
+  console.log(`astrolabe: serving http://${boundHost}:${PORT} → zodiac session '${SESSION}'`);
 });
+
+// The tailnet address can arrive late or change under us: on macOS
+// Tailscale.app only starts after GUI login, so a bridge launched at boot
+// routinely loses the 30 s race above; a tailnet IP can also be reassigned.
+// Either way the process stays healthy while being unreachable from the
+// phone, so nothing restarts it and the machine goes dark until someone
+// walks over to it — the exact failure this ecosystem can least afford.
+// Watch the address and rebind in place instead.
+if (!process.env.ASTROLABE_HOST) {
+  setInterval(() => {
+    let ip: string | null = null;
+    try {
+      ip = tailscaleIp();
+    } catch {
+      return; // transient probe failure — keep the current binding
+    }
+    if (!ip || ip === boundHost) return;
+    console.log(`astrolabe: tailnet address ${boundHost} → ${ip}, rebinding`);
+    boundHost = ip;
+    endpointURL = `http://${ip}:${PORT}`;
+    try {
+      identity = publishEndpoint(endpointURL);
+    } catch {
+      /* endpoint.json is re-claimed on the 60 s timer anyway */
+    }
+    // Existing sockets are bound to the old address and cannot survive the
+    // move; dropping them is what lets close() actually complete (a live
+    // WebSocket would otherwise hold it open forever). Clients reconnect.
+    server.closeAllConnections?.();
+    server.close((err) => {
+      if (err) console.error(`astrolabe: rebind close failed: ${err}`);
+      server.listen(PORT, boundHost, () => {
+        console.log(`astrolabe: serving http://${boundHost}:${PORT} → zodiac session '${SESSION}'`);
+      });
+    });
+  }, 10_000).unref();
+}

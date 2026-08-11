@@ -12,10 +12,11 @@ echo "── web build"
 
 if [ "$(uname)" = "Darwin" ]; then
   # launchd starts agents with a bare PATH, so bake in the absolute node
-  # path found right now (Node ≥ 23 for native type stripping).
+  # path found right now (Node ≥ 22.18 for unflagged type stripping).
   NODE="$(command -v node)"
   PLIST=~/Library/LaunchAgents/dev.d3s.astrolabe.plist
-  mkdir -p ~/Library/LaunchAgents
+  LOGDIR=~/Library/Logs
+  mkdir -p ~/Library/LaunchAgents "$LOGDIR"
   cat > "$PLIST" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -30,8 +31,17 @@ if [ "$(uname)" = "Darwin" ]; then
   <key>WorkingDirectory</key><string>$(pwd)/bridge</string>
   <key>RunAtLoad</key><true/>
   <key>KeepAlive</key><true/>
-  <key>StandardOutPath</key><string>/tmp/astrolabe.log</string>
-  <key>StandardErrorPath</key><string>/tmp/astrolabe.log</string>
+  <!-- Without this the bridge is a background job subject to App Nap, and
+       macOS stretches its timers when the machine is idle — exactly when a
+       phone is most likely to be checking on a long-running agent. The
+       endpoint re-claim, WS keepalive and CPU sampler all ride those. -->
+  <key>ProcessType</key><string>Interactive</string>
+  <!-- Don't respawn in a tight loop if node itself is broken. -->
+  <key>ThrottleInterval</key><integer>10</integer>
+  <!-- ~/Library/Logs, not /tmp: macOS prunes /tmp periodically, which
+       silently eats the log you need after an unattended failure. -->
+  <key>StandardOutPath</key><string>${LOGDIR}/astrolabe.log</string>
+  <key>StandardErrorPath</key><string>${LOGDIR}/astrolabe.log</string>
 </dict>
 </plist>
 EOF
@@ -42,7 +52,15 @@ EOF
   ip="$(tailscale ip -4 2>/dev/null | head -1 || /Applications/Tailscale.app/Contents/MacOS/Tailscale ip -4 2>/dev/null | head -1 || true)"
   echo
   echo "astrolabe is up (launchd): http://${ip:-<tailscale-ip>}:${port}"
-  echo "logs: /tmp/astrolabe.log · env overrides: edit $PLIST (EnvironmentVariables dict)"
+  echo "logs: ${LOGDIR}/astrolabe.log"
+  # launchd has no EnvironmentFile= equivalent, so the bridge reads this
+  # file itself (see loadEnvFile in bridge/main.ts) — that, not the plist,
+  # is where ASTROLABE_APNS_* and ASTROLABE_HOST belong.
+  echo "env:  ~/.config/astrolabe/env  (ASTROLABE_APNS_*, ASTROLABE_HOST)"
+  echo
+  echo "note: a LaunchAgent only runs once someone is logged in. For a Mac"
+  echo "      you control remotely, enable automatic login so a reboot"
+  echo "      brings the bridge back without anyone at the keyboard."
   exit 0
 fi
 

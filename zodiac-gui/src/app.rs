@@ -622,8 +622,8 @@ impl GuiApp {
         if ev.state != ElementState::Pressed {
             return;
         }
-        // Alt tab navigation + new-pane shortcuts.
-        if self.mods.alt_key() {
+        // Tab navigation + new-pane shortcuts, on Alt (Linux) / Cmd (macOS).
+        if crate::keys::cmd_held(self.mods) {
             let n = self.panes.len();
             let side = self.settings.gui_tabs() == "side";
             let prev = |me: &mut Self| {
@@ -671,8 +671,8 @@ impl GuiApp {
                 _ => {}
             }
         }
-        // Alt+1..9 jumps straight to a pane (Alt+1 = first).
-        if self.mods.alt_key() {
+        // Alt/Cmd+1..9 jumps straight to a pane (1 = first).
+        if crate::keys::cmd_held(self.mods) {
             if let Key::Character(s) = &ev.logical_key {
                 if let Some(d) = s.chars().next().and_then(|c| c.to_digit(10)) {
                     if d >= 1 && (d as usize) <= self.panes.len() {
@@ -680,6 +680,28 @@ impl GuiApp {
                         self.request_redraw();
                     }
                     return;
+                }
+            }
+        }
+        // macOS: ⌘⇧[ / ⌘⇧] is the system-wide tab-switch chord (Safari,
+        // Terminal, Xcode). Mac laptop keyboards have no PageUp/PageDown at
+        // all, so Ctrl+PageUp/Down below is unreachable without fn-chording.
+        #[cfg(target_os = "macos")]
+        if self.mods.super_key() {
+            if let Key::Character(s) = &ev.logical_key {
+                let n = self.panes.len();
+                match s.as_str() {
+                    "[" | "{" if n > 0 => {
+                        self.focus((self.active + n - 1) % n);
+                        self.request_redraw();
+                        return;
+                    }
+                    "]" | "}" if n > 0 => {
+                        self.focus((self.active + 1) % n);
+                        self.request_redraw();
+                        return;
+                    }
+                    _ => {}
                 }
             }
         }
@@ -834,24 +856,50 @@ impl GuiApp {
     /// OSC 52 write-through (4.7): selection strings containing 'p' target
     /// the primary selection (arboard supports it on Linux); anything else
     /// — including combined "pc" — also lands on the regular clipboard.
+    ///
+    /// macOS/Windows have no primary selection, and `LinuxClipboardKind` is
+    /// compiled out of arboard there, so those platforms fold every target
+    /// onto the one system clipboard rather than dropping a 'p' copy.
     fn write_clipboard(&mut self, selection: &str, text: String) {
-        use arboard::{LinuxClipboardKind, SetExtLinux};
         if self.clipboard.is_none() {
             self.clipboard = arboard::Clipboard::new().ok();
         }
         let Some(cb) = self.clipboard.as_mut() else {
             return;
         };
-        let primary = selection.contains('p');
-        let regular = !primary || selection.chars().any(|c| c != 'p');
-        if primary {
-            let _ = cb
-                .set()
-                .clipboard(LinuxClipboardKind::Primary)
-                .text(text.clone());
+        #[cfg(all(
+            unix,
+            not(any(
+                target_os = "macos",
+                target_os = "android",
+                target_os = "emscripten"
+            ))
+        ))]
+        {
+            use arboard::{LinuxClipboardKind, SetExtLinux};
+            let primary = selection.contains('p');
+            let regular = !primary || selection.chars().any(|c| c != 'p');
+            if primary {
+                let _ = cb
+                    .set()
+                    .clipboard(LinuxClipboardKind::Primary)
+                    .text(text.clone());
+            }
+            if regular {
+                let _ = cb.set().clipboard(LinuxClipboardKind::Clipboard).text(text);
+            }
         }
-        if regular {
-            let _ = cb.set().clipboard(LinuxClipboardKind::Clipboard).text(text);
+        #[cfg(not(all(
+            unix,
+            not(any(
+                target_os = "macos",
+                target_os = "android",
+                target_os = "emscripten"
+            ))
+        )))]
+        {
+            let _ = selection;
+            let _ = cb.set().text(text);
         }
     }
 
@@ -1150,6 +1198,23 @@ impl GuiApp {
                 &mut actions,
             );
         });
+        // egui-winit is built with `default-features = false`, which drops
+        // its `clipboard` feature — without it egui's own copy path is an
+        // in-app buffer that never reaches the system clipboard, on Linux
+        // as much as macOS (so "copy pairing URL" silently did nothing).
+        // Serve those commands from the same arboard handle the terminal
+        // copy uses rather than linking a second clipboard implementation.
+        let mut full = full;
+        for cmd in &full.platform_output.commands {
+            if let egui::OutputCommand::CopyText(text) = cmd {
+                if !text.is_empty() {
+                    self.write_clipboard("c", text.clone());
+                }
+            }
+        }
+        full.platform_output
+            .commands
+            .retain(|c| !matches!(c, egui::OutputCommand::CopyText(_)));
         self.egui_state
             .as_mut()
             .unwrap()
@@ -1296,8 +1361,25 @@ impl ApplicationHandler<UserEvent> for GuiApp {
         }
         let attrs = winit::window::Window::default_attributes()
             .with_title(format!("zodiac — {}", self.session))
-            .with_decorations(false) // custom chrome: our title bar owns move/min/close
             .with_inner_size(winit::dpi::LogicalSize::new(1100.0, 720.0));
+        // Linux/Windows: no decorations at all — our own title bar owns
+        // move/minimize/close.
+        #[cfg(not(target_os = "macos"))]
+        let attrs = attrs.with_decorations(false);
+        // macOS: keep the real window frame but make it transparent and let
+        // content run full height under it. That is how a Mac app gets
+        // genuine traffic lights, rounded corners, snapping and fullscreen
+        // while still drawing its own chrome — stripping decorations
+        // outright leaves a window with no traffic lights at all, which is
+        // the single loudest "this is a Linux port" tell.
+        #[cfg(target_os = "macos")]
+        let attrs = {
+            use winit::platform::macos::WindowAttributesExtMacOS as _;
+            attrs
+                .with_titlebar_transparent(true)
+                .with_fullsize_content_view(true)
+                .with_title_hidden(true)
+        };
         let window = match event_loop.create_window(attrs) {
             Ok(w) => Arc::new(w),
             Err(e) => {

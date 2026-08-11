@@ -12,6 +12,22 @@ use zodiac::protocol::{PaneState, SessionState};
 
 use crate::theme;
 
+/// Label a chord with the platform's command modifier. egui binds these to
+/// `Modifiers::command`, which is Cmd on macOS and Ctrl elsewhere — so a
+/// hardcoded "⌘K" was telling Linux users the wrong key.
+macro_rules! concat_cmd {
+    ($rest:literal) => {{
+        #[cfg(target_os = "macos")]
+        {
+            concat!("⌘", $rest)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            concat!("Ctrl+", $rest)
+        }
+    }};
+}
+
 /// Which screen the GUI is showing (app-shell router, task #24).
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum Screen {
@@ -2859,6 +2875,10 @@ fn title_bar(root: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Ve
         )
         .show(root, |ui| {
             ui.horizontal_centered(|ui| {
+                // Clear the real traffic lights, which macOS draws over our
+                // content because the window uses a fullsize content view.
+                #[cfg(target_os = "macos")]
+                ui.add_space(72.0);
                 mark(ui);
                 ui.add_space(8.0);
                 // The wordmark doubles as the window drag handle (custom
@@ -2878,14 +2898,19 @@ fn title_bar(root: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Ve
                 ui.add_space(12.0);
                 session_chip(ui, d.session);
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    // Window controls (right-most).
-                    if win_btn(ui, "✕", theme::STATUS_RAIL[0]) {
-                        actions.push(UiAction::Quit);
+                    // Window controls (right-most). macOS has real traffic
+                    // lights on the left, so drawing our own would be a
+                    // second, wrong-side set of the same buttons.
+                    #[cfg(not(target_os = "macos"))]
+                    {
+                        if win_btn(ui, "✕", theme::STATUS_RAIL[0]) {
+                            actions.push(UiAction::Quit);
+                        }
+                        if win_btn(ui, "–", theme::TEXT_DIM) {
+                            actions.push(UiAction::Minimize);
+                        }
+                        ui.add_space(6.0);
                     }
-                    if win_btn(ui, "–", theme::TEXT_DIM) {
-                        actions.push(UiAction::Minimize);
-                    }
-                    ui.add_space(6.0);
                     if chrome_btn(ui, "settings") {
                         st.overlay = Overlay::Settings;
                     }
@@ -2895,7 +2920,7 @@ fn title_bar(root: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Ve
                     if chrome_btn(ui, "pair phone") {
                         st.overlay = Overlay::Pairing;
                     }
-                    if chrome_btn(ui, "⌘K find pane") {
+                    if chrome_btn(ui, concat_cmd!("K find pane")) {
                         st.overlay = Overlay::Palette;
                         st.palette_query.clear();
                         st.palette_sel = 0;

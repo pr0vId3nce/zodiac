@@ -6,6 +6,26 @@
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use winit::keyboard::{Key, ModifiersState, NamedKey};
 
+/// The platform's "app command" modifier for zodiac's own chords (pane
+/// navigation, new/close pane, jump-to-pane).
+///
+/// On macOS that is Command. Option is the text-composition modifier there
+/// — Opt+O types `ø` — so the Linux Alt chords would both fight the input
+/// method and read as a port. Everywhere else it stays Alt, so no existing
+/// muscle memory moves. This mirrors what egui already does for its own
+/// bindings (`Modifiers::command`), which is why ⌘K and ⌘, work already.
+#[inline]
+pub fn cmd_held(m: ModifiersState) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        m.super_key()
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        m.alt_key()
+    }
+}
+
 /// winit modifier state -> crossterm modifier flags.
 pub fn modifiers(m: ModifiersState) -> KeyModifiers {
     let mut out = KeyModifiers::NONE;

@@ -11,6 +11,108 @@ use glyphon::{Attrs, Buffer, Family, FontSystem, Metrics, Shaping, Wrap};
 pub const FONT_PX: f32 = 15.0;
 pub const LINE_FACTOR: f32 = 1.30;
 
+/// macOS font resolution, by path rather than by fontconfig.
+///
+/// A stock macOS has no `fc-match` at all, and — worse — when Homebrew has
+/// installed one it never *fails*: it answers every unknown family with its
+/// best guess. On this machine `fc-match "JetBrainsMono Nerd Font"` returns
+/// Andale Mono and `fc-match "DejaVu Sans"` returns Hiragino Sans, a CJK
+/// face. The Linux path's "resolve or fall back" contract therefore turns
+/// into "silently render the entire UI in the wrong font" here, which is
+/// why macOS asks the filesystem instead.
+#[cfg(target_os = "macos")]
+mod mac {
+    use std::path::{Path, PathBuf};
+
+    /// Monospace faces present on every Mac, best first. SF Mono is Apple's
+    /// developer face (shipped as the system `SFNSMono`, and inside
+    /// Terminal.app); Menlo and Monaco are the long-standing fallbacks.
+    pub const MONO_FILES: &[&str] = &[
+        "/System/Library/Fonts/SFNSMono.ttf",
+        "/System/Applications/Utilities/Terminal.app/Contents/Resources/Fonts/SF-Mono-Regular.otf",
+        "/Library/Fonts/SF-Mono-Regular.otf",
+        "/System/Library/Fonts/Menlo.ttc",
+        "/System/Library/Fonts/Monaco.ttf",
+    ];
+
+    /// Family names fontdb actually exposes on macOS. The SF faces are
+    /// system-hidden (their family reads `.SF NS Mono`), so they can't be
+    /// asked for by name — these can, and are used for cell metrics.
+    pub const MONO_FAMILIES: &[&str] = &["Menlo", "Monaco", "Courier New"];
+    pub const UI_FAMILIES: &[&str] = &["SF Pro Text", "Helvetica Neue", "Menlo"];
+
+    /// Monochrome faces broadening glyph coverage. Apple Color Emoji is
+    /// deliberately absent: it is a color (sbix) face that egui's
+    /// rasterizer renders as blanks.
+    pub const FALLBACK_FILES: &[(&str, &str)] = &[
+        ("Menlo", "/System/Library/Fonts/Menlo.ttc"),
+        ("Monaco", "/System/Library/Fonts/Monaco.ttf"),
+        ("Apple Symbols", "/System/Library/Fonts/Apple Symbols.ttf"),
+    ];
+
+    pub fn first_existing(paths: &[&str]) -> Option<PathBuf> {
+        paths.iter().map(PathBuf::from).find(|p| p.is_file())
+    }
+
+    fn dirs() -> Vec<PathBuf> {
+        let mut v = vec![
+            PathBuf::from("/System/Library/Fonts"),
+            PathBuf::from("/System/Library/Fonts/Supplemental"),
+            PathBuf::from("/Library/Fonts"),
+        ];
+        if let Some(home) = std::env::var_os("HOME") {
+            v.push(Path::new(&home).join("Library/Fonts"));
+        }
+        v
+    }
+
+    fn squash(s: &str) -> String {
+        s.chars()
+            .filter(char::is_ascii_alphanumeric)
+            .collect::<String>()
+            .to_lowercase()
+    }
+
+    /// Find a user-named family by filename, so someone who installed, say,
+    /// JetBrainsMono Nerd Font still gets it via `ZODIAC_GUI_UI_FONT` —
+    /// the env override keeps working, it just isn't fontconfig doing it.
+    pub fn find_family_file(family: &str) -> Option<PathBuf> {
+        let want = squash(family);
+        if want.is_empty() {
+            return None;
+        }
+        for dir in dirs() {
+            let Ok(entries) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            let mut loose: Option<PathBuf> = None;
+            for e in entries.flatten() {
+                let p = e.path();
+                let is_font = p
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .is_some_and(|x| matches!(x.to_lowercase().as_str(), "ttf" | "ttc" | "otf"));
+                if !is_font {
+                    continue;
+                }
+                let stem = squash(p.file_stem().and_then(|s| s.to_str()).unwrap_or(""));
+                if stem.is_empty() || !stem.contains(&want) {
+                    continue;
+                }
+                // Prefer the regular cut over Bold/Italic/Heavy variants.
+                if stem == want || stem.ends_with("regular") {
+                    return Some(p);
+                }
+                loose.get_or_insert(p);
+            }
+            if loose.is_some() {
+                return loose;
+            }
+        }
+        None
+    }
+}
+
 pub struct Fonts {
     pub system: FontSystem,
     pub family: String,
@@ -74,6 +176,12 @@ fn pick_family(fs: &FontSystem) -> String {
         }
         eprintln!("zodiac-gui: ZODIAC_GUI_FONT '{name}' not found, falling back");
     }
+    #[cfg(target_os = "macos")]
+    for name in mac::MONO_FAMILIES {
+        if exists(name) {
+            return (*name).to_string();
+        }
+    }
     if let Some(name) = fc_match_mono() {
         if exists(&name) {
             return name;
@@ -95,6 +203,12 @@ fn pick_ui_family(fs: &FontSystem, mono_fallback: &str) -> String {
     if let Ok(name) = std::env::var("ZODIAC_GUI_UI_FONT") {
         if exists(&name) {
             return name;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    for name in mac::UI_FAMILIES {
+        if exists(name) {
+            return (*name).to_string();
         }
     }
     if let Some(name) = fc_match("sans-serif") {
@@ -141,11 +255,25 @@ fn fc_match_file(pattern: &str) -> Option<std::path::PathBuf> {
 /// default (`ZODIAC_GUI_UI_FONT` overrides the family); the Nerd glyphs cover
 /// the UI's symbols. `None` if fontconfig can't resolve or the file can't be
 /// read — egui then keeps its built-in font.
+#[cfg(not(target_os = "macos"))]
 pub fn egui_ui_font() -> Option<Vec<u8>> {
     let fam =
         std::env::var("ZODIAC_GUI_UI_FONT").unwrap_or_else(|_| "JetBrainsMono Nerd Font".into());
     let path = fc_match_file(&fam).or_else(|| fc_match_file("monospace"))?;
     std::fs::read(path).ok()
+}
+
+/// macOS: SF Mono, the face a Mac developer expects to be looking at.
+/// `ZODIAC_GUI_UI_FONT` still wins when the named family is installed.
+#[cfg(target_os = "macos")]
+pub fn egui_ui_font() -> Option<Vec<u8>> {
+    if let Ok(fam) = std::env::var("ZODIAC_GUI_UI_FONT") {
+        if let Some(bytes) = mac::find_family_file(&fam).and_then(|p| std::fs::read(p).ok()) {
+            return Some(bytes);
+        }
+        eprintln!("zodiac-gui: ZODIAC_GUI_UI_FONT '{fam}' not installed, using the system mono face");
+    }
+    std::fs::read(mac::first_existing(mac::MONO_FILES)?).ok()
 }
 
 /// Extra fallback faces appended after the primary font so the terminal can
@@ -158,6 +286,17 @@ pub fn egui_ui_font() -> Option<Vec<u8>> {
 pub fn egui_fallback_fonts() -> Vec<(String, Vec<u8>)> {
     let mut out = Vec::new();
     let mut seen = std::collections::HashSet::new();
+    #[cfg(target_os = "macos")]
+    for (name, path) in mac::FALLBACK_FILES {
+        let path = std::path::PathBuf::from(path);
+        if !path.is_file() || !seen.insert(path.clone()) {
+            continue;
+        }
+        if let Ok(bytes) = std::fs::read(&path) {
+            out.push((format!("fallback-{name}"), bytes));
+        }
+    }
+    #[cfg(not(target_os = "macos"))]
     for fam in ["Symbols Nerd Font", "DejaVu Sans", "Noto Emoji"] {
         let Some(path) = fc_match_file(fam) else {
             continue;

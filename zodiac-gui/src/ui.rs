@@ -36,6 +36,37 @@ pub enum Overlay {
     Oracle,
     /// Raise-the-last-session dialog (Alt+Shift+R).
     Raise,
+    /// New-agent picker: choose a harness, then a model (Alt+N).
+    NewAgent,
+}
+
+/// One selectable model for a harness in the new-agent picker.
+#[derive(Clone)]
+pub struct ModelChoice {
+    /// Passed to the harness as its `--model` value; `None` = harness default.
+    pub value: Option<String>,
+    pub label: String,
+}
+
+/// A locally-available agent harness and the models it can run.
+#[derive(Clone)]
+pub struct HarnessInfo {
+    /// The `agent` value for `T_NEW_PANE` (e.g. "claude", "pi").
+    pub name: String,
+    /// Display label (e.g. "Claude").
+    pub label: String,
+    pub models: Vec<ModelChoice>,
+}
+
+/// New-agent picker state: the detected harnesses and where the user is in
+/// the two-step (harness → model) flow. Populated when the picker opens.
+#[derive(Default)]
+pub struct AgentPicker {
+    pub harnesses: Vec<HarnessInfo>,
+    /// 0 = choosing a harness, 1 = choosing a model.
+    pub step: usize,
+    pub h_sel: usize,
+    pub m_sel: usize,
 }
 
 /// Mutable UI state egui edits in place across frames (buffers + overlays).
@@ -52,6 +83,8 @@ pub struct UiState {
     pub perm_sel: usize,
     /// An in-progress/last terminal text selection (cleared on pane switch).
     pub term_sel: Option<TermSel>,
+    /// New-agent picker state (harness + model), populated when it opens.
+    pub agent_picker: AgentPicker,
     /// The focused pane's measured terminal-area grid: (rows, cols, cell_w_px,
     /// cell_h_px). The app sends this as `T_RESIZE` so the pty matches the
     /// actual egui terminal widget, not the legacy full-window grid.
@@ -115,8 +148,13 @@ pub enum UiAction {
     Quit,
     /// Spawn a new shell pane.
     NewShell,
-    /// Spawn a new claude agent pane.
+    /// Open the new-agent picker (choose harness + model).
     NewAgent,
+    /// Create an agent pane with the chosen harness + model (from the picker).
+    CreateAgent {
+        agent: String,
+        model: Option<String>,
+    },
 }
 
 /// Immutable view of the app state the UI reads for one frame.
@@ -257,6 +295,7 @@ pub fn build(
         Overlay::Pairing => pairing_dialog(ui, d, st, actions),
         Overlay::Oracle => oracle_dialog(ui, st, d.motion),
         Overlay::Raise => raise_dialog(ui, d, st, actions),
+        Overlay::NewAgent => new_agent_dialog(ui, st, actions),
         Overlay::None => {}
     }
     // A 1px edge border to define the borderless window (decorations are off).
@@ -2163,6 +2202,289 @@ fn terminal_view(ui: &mut egui::Ui, st: &mut UiState, p: &CPane) {
                     }
                 });
         });
+}
+
+const PICKER_NUM_KEYS: [egui::Key; 9] = [
+    egui::Key::Num1,
+    egui::Key::Num2,
+    egui::Key::Num3,
+    egui::Key::Num4,
+    egui::Key::Num5,
+    egui::Key::Num6,
+    egui::Key::Num7,
+    egui::Key::Num8,
+    egui::Key::Num9,
+];
+
+/// Apply a picker selection: on the harness step, advance to the model step
+/// (or create straight away when the harness has a single model); on the
+/// model step, emit `CreateAgent` and close.
+fn agent_activate(
+    st: &mut UiState,
+    actions: &mut Vec<UiAction>,
+    step: usize,
+    h_sel: usize,
+    i: usize,
+) {
+    let n_h = st.agent_picker.harnesses.len();
+    if n_h == 0 {
+        return;
+    }
+    if step == 0 {
+        let i = i.min(n_h - 1);
+        st.agent_picker.h_sel = i;
+        let h = &st.agent_picker.harnesses[i];
+        if h.models.len() <= 1 {
+            let model = h.models.first().and_then(|m| m.value.clone());
+            let agent = h.name.clone();
+            actions.push(UiAction::CreateAgent { agent, model });
+            st.overlay = Overlay::None;
+        } else {
+            st.agent_picker.step = 1;
+            st.agent_picker.m_sel = 0;
+        }
+    } else {
+        let h = &st.agent_picker.harnesses[h_sel.min(n_h - 1)];
+        let model = h.models.get(i).and_then(|m| m.value.clone());
+        let agent = h.name.clone();
+        actions.push(UiAction::CreateAgent { agent, model });
+        st.overlay = Overlay::None;
+    }
+}
+
+/// New-agent picker (Alt+N): choose a harness, then a model. Navigable by
+/// mouse, number keys, ↑/↓ (or j/k), and Enter; Esc backs out a step or
+/// closes. Emits `UiAction::CreateAgent` with the chosen harness + model.
+fn new_agent_dialog(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<UiAction>) {
+    let screen = ui
+        .ctx()
+        .input(|i| i.raw.screen_rect)
+        .unwrap_or_else(|| ui.max_rect());
+    ui.painter().rect_filled(
+        screen,
+        CornerRadius::ZERO,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 150),
+    );
+    if st.agent_picker.harnesses.is_empty() {
+        if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+            st.overlay = Overlay::None;
+        }
+        egui::Area::new(egui::Id::new("new_agent"))
+            .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+            .order(egui::Order::Foreground)
+            .show(ui.ctx(), |ui| {
+                Frame::NONE
+                    .fill(theme::bg_card())
+                    .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
+                    .corner_radius(CornerRadius::same(14))
+                    .inner_margin(Margin::same(20))
+                    .show(ui, |ui| {
+                        ui.set_width(440.0);
+                        ui.label(
+                            RichText::new("No agent harnesses found")
+                                .color(theme::TEXT_PRIMARY)
+                                .size(16.0)
+                                .strong(),
+                        );
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new(
+                                "Install claude or pi on your PATH to start a structured agent.",
+                            )
+                            .color(theme::TEXT_DIM)
+                            .size(12.5),
+                        );
+                    });
+            });
+        return;
+    }
+
+    let step = st.agent_picker.step;
+    let n_h = st.agent_picker.harnesses.len();
+    let h_sel = st.agent_picker.h_sel.min(n_h - 1);
+    let (title, rows): (String, Vec<(String, String)>) = if step == 0 {
+        (
+            "New agent · choose a harness".to_string(),
+            st.agent_picker
+                .harnesses
+                .iter()
+                .map(|h| {
+                    let n = h.models.len();
+                    (
+                        h.label.clone(),
+                        format!("{n} model{}", if n == 1 { "" } else { "s" }),
+                    )
+                })
+                .collect(),
+        )
+    } else {
+        let h = &st.agent_picker.harnesses[h_sel];
+        (
+            format!("{} · choose a model", h.label),
+            h.models
+                .iter()
+                .map(|m| {
+                    (
+                        m.label.clone(),
+                        m.value.clone().unwrap_or_else(|| "harness default".into()),
+                    )
+                })
+                .collect(),
+        )
+    };
+    let count = rows.len();
+
+    let mut activate: Option<usize> = None;
+    let mut back = false;
+    ui.input(|i| {
+        let down = i.key_pressed(egui::Key::ArrowDown) || i.key_pressed(egui::Key::J);
+        let up = i.key_pressed(egui::Key::ArrowUp) || i.key_pressed(egui::Key::K);
+        let enter = i.key_pressed(egui::Key::Enter);
+        if i.key_pressed(egui::Key::Escape) {
+            back = true;
+        }
+        let mut num = None;
+        for (n, key) in PICKER_NUM_KEYS.iter().enumerate().take(count.min(9)) {
+            if i.key_pressed(*key) {
+                num = Some(n);
+            }
+        }
+        let cur = if step == 0 {
+            &mut st.agent_picker.h_sel
+        } else {
+            &mut st.agent_picker.m_sel
+        };
+        if count > 0 {
+            if down {
+                *cur = (*cur + 1).min(count - 1);
+            }
+            if up {
+                *cur = cur.saturating_sub(1);
+            }
+            if let Some(n) = num {
+                *cur = n;
+                activate = Some(n);
+            }
+            if enter {
+                activate = Some((*cur).min(count - 1));
+            }
+        }
+    });
+    if back {
+        if step == 1 && n_h > 1 {
+            st.agent_picker.step = 0;
+        } else {
+            st.overlay = Overlay::None;
+        }
+        return;
+    }
+    if let Some(i) = activate {
+        agent_activate(st, actions, step, h_sel, i);
+        return;
+    }
+
+    let sel = if step == 0 {
+        st.agent_picker.h_sel
+    } else {
+        st.agent_picker.m_sel
+    }
+    .min(count.saturating_sub(1));
+    let mut clicked: Option<usize> = None;
+    egui::Area::new(egui::Id::new("new_agent"))
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            Frame::NONE
+                .fill(theme::bg_card())
+                .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
+                .corner_radius(CornerRadius::same(14))
+                .inner_margin(Margin::same(20))
+                .show(ui, |ui| {
+                    ui.set_width(480.0);
+                    ui.label(
+                        RichText::new(&title)
+                            .color(theme::TEXT_PRIMARY)
+                            .size(17.0)
+                            .strong(),
+                    );
+                    ui.add_space(12.0);
+                    for (i, (label, sub)) in rows.iter().enumerate() {
+                        if picker_row(ui, i + 1, label, sub, i == sel).clicked() {
+                            clicked = Some(i);
+                        }
+                        ui.add_space(6.0);
+                    }
+                    ui.add_space(2.0);
+                    let hint = if step == 0 && n_h > 1 {
+                        "↑↓ move · 1–9 pick · enter choose · esc cancel"
+                    } else {
+                        "↑↓ move · 1–9 pick · enter start · esc back"
+                    };
+                    ui.label(RichText::new(hint).color(theme::TEXT_FAINT).size(11.0));
+                });
+        });
+    if let Some(i) = clicked {
+        agent_activate(st, actions, step, h_sel, i);
+    }
+}
+
+/// A two-line option row (label + dim sub) for the new-agent picker.
+fn picker_row(
+    ui: &mut egui::Ui,
+    num: usize,
+    label: &str,
+    sub: &str,
+    selected: bool,
+) -> egui::Response {
+    let (rect, resp) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 46.0), Sense::click());
+    let hovered = resp.hovered();
+    let bg = if selected {
+        theme::bg_selected()
+    } else if hovered {
+        theme::bg_raised()
+    } else {
+        theme::bg_panel()
+    };
+    let edge = if selected {
+        theme::accent()
+    } else {
+        theme::LINE_BORDER
+    };
+    let paint = ui.painter();
+    paint.rect(
+        rect,
+        CornerRadius::same(9),
+        bg,
+        Stroke::new(1.0, edge),
+        egui::StrokeKind::Inside,
+    );
+    paint.text(
+        rect.left_center() + egui::vec2(14.0, 0.0),
+        egui::Align2::LEFT_CENTER,
+        num.to_string(),
+        egui::FontId::monospace(13.0),
+        theme::accent(),
+    );
+    paint.text(
+        rect.left_center() + egui::vec2(40.0, -8.0),
+        egui::Align2::LEFT_CENTER,
+        label,
+        egui::FontId::proportional(14.5),
+        if selected {
+            theme::TEXT_PRIMARY
+        } else {
+            theme::TEXT_BODY
+        },
+    );
+    paint.text(
+        rect.left_center() + egui::vec2(40.0, 10.0),
+        egui::Align2::LEFT_CENTER,
+        sub,
+        egui::FontId::monospace(11.5),
+        theme::TEXT_FAINT,
+    );
+    resp
 }
 
 /// A small segmented-control button; returns true when clicked.

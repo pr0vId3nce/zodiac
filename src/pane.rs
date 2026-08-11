@@ -298,18 +298,21 @@ impl SrvPane {
     /// process on pipes, its NDJSON relayed as `T_AGENT_EVENT`. The VT
     /// engine fields stay allocated (tiny) but idle — no bytes ever reach
     /// them.
+    #[allow(clippy::too_many_arguments)]
     pub fn spawn_agent(
         id: u64,
         name: Option<String>,
         kind: crate::agent::AgentKind,
         cwd: Option<PathBuf>,
         session: Option<String>,
+        model: Option<String>,
         tx: Sender<SrvEvent>,
     ) -> Result<Self> {
         let mut rt = crate::agent::AgentRuntime::new(
             kind,
             cwd.filter(|d| d.is_dir())
                 .or_else(|| std::env::current_dir().ok()),
+            model,
         );
         rt.session_id = session;
         rt.spawn_process(id, &tx)?;

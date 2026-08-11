@@ -585,6 +585,10 @@ impl Server {
                     agent: Option<String>,
                     #[serde(default)]
                     cwd: Option<String>,
+                    /// Model as the harness expects it (claude `--model` alias,
+                    /// or pi `provider/id`). None = harness default.
+                    #[serde(default)]
+                    model: Option<String>,
                 }
                 let req: Option<NewPane> = serde_json::from_slice(&f.data).ok();
                 match req {
@@ -594,7 +598,8 @@ impl Server {
                             .as_deref()
                             .and_then(crate::agent::AgentKind::parse)
                             .unwrap_or(crate::agent::AgentKind::Claude);
-                        let _ = self.new_agent_pane(kind, r.cwd.map(PathBuf::from), None);
+                        let model = r.model.filter(|m| !m.is_empty());
+                        let _ = self.new_agent_pane(kind, r.cwd.map(PathBuf::from), None, model);
                     }
                     _ => {
                         let _ = self.new_pane(None, None, Vec::new(), true);
@@ -1044,10 +1049,11 @@ impl Server {
         kind: crate::agent::AgentKind,
         cwd: Option<PathBuf>,
         session: Option<String>,
+        model: Option<String>,
     ) -> Result<u64> {
         let id = self.next_id;
         self.next_id += 1;
-        let pane = SrvPane::spawn_agent(id, None, kind, cwd, session, self.tx.clone())?;
+        let pane = SrvPane::spawn_agent(id, None, kind, cwd, session, model, self.tx.clone())?;
         let pname = pane.name.clone();
         self.panes.push(pane);
         self.dirty = true;
@@ -1677,9 +1683,12 @@ impl Server {
                     .as_deref()
                     .and_then(crate::agent::AgentKind::parse)
                     .unwrap_or(crate::agent::AgentKind::Claude);
-                if let Ok(id) =
-                    self.new_agent_pane(kind, sp.cwd.clone().map(PathBuf::from), sp.chat_id.clone())
-                {
+                if let Ok(id) = self.new_agent_pane(
+                    kind,
+                    sp.cwd.clone().map(PathBuf::from),
+                    sp.chat_id.clone(),
+                    None,
+                ) {
                     if let Some(p) = self.pane_mut(id) {
                         if sp.renamed {
                             p.name = sp.name.clone();

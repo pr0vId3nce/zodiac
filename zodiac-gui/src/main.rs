@@ -12,6 +12,7 @@
 // re-consumes them.
 #![allow(dead_code)]
 
+mod agents;
 mod anim;
 mod app;
 mod font;

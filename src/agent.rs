@@ -49,6 +49,10 @@ impl AgentKind {
 pub struct AgentRuntime {
     pub kind: AgentKind,
     pub cwd: Option<PathBuf>,
+    /// The model to run, as the harness expects it (a claude `--model` alias
+    /// like "opus", or a pi `provider/id` like "llama-local/qwen3.6-35b-a3b").
+    /// `None` = the harness default.
+    pub model: Option<String>,
     /// Captured from the agent's init/session event; used for `--resume` /
     /// `--session-id` relaunches (structured retry + snapshot restore).
     pub session_id: Option<String>,
@@ -75,10 +79,11 @@ pub struct AgentRuntime {
 }
 
 impl AgentRuntime {
-    pub fn new(kind: AgentKind, cwd: Option<PathBuf>) -> Self {
+    pub fn new(kind: AgentKind, cwd: Option<PathBuf>, model: Option<String>) -> Self {
         Self {
             kind,
             cwd,
+            model,
             session_id: None,
             events: VecDeque::new(),
             events_bytes: 0,
@@ -126,6 +131,9 @@ impl AgentRuntime {
                 if let Some(sid) = &self.session_id {
                     c.args(["--resume", sid]);
                 }
+                if let Some(m) = &self.model {
+                    c.args(["--model", m]);
+                }
                 c
             }
             AgentKind::Pi => {
@@ -133,6 +141,9 @@ impl AgentRuntime {
                 c.args(["--mode", "rpc"]);
                 if let Some(sid) = &self.session_id {
                     c.args(["--session-id", sid]);
+                }
+                if let Some(m) = &self.model {
+                    c.args(["--model", m]);
                 }
                 c
             }
@@ -304,7 +315,7 @@ mod tests {
 
     #[test]
     fn ring_is_bounded() {
-        let mut rt = AgentRuntime::new(AgentKind::Claude, None);
+        let mut rt = AgentRuntime::new(AgentKind::Claude, None, None);
         let line = vec![b'x'; 1024];
         for _ in 0..(3 * RING_BYTES / 1024) {
             rt.ring_push(&line);
@@ -319,9 +330,9 @@ mod tests {
     fn user_text_shapes() {
         // No process: send fails but the shapes are exercised via the
         // builder (the JSON forms are pinned by ADR 0002 probes).
-        let mut rt = AgentRuntime::new(AgentKind::Claude, None);
+        let mut rt = AgentRuntime::new(AgentKind::Claude, None, None);
         assert!(!rt.send_user_text("hi"));
-        let mut rt = AgentRuntime::new(AgentKind::Pi, None);
+        let mut rt = AgentRuntime::new(AgentKind::Pi, None, None);
         assert!(!rt.send_user_text("hi"));
     }
 }

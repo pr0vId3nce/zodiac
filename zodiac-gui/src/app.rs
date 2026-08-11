@@ -150,11 +150,12 @@ impl GuiApp {
             5 => self.ui_state.overlay = Overlay::Oracle,
             6 => self.ui_state.overlay = Overlay::Pairing,
             7 => self.ui_state.overlay = Overlay::Raise,
-            8 => {
+            8 => self.open_agent_picker(), // new-agent picker (harness + model)
+            9 => {
                 self.ui_state.overlay = Overlay::None;
                 self.screen = Screen::Observatory;
             }
-            9 => {
+            10 => {
                 // Seed a synthetic agent pane with the full range of rich
                 // transcript items + a pending permission, then focus it in
                 // transcript mode so every new render path (thinking, tool
@@ -259,6 +260,22 @@ impl GuiApp {
         if let Some(r) = &self.renderer {
             r.window.request_redraw();
         }
+    }
+
+    /// Open the new-agent picker: detect locally-available harnesses + their
+    /// models, then show the modal (starting at the model step when there's
+    /// only one harness).
+    fn open_agent_picker(&mut self) {
+        let harnesses = crate::agents::harnesses();
+        let step = if harnesses.len() > 1 { 0 } else { 1 };
+        self.ui_state.agent_picker = crate::ui::AgentPicker {
+            harnesses,
+            step,
+            h_sel: 0,
+            m_sel: 0,
+        };
+        self.ui_state.overlay = crate::ui::Overlay::NewAgent;
+        self.request_redraw();
     }
 
     fn focus(&mut self, idx: usize) {
@@ -627,13 +644,13 @@ impl GuiApp {
                 Key::Named(NamedKey::ArrowRight) if !side => return next(self),
                 Key::Named(NamedKey::ArrowUp) if side => return prev(self),
                 Key::Named(NamedKey::ArrowDown) if side => return next(self),
-                // Alt+N new claude agent pane (structured, the default);
-                // Alt+Shift+N new shell pane.
+                // Alt+N opens the new-agent picker (harness + model, the
+                // default); Alt+Shift+N opens a shell pane directly.
                 Key::Character(s) if s.eq_ignore_ascii_case("n") => {
                     if self.mods.shift_key() {
                         self.send(T_NEW_PANE, 0, &[]);
                     } else {
-                        self.send(T_NEW_PANE, 0, br#"{"kind":"agent","agent":"claude"}"#);
+                        self.open_agent_picker();
                     }
                     return;
                 }
@@ -1221,8 +1238,13 @@ impl GuiApp {
                     }
                 }
                 crate::ui::UiAction::NewShell => self.send(T_NEW_PANE, 0, &[]),
-                crate::ui::UiAction::NewAgent => {
-                    self.send(T_NEW_PANE, 0, br#"{"kind":"agent","agent":"claude"}"#)
+                crate::ui::UiAction::NewAgent => self.open_agent_picker(),
+                crate::ui::UiAction::CreateAgent { agent, model } => {
+                    let mut obj = serde_json::json!({ "kind": "agent", "agent": agent });
+                    if let Some(m) = model {
+                        obj["model"] = serde_json::Value::String(m);
+                    }
+                    self.send(T_NEW_PANE, 0, obj.to_string().as_bytes());
                 }
             }
         }

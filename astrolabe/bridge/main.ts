@@ -93,9 +93,9 @@ function rememberSessionToken(tok: string) {
 if (!TOKEN && !sessionToken) {
   console.error(
     "astrolabe: ASTROLABE_TOKEN is not set and no pairing token is known yet — " +
-      "until zodiac connects once (or a phone scans a pairing QR, zodiac's " +
-      "Alt+P), the bridge is running with NO authentication. Anyone who can " +
-      "reach this tailnet IP can read and control every pane."
+      "control paths (/ws, /api) are DENIED until zodiac connects and reports a " +
+      "pairing token (it does automatically), or you set ASTROLABE_TOKEN. The " +
+      "PWA still loads and will connect once a token exists."
   );
 }
 
@@ -108,13 +108,22 @@ function constantTimeEq(a: string, b: string): boolean {
 /** Accepts either the static ASTROLABE_TOKEN (if configured) or the live
     per-launch `sessionToken` the connected zodiac server reports — whoever
     scanned the current QR has this one, without any admin having typed a
-    secret anywhere. If neither is ever set (old zodiac server, or no
-    bridge/zodiac link at all yet), stays unauthenticated for backward
-    compat — see the startup warning above, which fires either way. */
+    secret anywhere. Fails CLOSED: if no token exists yet (old zodiac server
+    with no pairing token, or the zodiac link isn't up), control paths are
+    denied rather than served to the whole tailnet. The zodiac server reports
+    a pairing token automatically, so this only gates the brief startup window
+    (the PWA reconnects) or a genuinely token-less deployment. */
 function tokenOk(supplied: string | null): boolean {
   const candidates = [TOKEN, sessionToken].filter((t): t is string => !!t);
-  if (candidates.length === 0) return true;
+  if (candidates.length === 0) return false;
   return !!supplied && candidates.some((c) => constantTimeEq(supplied, c));
+}
+
+/** True once any accepting token exists (static ASTROLABE_TOKEN or the learned
+    per-launch pairing token). Lets callers tell a transient "not ready yet"
+    (no token learned — retry) apart from a genuine "wrong token". */
+function haveToken(): boolean {
+  return !!(TOKEN || sessionToken);
 }
 
 /// This machine's tailnet IPv4, read straight off the interface list: a
@@ -726,6 +735,10 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
   if (!url.startsWith("/api/")) return false;
   const auth = req.headers.authorization;
   const supplied = auth?.startsWith("Bearer ") ? auth.slice(7) : null;
+  if (!haveToken()) {
+    json(res, 503, { error: "not ready" });
+    return true;
+  }
   if (!tokenOk(supplied)) {
     json(res, 401, { error: "unauthorized" });
     return true;
@@ -887,16 +900,24 @@ async function handleApi(req: http.IncomingMessage, res: http.ServerResponse, ur
 const server = http.createServer(async (req, res) => {
   const url = (req.url || "/").split("?")[0];
   if (url === "/healthz") {
+    // Unauthenticated liveness probe — booleans only. The detailed fields
+    // (session name, pane/device counts) are reconnaissance for the tailnet,
+    // so they're gated behind the token.
+    const detail = tokenOk(new URL(req.url || "/", "http://x").searchParams.get("t"));
     res.writeHead(200, { "content-type": "application/json" });
     res.end(
       JSON.stringify({
         ok: true,
-        session: SESSION,
         link: link.up,
         watch: link.watchSupported,
-        panes: link.state?.panes.length ?? 0,
         push: apns.enabled,
-        devices: apns.deviceCount,
+        ...(detail
+          ? {
+              session: SESSION,
+              panes: link.state?.panes.length ?? 0,
+              devices: apns.deviceCount,
+            }
+          : {}),
       })
     );
     return;
@@ -962,6 +983,12 @@ wss.on("connection", (ws, req) => {
     return;
   }
   const supplied = new URL(req.url || "", "http://x").searchParams.get("t");
+  if (!haveToken()) {
+    // No pairing token learned yet (bridge just started / zodiac link down).
+    // Transient: the client should keep retrying, not show a token error.
+    ws.close(4002, "not ready");
+    return;
+  }
   if (!tokenOk(supplied)) {
     ws.close(4001, "unauthorized");
     return;

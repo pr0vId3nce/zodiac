@@ -179,16 +179,50 @@ fn load_or_mint_pairing_token(session: &str) -> String {
 /// or a sidebar toggle would light up every pane's working spinner.
 const RESIZE_SQUELCH: Duration = Duration::from_millis(1200);
 
+/// True if the connecting peer runs as our uid. The socket is owner-only, but
+/// this is a belt-and-braces `SO_PEERCRED` check so another local user can
+/// never drive the frame protocol even under a permissive umask on the
+/// `/tmp/zodiac-<uid>` fallback path.
+fn peer_is_owner(conn: &UnixStream) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut cred = libc::ucred {
+        pid: 0,
+        uid: 0,
+        gid: 0,
+    };
+    let mut len = std::mem::size_of::<libc::ucred>() as libc::socklen_t;
+    // SAFETY: getsockopt writes a `ucred` of `len` bytes into `cred`.
+    let rc = unsafe {
+        libc::getsockopt(
+            conn.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_PEERCRED,
+            &mut cred as *mut libc::ucred as *mut libc::c_void,
+            &mut len,
+        )
+    };
+    // Strict when the credentials are available (Linux); if the call fails on
+    // some platform, fall back to trusting the owner-only socket permissions.
+    rc != 0 || cred.uid == unsafe { libc::getuid() }
+}
+
 pub fn run(session: &str) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
     let sock = socket_path(session);
     if let Some(dir) = sock.parent() {
         std::fs::create_dir_all(dir)?;
+        // Owner-only socket dir: the fallback /tmp/zodiac-<uid> path is
+        // world-traversable otherwise, and the raw frame protocol grants full
+        // control (spawn panes with an arbitrary cwd, run commands, shut down).
+        let _ = std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700));
     }
     if UnixStream::connect(&sock).is_ok() {
         bail!("zodiac server already running for session '{session}'");
     }
     let _ = std::fs::remove_file(&sock);
     let listener = UnixListener::bind(&sock)?;
+    // Owner-only socket, alongside the per-connection peer-uid check below.
+    let _ = std::fs::set_permissions(&sock, std::fs::Permissions::from_mode(0o600));
 
     // Save state before dying on reboot/logout.
     let term = Arc::new(AtomicBool::new(false));
@@ -205,6 +239,11 @@ pub fn run(session: &str) -> Result<()> {
         let tx = tx.clone();
         std::thread::spawn(move || {
             for conn in listener.incoming().flatten() {
+                // Only the owning user may drive the (fully-privileged) frame
+                // protocol; reject any peer running as a different uid.
+                if !peer_is_owner(&conn) {
+                    continue;
+                }
                 if tx.send(SrvEvent::Conn(conn)).is_err() {
                     break;
                 }

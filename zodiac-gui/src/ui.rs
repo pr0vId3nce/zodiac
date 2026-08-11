@@ -1958,17 +1958,21 @@ pub(crate) fn term_selection_text(p: &CPane, sel: Option<TermSel>) -> Option<Str
     let (s, e) = sel.ordered();
     let screen = p.parser.screen();
     let (rows, cols) = screen.size();
+    if cols == 0 || rows == 0 {
+        return None;
+    }
+    let last_col = cols as usize - 1;
     let last_row = (e.0).min(rows.saturating_sub(1) as usize);
     let mut out = String::new();
     for row in s.0..=last_row {
         let (c0, c1) = match (row == s.0, row == e.0) {
             (true, true) => (s.1, e.1),
-            (true, false) => (s.1, cols as usize - 1),
+            (true, false) => (s.1, last_col),
             (false, true) => (0, e.1),
-            (false, false) => (0, cols as usize - 1),
+            (false, false) => (0, last_col),
         };
         let mut line = String::new();
-        for col in c0..=c1.min(cols as usize - 1) {
+        for col in c0..=c1.min(last_col) {
             if let Some(cell) = screen.cell(row as u16, col as u16) {
                 if !cell.is_wide_continuation() {
                     let ch = cell.contents();
@@ -2021,8 +2025,11 @@ fn terminal_view(ui: &mut egui::Ui, st: &mut UiState, p: &CPane) {
                         .allocate_exact_size(egui::vec2(cols as f32 * cw, rows as f32 * ch), sense);
                     let o = rect.min;
                     let cell_at = |pos: egui::Pos2| -> (usize, usize) {
-                        let c = (((pos.x - o.x) / cw).floor() as i32).clamp(0, cols as i32 - 1);
-                        let r = (((pos.y - o.y) / ch).floor() as i32).clamp(0, rows as i32 - 1);
+                        // `.max(0)` guards a 0-sized grid: clamp(0, -1) panics.
+                        let c = (((pos.x - o.x) / cw).floor() as i32)
+                            .clamp(0, (cols as i32 - 1).max(0));
+                        let r = (((pos.y - o.y) / ch).floor() as i32)
+                            .clamp(0, (rows as i32 - 1).max(0));
                         (r as usize, c as usize)
                     };
                     if selectable {

@@ -911,6 +911,30 @@ mod kitty_kbd_tests {
 }
 
 #[cfg(test)]
+mod scrollback_tests {
+    /// Regression for the zsh-completion crash: a big completion fills the
+    /// scrollback, then scrolling up more than one screenful set a
+    /// `scrollback_offset` larger than the live row count, underflowing
+    /// `grid::visible_rows` (panic under overflow-checks). Touch every visible
+    /// cell the way the GUI renderer does — this must not panic.
+    #[test]
+    fn scroll_past_screen_height_does_not_panic() {
+        let mut p = vt100::Parser::new(4, 20, 10_000);
+        for i in 0..200 {
+            p.process(format!("line {i}\r\n").as_bytes());
+        }
+        p.set_scrollback(120); // offset ≫ live rows (4)
+        let screen = p.screen();
+        let (rows, cols) = screen.size();
+        for r in 0..rows {
+            for c in 0..cols {
+                let _ = screen.cell(r, c);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
 mod apply_line_tests {
     use super::*;
     use serde_json::json;

@@ -117,10 +117,19 @@ impl Grid {
     pub fn visible_rows(&self) -> impl Iterator<Item = &crate::row::Row> {
         let scrollback_len = self.scrollback.len();
         let rows_len = self.rows.len();
+        // When scrolled up more than a screenful, `scrollback_offset` exceeds
+        // the live row count; `rows_len - offset` would underflow (a panic
+        // under overflow-checks, wrong content otherwise). Saturate: the whole
+        // visible window then comes from scrollback, which `skip(...)` leaves
+        // at least `rows_len` rows of.
         self.scrollback
             .iter()
             .skip(scrollback_len - self.scrollback_offset)
-            .chain(self.rows.iter().take(rows_len - self.scrollback_offset))
+            .chain(
+                self.rows
+                    .iter()
+                    .take(rows_len.saturating_sub(self.scrollback_offset)),
+            )
     }
 
     pub fn drawing_rows(&self) -> impl Iterator<Item = &crate::row::Row> {

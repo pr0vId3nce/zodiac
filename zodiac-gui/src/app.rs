@@ -1389,6 +1389,11 @@ impl ApplicationHandler<UserEvent> for GuiApp {
             }
         };
         window.set_ime_allowed(true);
+        // Install once the event loop has an NSApplication to hang it off,
+        // which is only true after a window exists. Idempotent: this path
+        // is guarded by the `renderer.is_some()` return above.
+        #[cfg(target_os = "macos")]
+        crate::macos_menu::install();
         let fonts = self.fonts.take().expect("fonts consumed once");
         match Renderer::new(window, fonts) {
             Ok(r) => {

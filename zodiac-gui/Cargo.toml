@@ -39,3 +39,18 @@ qrcode = { version = "0.14.1", default-features = false }
 # Text-only (no image-data feature — that drags the whole `image` stack);
 # wayland-data-control keeps the primary path off X11 emulation.
 arboard = { version = "3", default-features = false, features = ["wayland-data-control"] }
+
+# Native macOS menu bar (winit has no menu support). Versions match what
+# the macOS graph already resolves via arboard/winit, so this adds no new
+# objc2 copy — see Cargo.lock.
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = { version = "0.3", default-features = false, features = ["std", "NSString"] }
+objc2-app-kit = { version = "0.3", default-features = false, features = [
+    "std",
+    "NSApplication",
+    "NSEvent",
+    "NSMenu",
+    "NSMenuItem",
+    "NSResponder",
+] }

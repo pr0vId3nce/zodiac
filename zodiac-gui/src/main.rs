@@ -18,6 +18,8 @@ mod app;
 mod font;
 mod img;
 mod keys;
+#[cfg(target_os = "macos")]
+mod macos_menu;
 mod palette;
 mod placeholder;
 mod render;

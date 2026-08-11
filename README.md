@@ -49,6 +49,14 @@ is a text-composition modifier there. Fonts resolve by path (SF Mono, then
 Menlo/Monaco) rather than through fontconfig, which on a Mac answers every
 unknown family with an arbitrary face instead of failing.
 
+The Mac build installs a real menu bar, so ⌘Q, ⌘H, ⌥⌘H and ⌘M behave as
+they do in any other Mac app. It is deliberately short: a menu item's key
+equivalent is claimed by AppKit *before* the key reaches the window, so
+anything zodiac binds itself stays out of it. In particular Close Window is
+**⌘⇧W**, following Terminal.app — ⌘W closes the pane, exactly as it closes
+a tab there — and there is no Edit menu, because its standard items would
+take ⌘X/⌘C/⌘V away from the terminal view that handles them.
+
 `scripts/bundle-macos-app.sh` packages the GUI as a real `zodiac.app` —
 icon, bundle identity, retina flag, and the `zodiac` server binary copied
 in beside it so the bundle starts its own session. It also pins `PATH` via

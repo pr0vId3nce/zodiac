@@ -75,4 +75,16 @@ for libvulkan.so.1).
   60 fps on panes > 200x60, or AtlasFull occurs outside synthetic tests.
 - wgpu major-version churn costs more than a day per upgrade twice in a row
   (then consider vello/sugarloaf or freezing on an LTS-ish wgpu).
-- macOS support becomes a goal (winit/wgpu keep it open; softbuffer too).
+- ~~macOS support becomes a goal (winit/wgpu keep it open; softbuffer too).~~
+  **Done (2026-08-11).** It cost far less than "Linux only for v1" implied:
+  the graphics stack needed no changes at all — winit/wgpu ran on Metal
+  as-is, and the wgpu surface, DPI handling and egui layer were already
+  portable. What actually had to be ported was everything *around* it:
+  `fc-match` font resolution (macOS has no fontconfig, and a Homebrew one
+  answers unknown families with arbitrary faces rather than failing),
+  `with_decorations(false)` (replaced by a transparent titlebar + fullsize
+  content view so the window keeps real traffic lights), the Alt-based
+  chords (Option composes text on macOS, so they move to Command), and two
+  Linux-only syscalls in the shared lib (`SO_PEERCRED`, `LinuxClipboardKind`).
+  Both platforms build from one source tree via `cfg` gating; the Linux
+  path is unchanged.

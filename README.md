@@ -36,11 +36,25 @@ or add `zodiac.packages.${system}.default` to your system packages. Tagged
 releases (`v*`) build binaries for x86_64/aarch64 Linux and both macOS
 architectures via GitHub Actions.
 
-**Platforms.** Linux is the primary target; macOS works, including process,
-working-directory and agent detection (via libproc rather than `/proc`).
-Desktop notifications go through `notify-send`, so they're a no-op on macOS
-until something equivalent is wired up. Finish sounds use the first of
-mpv/ffplay/pw-play/paplay found on PATH.
+**Platforms.** Linux is the primary target; macOS is supported for the TUI,
+the GUI and the astrolabe bridge — including process, working-directory and
+agent detection (via libproc rather than `/proc`). Desktop notifications use
+`notify-send` on Linux and `terminal-notifier`, else `osascript`, on macOS.
+Finish sounds use the first of mpv/ffplay/pw-play/paplay/afplay on PATH.
+
+On macOS the GUI keeps the real window frame (transparent titlebar +
+fullsize content view) so it has genuine traffic lights, and zodiac's own
+chords move from Alt to Command — ⌘N, ⌘W, ⌘1‑9, ⌘⇧[ / ⌘⇧] — because Option
+is a text-composition modifier there. Fonts resolve by path (SF Mono, then
+Menlo/Monaco) rather than through fontconfig, which on a Mac answers every
+unknown family with an arbitrary face instead of failing.
+
+To keep a Mac reachable from the phone across reboots and crashes, install
+both LaunchAgents: `astrolabe/install.sh` for the bridge and
+`scripts/install-macos-agent.sh` for the zodiac session itself. A Mac with
+only the bridge running reports `"link": false` and shows zero panes.
+LaunchAgents need a logged-in user, so enable automatic login on a machine
+you reboot remotely.
 
 ## Sessions
 
@@ -396,7 +410,9 @@ why some TUIs used to take seconds to start inside a multiplexer.
 - `Shift+PgUp`/`PgDn` only reaches zodiac if your terminal passes it through
   in the alternate screen (foot, kitty, alacritty all do).
 - Scrollback is 10,000 lines per pane, in memory. Older lines are gone.
-- Desktop notifications need `notify-send`, so macOS is silent for now.
+- Desktop notifications need `notify-send` on Linux. macOS falls back to
+  `osascript`, which posts under Script Editor's identity unless
+  `terminal-notifier` is installed.
 - The background summarizer's endpoint is hardcoded in `src/monitor.rs`
   rather than configurable.
 - Two claude (or two pi) panes in the *same* directory share a session

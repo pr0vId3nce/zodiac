@@ -13,6 +13,14 @@ Two things were in flight. One is **fixed** (terminal crash), one needs the
 - **Phone client = the native iOS app**, NOT the astrolabe PWA. Ignore the PWA
   path when chasing phone issues.
 
+> **UPDATE 2026-08-11 (from the macbook): issue #2 is fixed in code.** The iOS
+> app is in this repo after all (`astrolabe/ios/`), it builds clean against
+> Xcode 26.5, and the “connecting” hang was the app discarding the bridge’s
+> WebSocket close code — a rotated pairing token looked exactly like an
+> unreachable bridge. Details and the remaining on-device checklist are in
+> **`astrolabe/ios/HANDOFF.md`**. Two premises below turned out to be wrong;
+> they’re marked inline. Nothing on the bridge needed changing.
+
 ## What shipped this session (all on `origin/main`)
 
 - `f615e34` astrolabe PWA auto-update (not relevant to the iOS app; harmless).
@@ -47,7 +55,7 @@ never reproduced it — the trigger is the **scroll**.
   second bug my repro didn’t hit — capture it by running **`zodiac-gui main`
   from a terminal** and pasting the `panicked at …` line.
 
-## Open issue #2 — iOS app stuck on “connecting” when pairing (THE macbook task)
+## Open issue #2 — iOS app stuck on “connecting” when pairing (FIXED, see above)
 
 ### Established facts (bridge/server side is 100% healthy)
 
@@ -87,6 +95,12 @@ Per `astrolabe/bridge/main.ts:733` — “**The native iOS shell talks to these
 for push, `/api/prompt` + `/api/answer` for actions, and APNs for live pushes.
 (The `/ws` WebSocket is the PWA/widget path.)
 
+> **WRONG — corrected 2026-08-11.** The native app uses **both**. It polls
+> `/api/*` for the computer *list* (`StationsModel`) and for transcripts,
+> push and replies, but a computer’s live herd screen runs on the **`/ws`
+> WebSocket** (`BridgeSession.swift`). The “connecting…” string comes from
+> the WebSocket, which is why chasing `/api` didn’t find it.
+
 ### Debug plan on the macbook
 
 1. Run the iOS app in Xcode against the live bridge; watch its **network logs**.
@@ -103,6 +117,8 @@ for push, `/api/prompt` + `/api/answer` for actions, and APNs for live pushes.
    strand it; revert that trim in `main.ts` `/healthz` handler if so.** It’s the
    one plausible server-side regression, though `/healthz` shouldn’t gate
    “connecting”.)
+   > **Ruled out 2026-08-11.** Nothing under `astrolabe/ios/Sources/` or
+   > `Widget/` requests `/healthz` at all. **Do not revert the trim.**
 5. Verify it isn’t trying `https`/`wss` against an `http` endpoint, or a stale
    cached endpoint/token from a previous pairing (clear app state / re-scan).
 

@@ -385,6 +385,7 @@ fn is_pi_title(title: &str) -> bool {
 }
 
 /// Fire-and-forget desktop notification; silently a no-op without notify-send.
+#[cfg(not(target_os = "macos"))]
 pub fn notify(summary: &str, body: &str) {
     let _ = std::process::Command::new("notify-send")
         .args(["-a", "zodiac", summary, body])
@@ -393,15 +394,60 @@ pub fn notify(summary: &str, body: &str) {
         .spawn();
 }
 
+/// macOS has no `notify-send`. `terminal-notifier` is preferred when the
+/// user has it (the alert then carries zodiac's own identity and can be
+/// clicked), and `osascript` is the always-present fallback — it ships with
+/// every macOS, so an unattended agent alert never silently vanishes.
+///
+/// Note: the osascript path posts under Script Editor's identity, so
+/// notifications must be permitted for that app in System Settings the
+/// first time. `brew install terminal-notifier` avoids the indirection.
+#[cfg(target_os = "macos")]
+pub fn notify(summary: &str, body: &str) {
+    use std::process::{Command, Stdio};
+    let quiet = |c: &mut Command| {
+        c.stdout(Stdio::null()).stderr(Stdio::null());
+    };
+    let mut tn = Command::new("terminal-notifier");
+    tn.args(["-title", "zodiac", "-subtitle", summary, "-message", body]);
+    quiet(&mut tn);
+    if tn.spawn().is_ok() {
+        return;
+    }
+    // AppleScript string literals take backslash escapes and cannot hold a
+    // raw newline; without this, a pane title containing a quote would
+    // truncate the script rather than notify (and agent output is not
+    // trusted input).
+    fn esc(s: &str) -> String {
+        s.replace('\\', "\\\\")
+            .replace('"', "\\\"")
+            .replace('\n', "\\n")
+            .replace('\r', "")
+    }
+    let script = format!(
+        "display notification \"{}\" with title \"zodiac\" subtitle \"{}\"",
+        esc(body),
+        esc(summary)
+    );
+    let mut osa = Command::new("osascript");
+    osa.args(["-e", &script]);
+    quiet(&mut osa);
+    let _ = osa.spawn();
+}
+
 /// Fire-and-forget audio playback via the first available player; silently
 /// a no-op when none is installed. mpv/ffplay decode anything (including
-/// Apple .m4r/.m4a ringtones); pw-play/paplay cover the plain formats.
+/// Apple .m4r/.m4a ringtones); pw-play/paplay cover the plain formats;
+/// afplay is macOS's built-in and needs no install. Probing is by spawn
+/// failure, so listing all of them is harmless on every platform — only
+/// the ones actually present can win.
 pub fn play_sound(path: &std::path::Path) {
     const PLAYERS: &[(&str, &[&str])] = &[
         ("mpv", &["--no-video", "--no-terminal", "--really-quiet"]),
         ("ffplay", &["-nodisp", "-autoexit", "-loglevel", "quiet"]),
         ("pw-play", &[]),
         ("paplay", &[]),
+        ("afplay", &[]),
     ];
     for (bin, args) in PLAYERS {
         let spawned = std::process::Command::new(bin)

@@ -183,6 +183,7 @@ const RESIZE_SQUELCH: Duration = Duration::from_millis(1200);
 /// this is a belt-and-braces `SO_PEERCRED` check so another local user can
 /// never drive the frame protocol even under a permissive umask on the
 /// `/tmp/zodiac-<uid>` fallback path.
+#[cfg(any(target_os = "linux", target_os = "android"))]
 fn peer_is_owner(conn: &UnixStream) -> bool {
     use std::os::fd::AsRawFd;
     let mut cred = libc::ucred {
@@ -201,9 +202,24 @@ fn peer_is_owner(conn: &UnixStream) -> bool {
             &mut len,
         )
     };
-    // Strict when the credentials are available (Linux); if the call fails on
-    // some platform, fall back to trusting the owner-only socket permissions.
+    // Strict when the credentials are available; if the call fails, fall back
+    // to trusting the owner-only socket permissions.
     rc != 0 || cred.uid == unsafe { libc::getuid() }
+}
+
+/// macOS and the BSDs have no `SO_PEERCRED`/`ucred` — `getpeereid` is the
+/// portable spelling of the same question, and it's what keeps this crate
+/// building outside Linux (`ucred` unconditionally referenced here is what
+/// broke the macOS build in 69e4f0c).
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "android"))))]
+fn peer_is_owner(conn: &UnixStream) -> bool {
+    use std::os::fd::AsRawFd;
+    let mut uid: libc::uid_t = 0;
+    let mut gid: libc::gid_t = 0;
+    // SAFETY: getpeereid writes one uid_t and one gid_t through these pointers.
+    let rc = unsafe { libc::getpeereid(conn.as_raw_fd(), &mut uid, &mut gid) };
+    let _ = gid;
+    rc != 0 || uid == unsafe { libc::getuid() }
 }
 
 pub fn run(session: &str) -> Result<()> {

@@ -312,6 +312,17 @@ impl GuiApp {
         self.request_redraw();
     }
 
+    /// Is a pane's terminal the thing on screen and taking keys? When true the
+    /// pty owns the keyboard, not egui.
+    fn in_terminal(&self) -> bool {
+        self.screen == crate::ui::Screen::Focused
+            && self.ui_state.overlay == crate::ui::Overlay::None
+            && self
+                .panes
+                .get(self.active)
+                .is_some_and(|p| !p.is_agent() || self.term_mode.contains(&p.id))
+    }
+
     fn focus(&mut self, idx: usize) {
         if idx >= self.panes.len() {
             return;
@@ -665,12 +676,14 @@ impl GuiApp {
             let prev = |me: &mut Self| {
                 if n > 0 {
                     me.focus((me.active + n - 1) % n);
+                    me.screen = crate::ui::Screen::Focused;
                     me.request_redraw();
                 }
             };
             let next = |me: &mut Self| {
                 if n > 0 {
                     me.focus((me.active + 1) % n);
+                    me.screen = crate::ui::Screen::Focused;
                     me.request_redraw();
                 }
             };
@@ -713,6 +726,9 @@ impl GuiApp {
                 if let Some(d) = s.chars().next().and_then(|c| c.to_digit(10)) {
                     if d >= 1 && (d as usize) <= self.panes.len() {
                         self.focus(d as usize - 1);
+                        // Jumping to a pane should show it, not just mark it
+                        // active behind the Observatory.
+                        self.screen = crate::ui::Screen::Focused;
                         self.request_redraw();
                     }
                     return;
@@ -767,12 +783,7 @@ impl GuiApp {
         // view. Everywhere else — Observatory, agent transcript (the egui
         // composer owns input), and while any overlay is open — egui owns the
         // keyboard, so unfocused keystrokes must not leak into a pty.
-        let in_terminal = self.screen == crate::ui::Screen::Focused
-            && self.ui_state.overlay == crate::ui::Overlay::None
-            && self
-                .panes
-                .get(self.active)
-                .is_some_and(|p| !p.is_agent() || self.term_mode.contains(&p.id));
+        let in_terminal = self.in_terminal();
         if !in_terminal {
             return;
         }
@@ -1014,12 +1025,7 @@ impl GuiApp {
     fn on_ime(&mut self, text: String) {
         // Same rule as on_key: IME text reaches a pty only in the focused
         // terminal view; elsewhere egui's own text widgets own IME.
-        let in_terminal = self.screen == crate::ui::Screen::Focused
-            && self.ui_state.overlay == crate::ui::Overlay::None
-            && self
-                .panes
-                .get(self.active)
-                .is_some_and(|p| !p.is_agent() || self.term_mode.contains(&p.id));
+        let in_terminal = self.in_terminal();
         if !in_terminal {
             return;
         }
@@ -1630,12 +1636,24 @@ impl ApplicationHandler<UserEvent> for GuiApp {
         // the keystroke/click belongs to a widget, not to a pane's pty.
         let win = self.renderer.as_ref().map(|r| r.window.clone());
         let mut consumed = false;
+        let in_terminal = self.in_terminal();
         if let (Some(st), Some(win)) = (self.egui_state.as_mut(), win.as_ref()) {
             let resp = st.on_window_event(win, &event);
             if resp.repaint {
                 win.request_redraw();
             }
             consumed = resp.consumed;
+            // While a terminal is on screen the pty owns the keyboard. egui
+            // treats Tab as focus traversal, so one Tab moved focus onto a
+            // widget and from then on egui reported every keystroke as
+            // consumed — `on_key` stopped forwarding and the pane looked
+            // frozen until a pane switch reset focus. (The pty was always
+            // fine: input sent over the CLI still worked.) Overlays and the
+            // agent composer are excluded by `in_terminal`, so they keep
+            // their keys.
+            if in_terminal && matches!(event, WindowEvent::KeyboardInput { .. }) {
+                consumed = false;
+            }
         }
         match event {
             WindowEvent::CloseRequested => {

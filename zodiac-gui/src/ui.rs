@@ -3067,6 +3067,14 @@ pub(crate) fn term_selection_text(p: &CPane, sel: Option<TermSel>) -> Option<Str
 
 fn terminal_view(ui: &mut egui::Ui, st: &mut UiState, p: &CPane, scale: f32) {
     use crate::palette::{cell_colors, CellStyle};
+    // The pty owns the keyboard here: drop any widget focus egui may still be
+    // holding (a Tab press is focus traversal to egui, and a focused widget
+    // would keep swallowing keys that belong to the terminal).
+    ui.memory_mut(|m| {
+        if let Some(id) = m.focused() {
+            m.surrender_focus(id);
+        }
+    });
     let c32 = |c: [u8; 3]| Color32::from_rgb(c[0], c[1], c[2]);
     let font = egui::FontId::monospace(13.0 * scale);
     let (cw, ch) = ui.fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));

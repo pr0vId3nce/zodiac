@@ -114,8 +114,6 @@ delay (used by unattended smoke tests).
 
 - **Kitty graphics inside terminal mode** — the grid shows text + colors but
   not images; compositing the wgpu image pipeline into egui is a follow-on.
-- **Terminal-mode pty resize** — renders the pane's existing screen size; the
-  pty isn't yet resized to the terminal widget.
 - **Output-rate sparklines / activity histogram** — blocked: `PaneState`
   carries no rate buckets (needs a server/protocol addition).
 - **Instrument Sans** — the UI uses egui's default proportional font; the OFL

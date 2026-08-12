@@ -12,6 +12,12 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 12. README: drop stale "pty not resized" gap
+The known-gaps list claimed terminal-mode pty resize wasn't implemented, but
+the focused terminal's measured grid (`st.term_grid`) is sent via
+`apply_grid` → `T_RESIZE` every frame, so panes are resized to the widget.
+Removed the outdated bullet. `zodiac-gui/README.md`.
+
 ### 11. README: document the new features
 Updated `zodiac-gui/README.md` to reflect what shipped: Observatory
 arrow/Enter nav + vertical cards, transcript markdown (h1–h6, nested lists,

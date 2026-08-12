@@ -49,6 +49,20 @@ pub fn is_zodiac_handled(name: &str) -> bool {
     matches!(name, "resume")
 }
 
+/// Every command available to a pane of `harness` rooted at `cwd`.
+///
+/// Only claude has an enumerable command set: its built-ins are known, and
+/// user/project command files and skills are on disk. Pi's built-ins live
+/// inside its binary with nothing on disk to read, so rather than ship a
+/// guessed list that might not work, pi gets only what is genuinely
+/// discoverable — today, nothing, so no picker appears.
+pub fn commands_for(harness: &str, cwd: Option<&std::path::Path>) -> Vec<SlashCmd> {
+    match harness {
+        "claude" => commands(cwd),
+        _ => Vec::new(),
+    }
+}
+
 /// Every command available to a claude pane rooted at `cwd`, sorted by name.
 /// Discovery touches the filesystem, so results are cached per cwd.
 pub fn commands(cwd: Option<&std::path::Path>) -> Vec<SlashCmd> {

@@ -1,153 +1,95 @@
-# Zodiac — plan for the remaining work
+# Zodiac — plan status
 
-_Written 2026-08-12. One list, ordered so that the things most likely to bite a
-user come first and the speculative work comes last. Every item says how it
-will be **verified**, because several past "fixes" here were wrong until they
-were measured._
+_Updated 2026-08-12. Every item below is now either fixed and covered by the
+end-to-end harness, or has an explicit reason it isn't._
 
-Ground rules carried over from the work so far:
+## Running the e2e
 
-- Reproduce before fixing. Three of the last four bugs had a plausible wrong
-  explanation that a five-minute experiment killed.
-- Every change stays gate-green (`nix develop --command ./scripts/check.sh`).
-- Prefer a measurement over an argument. `ZODIAC_GUI_PERF_OFF`,
-  `ZODIAC_GUI_SEED_ITEMS`, `--profile profiling`, and the headless selftest
-  exist for exactly this.
+```sh
+nix develop --command bash -c \
+  'ZODIAC_GUI_E2E=1 ZODIAC_GUI_EXIT_AFTER_MS=140000 ./target/debug/zodiac-gui e2etest'
+```
 
----
+It attaches to a scratch session, opens a shell pane and a real claude agent
+pane (never prompted, so it spends no tokens), drives the **real handlers** and
+asserts on what actually got laid out. It prints PASS/FAIL per check and exits
+nonzero on any failure. **14/14 passing.**
 
-## P0 — user-visible breakage
+It deliberately does *not* synthesise OS input: during this work a missed
+compositor focus sent test keystrokes into an unrelated window, and a
+screenshot-driven check "passed" while the thing under test was broken. The
+harness drives `on_key_logical`, injects egui events, and reads small probes
+recorded during the frame.
 
-### 1. Wrapping user message escapes the transcript ✅ fixed, verifying
-
-**Symptom (reported):** typing a message long enough to need a second line
-sends it off the left edge, and the chat window slides under the pane sidebar.
-
-**Cause:** inside `ScrollArea::show_viewport` with `auto_shrink([false,false])`
-the content ui is effectively unbounded horizontally. `turn_user` sized its
-bubble from `available_width()`, so the cap was huge, the text never wrapped,
-and because the bubble lays out right-to-left the overflow ran off the *left*
-edge and under the sidebar.
-
-**Fix:** pin the scroll content to `viewport.width()`, and clamp the bubble to
-the container. **Verify:** send a two-line message and confirm it wraps inside
-the bubble with the transcript's left edge intact.
-
-### 2. Confirm Alt+1–9 / Enter reliably opens a pane
-
-Scripted testing repeatedly failed to open a pane, but the cause turned out to
-be window focus landing elsewhere, not zodiac. Alt+1–9 now also switches to the
-focused view, which is the right behaviour regardless.
-
-**Verify:** by hand — Alt+2 from the Observatory, and Enter on a highlighted
-card. If Enter is genuinely dead, the suspect is `observatory_nav`'s
-`memory().focused().is_none()` guard.
+Two of the checks were rewritten after they passed *vacuously* — a streaming
+check that fed one token per two seconds, and an emoji check that reported
+DejaVu Sans as an emoji font because `fc-match` always substitutes something.
+A check that cannot fail is worse than no check.
 
 ---
 
-## P1 — verification debt (fixes that landed but were never confirmed)
+## Status
 
-### 3. Terminal mouse mapping
+| # | Item | Status | Covered by |
+|---|------|--------|-----------|
+| 1 | Wrapping user message escapes the transcript | **fixed** | `long user message wraps inside the transcript` |
+| 2 | Alt+1–9 / Enter open a pane | **fixed** | `alt+1…`, `alt+2…`, `Enter on the Observatory…` |
+| 3 | Terminal mouse mapping | **fixed + verified** | `terminal mouse maps to the drawn cell` |
+| 4 | Streaming-pane CPU | **fixed** | `a large streamed transcript does not pin the repaint clock` |
+| 5 | Idle transcript burning ~8–10% of a core | **root-caused + fixed** | `idle pane does not repaint continuously` |
+| 6 | `/resume` in place | **implemented** | `/resume resumes in place (no extra pane)` |
+| 7 | Slash commands for pi panes | **mechanism done; pi not enumerable** | see below |
+| 8 | Missing emoji glyphs | **client side done; needs a system font** | `emoji fallback is a face egui can rasterize` |
+| 9 | Finish sound on completion | **implemented** | `finish sound fires once on working->done` |
+| 10 | Kitty graphics in terminal mode | **already implemented** | see below |
 
-`grid_cell` now maps through the geometry `terminal_view` actually draws with,
-instead of the legacy wgpu grid's origin/cell. I could not synthesise mouse
-input here.
+### 5 — the idle CPU burn, finally explained
 
-**Verify:** open `vim` in a terminal pane, click a word mid-screen, confirm the
-cursor lands there; repeat at a non-100% Terminal font size, which is where the
-old mapping drifted worst.
+It was a feedback loop in the event plumbing, not the animation timer.
+`egui_winit` answers `WindowEvent::RedrawRequested` with `repaint: true`; we
+honoured that by requesting another redraw — asking for the next frame from
+inside the frame being drawn. The app then rendered at vsync forever with no
+animation and no input. The 16 ms clamp bounded the loop but could not stop it,
+which is exactly why the cost looked like a fixed floor rather than a runaway.
 
-### 4. Streaming-pane CPU
+Found by measuring: a `#[track_caller]` tally on `request_redraw` plus a
+window-event histogram, both behind `ZODIAC_GUI_DEBUG_REPAINT=1` and kept for
+next time. **Idle: 147 frames / 2 s before, 2 after.**
 
-The perf work was measured against an *idle* seeded transcript. Streaming is
-what pinned the repaint clock in the original profile, so the headline number
-is an analogue, not the real case.
+### 7 — pi slash commands
 
-**Verify:** with a real agent streaming a long answer, sample
-`ps -o %cpu,time -p $(pidof zodiac-gui)` before/after, and A/B against
-`ZODIAC_GUI_PERF_OFF=1` on the same binary.
+The picker is now harness-aware (`slash::commands_for`) instead of hardcoding
+claude, so another harness lights up the moment its commands are discoverable.
+Claude's set is enumerable — built-ins, `~/.claude/commands`, project commands,
+skills. **Pi's built-ins are compiled into its binary with nothing on disk to
+read**, so pi panes get no picker rather than a guessed list that might not
+work. Wiring pi up needs a way to ask pi for its commands.
 
----
+### 8 — emoji glyphs
 
-## P2 — the one open perf unknown
+egui rasterizes outlines only, so `NotoColorEmoji` (CBDT bitmaps) is unusable
+to it, and it is the **only** emoji font installed on this machine. That is why
+`🦀` draws as `□` while `📦` (in egui's built-in subset) is fine. The client
+side is fixed — the fallback search tries several monochrome families and
+verifies real coverage of U+1F980 via `fc-list :charset=1f980` rather than
+trusting `fc-match`, which substitutes silently.
 
-### 5. Idle transcript still costs ~8–10% of a core
+**This one needs a system change, not a code change:** install a monochrome
+emoji font (e.g. `noto-fonts-monochrome-emoji`) via home-manager. The e2e check
+reports which case the machine is in.
 
-Cost is now flat in transcript length (1600 vs 4800 items), but it does not
-fall to idle, and sampling at t=25s rules out startup.
+### 10 — kitty graphics
 
-**Hypothesis (unproven):** a repaint feedback loop — measured item heights
-change content height, which nudges the `stick_to_bottom` scroll area, which
-requests another repaint; the 16ms clamp bounds it, so it reads as a fixed cost
-rather than a runaway one.
-
-**Plan:**
-1. Instrument: count frames per second in `redraw()` behind an env flag. If it
-   is pinned near 60fps while idle, the loop is real.
-2. If real, break it: only write back a measured height when it differs by more
-   than a pixel, and skip the scroll nudge when nothing changed.
-3. If it is *not* a repaint loop, profile properly —
-   `cargo build --profile profiling -p zodiac-gui` then
-   `perf top -p $(pidof zodiac-gui)` — and follow the symbols.
-
-**Verify:** idle CPU for a 1600-item pane drops toward the 0.2% the small pane
-shows.
-
----
-
-## P3 — features and polish, roughly by value
-
-### 6. `/resume` in place, rather than opening a new pane
-
-Today it spawns a pane with `--resume <id>`. Resuming *in* the pane needs a
-server-side "respawn this pane's agent with a session id" path — the pieces
-exist (`AgentRuntime.session_id`, the autoresume respawn), they just are not
-reachable from a client frame.
-
-**Plan:** add a `T_AGENT_RESPAWN`-style frame (pane id + session id), reuse the
-autoresume respawn path, and switch the picker to it. **Verify:** resume in a
-pane and confirm the pane keeps its id, name, and position.
-
-### 7. Slash commands for pi panes
-
-The picker is gated to the claude harness. Pi has its own command set.
-
-**Plan:** teach `slash.rs` a per-harness source (pi's commands come from its own
-config/extensions), and key the picker on the pane's harness rather than a
-hardcoded `"claude"`. **Verify:** open the picker in a pi pane and run one.
-
-### 8. Missing color-emoji glyphs in terminal panes
-
-`🦀` draws as `□` while `📦` is fine, so the fallback chain has gaps.
-
-**Plan:** find which face supplies the working emoji and why the other misses —
-`font.rs::egui_fallback_fonts` deliberately skips color-emoji faces, so the
-likely fix is adding a monochrome emoji face that covers the missing ranges, or
-relaxing that skip for the terminal grid. **Verify:** a prompt containing both
-glyphs renders both.
-
-### 9. Finish sound on agent completion
-
-`finish_sound` and `protocol::play_sound` exist; the only call site is a preview
-when the setting changes. Nothing plays when an agent finishes.
-
-**Plan:** track each pane's previous status in `GuiApp`; on a working→done edge
-for a pane that is *not* focused, play the sound; debounce so a flapping status
-cannot machine-gun it. **Verify:** on-device with audio; confirm silence when
-the pane is already focused and when the setting is "off".
-
-### 10. Kitty graphics inside terminal mode
-
-Long-standing: the grid draws text and colors but not images. This is the one
-genuinely architectural item — it needs the wgpu image pipeline composited into
-the egui terminal. Worth scoping only after everything above is done.
+Already implemented: real placements are decoded to egui textures and blitted
+over the grid in `terminal_view`. The README's "not drawn inside terminal mode"
+was stale, like the pty-resize gap removed earlier. Outstanding is only the
+Unicode-placeholder (`virt`) tiling path and z-ordering under text.
 
 ---
 
-## Explicitly not planned
+## Not planned
 
 **Rewriting the terminal layer.** Every symptom that made panes feel non-native
-turned out to be an ordinary bug — a wrong grid size, egui swallowing keys after
-Tab, mouse coordinates mapped through stale geometry. All three are fixed. The
-recommendation is to judge how native it feels now and only revisit this if
-something concrete still misbehaves.
+was an ordinary bug — a wrong grid size, egui swallowing keys after Tab, mouse
+coordinates mapped through stale geometry, and the redraw loop above. All are
+fixed and covered by the harness.

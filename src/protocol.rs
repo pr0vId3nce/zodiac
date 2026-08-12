@@ -124,6 +124,11 @@ pub const T_GFX_FRAME: u8 = 35;
 /// system clipboard (`arboard`); old clients skip it.
 pub const T_CLIPBOARD: u8 = 36;
 
+/// Resume an existing agent pane's conversation *in place*: payload is the
+/// harness session id. The pane keeps its id, name and position — spawning a
+/// new pane was the old, lossier answer to `/resume`.
+pub const T_AGENT_RESUME: u8 = 37;
+
 /// T_GFX_FRAME payload header (34 bytes; layout mirrors GfxImgHdr with the
 /// frame index + display gap added).
 pub const GFX_FRAME_HDR: usize = 34;

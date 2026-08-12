@@ -104,8 +104,10 @@ pub struct UiState {
     /// `/resume` session picker: the candidates and the highlighted row.
     pub resume_list: Vec<crate::slash::SessionEntry>,
     pub resume_sel: usize,
-    /// Model the pane being resumed was launched with, carried to the new one.
+    /// Model the pane being resumed was launched with.
     pub resume_model: Option<String>,
+    /// The pane `/resume` was invoked from — it resumes in place.
+    pub resume_pane: Option<u64>,
     /// Measured transcript item heights per pane, used to cull off-screen
     /// turns. Rebuilt lazily as items render; cleared on a width change.
     pub item_heights: std::collections::HashMap<u64, Vec<f32>>,
@@ -214,6 +216,8 @@ pub enum UiAction {
     },
     /// `/resume` was submitted: open the session picker for this pane.
     OpenResume(u64),
+    /// Resume `session` in the pane that asked, keeping its identity.
+    ResumeHere(u64, String),
 }
 
 /// Immutable view of the app state the UI reads for one frame.
@@ -2614,7 +2618,7 @@ fn resume_dialog(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<UiAction
                     );
                     ui.add_space(4.0);
                     ui.label(
-                        RichText::new("Opens a new pane continuing the chosen conversation.")
+                        RichText::new("Continues the chosen conversation in this pane.")
                             .color(theme::TEXT_DIM)
                             .size(12.0),
                     );
@@ -2681,12 +2685,8 @@ fn resume_dialog(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<UiAction
                 });
         });
     if let Some(i) = chosen {
-        if let Some(s) = st.resume_list.get(i) {
-            actions.push(UiAction::CreateAgent {
-                agent: "claude".into(),
-                model: st.resume_model.clone(),
-                session: Some(s.id.clone()),
-            });
+        if let (Some(s), Some(pane)) = (st.resume_list.get(i), st.resume_pane) {
+            actions.push(UiAction::ResumeHere(pane, s.id.clone()));
         }
         st.overlay = Overlay::None;
     }

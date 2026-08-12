@@ -79,8 +79,8 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
   per-cell bg quads, glyphs, underline, block cursor — reusing
   `palette::cell_colors` for the xterm-256 + SGR fold. The instanced-rect +
   textured-quad + glyphon machinery in `render.rs` is retained for this and
-  for kitty-graphics compositing (a follow-on: kitty images aren't yet drawn
-  inside terminal mode).
+  for kitty-graphics compositing; kitty placements are decoded to egui
+  textures and blitted over the grid (placeholder tiling is the follow-on).
 - **Design tokens** (`theme.rs`): the handoff's ground/chrome/text/accent
   palette folded into egui `Visuals`, with the five status colors carried
   verbatim from `src/theme.rs` (thinking → violet, idle text override).
@@ -112,8 +112,9 @@ delay (used by unattended smoke tests).
 
 ## Known gaps / deferred (native rebuild)
 
-- **Kitty graphics inside terminal mode** — the grid shows text + colors but
-  not images; compositing the wgpu image pipeline into egui is a follow-on.
+- **Kitty graphics: Unicode-placeholder (`virt`) tiling** — real placements are
+  decoded to egui textures and blitted over the grid; only the placeholder
+  tiling path and z-ordering under text are outstanding.
 - **Output-rate sparklines / activity histogram** — blocked: `PaneState`
   carries no rate buckets (needs a server/protocol addition).
 - **Instrument Sans** — the UI uses egui's default proportional font; the OFL

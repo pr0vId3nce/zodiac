@@ -298,13 +298,27 @@ pub fn egui_fallback_fonts() -> Vec<(String, Vec<u8>)> {
             out.push((format!("fallback-{name}"), bytes));
         }
     }
+    // Monochrome emoji faces are tried by several names: egui rasterizes
+    // outlines only, so a colour font (NotoColorEmoji is CBDT bitmaps) is
+    // useless to it however well fontconfig scores it. If none of these is
+    // installed, emoji outside egui's small built-in subset simply have no
+    // glyph — that is a missing system font, not something the client can fix.
     #[cfg(not(target_os = "macos"))]
-    for fam in ["Symbols Nerd Font", "DejaVu Sans", "Noto Emoji"] {
+    for fam in [
+        "Symbols Nerd Font",
+        "DejaVu Sans",
+        "Noto Emoji",
+        "Noto Sans Symbols 2",
+        "Symbola",
+        "OpenMoji",
+        "Twemoji Mono",
+    ] {
         let Some(path) = fc_match_file(fam) else {
             continue;
         };
-        if path.to_string_lossy().to_lowercase().contains("color") {
-            continue; // a color-emoji face egui can't rasterize
+        let low = path.to_string_lossy().to_lowercase();
+        if low.contains("color") || low.contains("coloremoji") {
+            continue; // a colour-emoji face egui can't rasterize
         }
         if !seen.insert(path.clone()) {
             continue;
@@ -344,4 +358,38 @@ mod mac_tests {
     fn unknown_family_is_not_silently_substituted() {
         assert!(super::mac::find_family_file("NoSuchFontFamilyXYZ").is_none());
     }
+}
+
+/// Is a monochrome emoji face installed that egui could actually use? The e2e
+/// harness reports emoji coverage against this: with none installed, glyphs
+/// outside egui's built-in subset cannot render and that is a system gap.
+#[cfg(not(target_os = "macos"))]
+pub fn mono_emoji_font() -> Option<String> {
+    // Ask fontconfig which installed fonts actually cover an emoji codepoint
+    // (U+1F980 CRAB) — `fc-match` is no good here because it always
+    // substitutes *something*, so a missing family silently answers with
+    // DejaVu Sans, which has no emoji at all. Colour fonts are excluded:
+    // egui rasterizes outlines and cannot draw CBDT/COLR bitmaps.
+    let out = std::process::Command::new("fc-list")
+        .args([":charset=1f980", "file"])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output()
+        .ok()?;
+    for line in String::from_utf8_lossy(&out.stdout).lines() {
+        let path = line.trim().trim_end_matches(':').trim();
+        if path.is_empty() {
+            continue;
+        }
+        if path.to_lowercase().contains("color") {
+            continue;
+        }
+        return Some(path.to_string());
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+pub fn mono_emoji_font() -> Option<String> {
+    None
 }

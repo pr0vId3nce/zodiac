@@ -665,6 +665,20 @@ impl Server {
                     }
                 }
             }
+            T_AGENT_RESUME => {
+                if let Ok(session) = String::from_utf8(f.data.clone()) {
+                    let session = session.trim().to_string();
+                    let tx = self.tx.clone();
+                    if let Some(rt) = self.pane_mut(f.id).and_then(|p| p.agent_rt_mut()) {
+                        // Restart this pane's harness against the chosen
+                        // session; the pane itself (id, name, position) stays.
+                        rt.kill();
+                        rt.session_id = Some(session);
+                        rt.failed = None;
+                        let _ = rt.spawn_process(f.id, &tx);
+                    }
+                }
+            }
             T_CLOSE_PANE => {
                 if let Some(p) = self.pane_mut(f.id) {
                     p.kill();

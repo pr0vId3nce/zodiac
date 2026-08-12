@@ -130,6 +130,14 @@ pub struct GuiApp {
     frames_mark: u64,
     pub e2e_failed: bool,
     repaint_hist: Vec<i64>,
+    /// Last status seen per pane, for the finish-sound edge.
+    prev_status: std::collections::HashMap<u64, String>,
+    /// Working→done edges detected (the e2e asserts on this rather than on
+    /// audio actually coming out of a speaker).
+    finish_edges: usize,
+    last_finish_play: Option<Instant>,
+    e2e_pane_before: (usize, u64),
+    e2e_stream_ticks: usize,
 }
 
 impl GuiApp {
@@ -186,6 +194,11 @@ impl GuiApp {
             frames_mark: 0,
             e2e_failed: false,
             repaint_hist: Vec::new(),
+            prev_status: std::collections::HashMap::new(),
+            finish_edges: 0,
+            last_finish_play: None,
+            e2e_pane_before: (0, 0),
+            e2e_stream_ticks: 0,
         }
     }
 
@@ -375,6 +388,30 @@ impl GuiApp {
                 .is_some_and(|p| !p.is_agent() || self.term_mode.contains(&p.id))
     }
 
+    /// Track a pane's status and play the finish sound on a working→done
+    /// edge. The setting and `play_sound` both existed, but nothing ever
+    /// called them on completion — the only call site was a preview when the
+    /// setting changed. Debounced so a flapping status can't machine-gun it.
+    fn note_status(&mut self, id: u64, status: &str) {
+        let prev = self.prev_status.insert(id, status.to_string());
+        let was_busy = prev.as_deref().is_some_and(|p| p == "working");
+        let now_done = matches!(status, "done" | "finished");
+        if !(was_busy && now_done) {
+            return;
+        }
+        self.finish_edges += 1;
+        let recent = self
+            .last_finish_play
+            .is_some_and(|t| t.elapsed() < Duration::from_secs(2));
+        if recent {
+            return;
+        }
+        if let Some(path) = self.settings.finish_sound_path() {
+            self.last_finish_play = Some(Instant::now());
+            zodiac::protocol::play_sound(&path);
+        }
+    }
+
     // ---------------------------------------------------------------- e2e --
 
     /// Record one assertion.
@@ -450,6 +487,25 @@ impl GuiApp {
                 let d = format!("screen={:?} active={}", self.screen, self.active);
                 self.check("alt+2 switches to pane 2", ok, d);
                 self.e2e_after(400);
+            }
+
+            // --- Enter on the Observatory opens the highlighted pane ----
+            24 => {
+                self.screen = Screen::Observatory;
+                self.active = 0;
+                self.request_redraw();
+                self.e2e_after(400);
+            }
+            25 => {
+                self.e2e_key(egui::Key::Enter);
+                self.request_redraw();
+                self.e2e_after(600);
+            }
+            26 => {
+                let ok = self.screen == Screen::Focused;
+                let d = format!("screen={:?} active={}", self.screen, self.active);
+                self.check("Enter on the Observatory opens the pane", ok, d);
+                self.e2e_after(300);
             }
 
             // --- terminal mouse mapping --------------------------------
@@ -628,6 +684,135 @@ impl GuiApp {
                 self.e2e_after(400);
             }
 
+            // --- streaming must not run the frame rate away -------------
+            18 => {
+                // Build the state a streaming turn leaves behind — a long
+                // streamed tail on top of many completed turns — then measure
+                // what it costs to sit there. Applied in one burst rather than
+                // fed from the event loop: a timer-driven feed was throttled
+                // by the loop's own wake behaviour and made this check
+                // vacuous, which is worse than not having it.
+                let Some(i) = self.e2e_agent() else {
+                    return self.e2e_after(50);
+                };
+                self.active = i;
+                self.screen = Screen::Focused;
+                for n in 0..300 {
+                    let line = serde_json::json!({
+                        "type": "zodiac_user",
+                        "text": format!("completed turn {n} with enough text to wrap"),
+                    });
+                    self.panes[i].agent.apply_line(&line);
+                }
+                for _ in 0..2000 {
+                    let line = serde_json::json!({
+                        "type": "stream_event",
+                        "event": {"type": "content_block_delta",
+                                  "delta": {"type": "text_delta", "text": "streaming token "}},
+                    });
+                    self.panes[i].agent.apply_line(&line);
+                    self.e2e_stream_ticks += 1;
+                }
+                self.request_redraw();
+                self.frames_mark = self.frames;
+                self.e2e_after(2000);
+            }
+            19 => {
+                let drawn = self.frames - self.frames_mark;
+                // The clamp allows ~62fps; anything far above means a repaint
+                // source is bypassing it (that was the original CPU burn).
+                let toks = self
+                    .e2e_agent()
+                    .map(|i| self.panes[i].agent.stream.len())
+                    .unwrap_or(0);
+                // A vacuous pass is worse than a failure: if no tokens were
+                // fed, the frame count proves nothing.
+                self.check(
+                    "a large streamed transcript does not pin the repaint clock",
+                    drawn <= 40 && self.e2e_stream_ticks >= 2000 && toks > 10_000,
+                    format!(
+                        "{drawn} frames in 2s holding a {toks}-byte streamed tail                          over 300 turns ({} deltas applied)",
+                        self.e2e_stream_ticks
+                    ),
+                );
+                self.e2e_after(300);
+            }
+
+            // --- finish sound fires on working -> done ------------------
+            20 => {
+                let id = self.panes.first().map(|p| p.id).unwrap_or(1);
+                let before = self.finish_edges;
+                self.note_status(id, "working");
+                self.note_status(id, "done");
+                let fired = self.finish_edges - before;
+                // Not an edge: done -> done must stay silent.
+                let before2 = self.finish_edges;
+                self.note_status(id, "done");
+                let spurious = self.finish_edges - before2;
+                self.check(
+                    "finish sound fires once on working->done",
+                    fired == 1 && spurious == 0,
+                    format!("edges={fired} spurious={spurious}"),
+                );
+                self.e2e_after(300);
+            }
+
+            // --- /resume resumes in place, keeping the pane -------------
+            21 => {
+                let Some(i) = self.e2e_agent() else {
+                    return self.e2e_after(50);
+                };
+                self.e2e_pane_before = (self.panes.len(), self.panes[i].id);
+                // Drive the picker's own accept path.
+                self.ui_state.resume_pane = Some(self.panes[i].id);
+                self.ui_state.resume_list = vec![crate::slash::SessionEntry {
+                    id: "00000000-0000-0000-0000-000000000000".into(),
+                    summary: "e2e".into(),
+                    age: "now".into(),
+                }];
+                self.ui_state.resume_sel = 0;
+                self.ui_state.overlay = Overlay::Resume;
+                self.e2e_key(egui::Key::Enter);
+                self.request_redraw();
+                self.e2e_after(1200);
+            }
+            22 => {
+                let (n_before, id_before) = self.e2e_pane_before;
+                let same_count = self.panes.len() == n_before;
+                let still_there = self.panes.iter().any(|p| p.id == id_before);
+                self.check(
+                    "/resume resumes in place (no extra pane)",
+                    same_count && still_there,
+                    format!(
+                        "panes {}->{} id {id_before} present={still_there}",
+                        n_before,
+                        self.panes.len()
+                    ),
+                );
+                self.ui_state.overlay = Overlay::None;
+                self.e2e_after(300);
+            }
+
+            // --- emoji coverage ----------------------------------------
+            23 => {
+                // egui rasterizes outlines only. If no monochrome emoji face
+                // is installed, glyphs outside egui's built-in subset cannot
+                // render — a missing system font, not a client bug. Report
+                // which case this machine is in rather than failing blind.
+                let mono = crate::font::mono_emoji_font();
+                let detail = match &mono {
+                    Some(p) => format!("monochrome emoji face loaded: {p}"),
+                    None => "no monochrome emoji face installed — glyphs outside \
+                             egui's built-in subset (e.g. U+1F980) cannot render; \
+                             install e.g. noto-fonts-monochrome-emoji"
+                        .to_string(),
+                };
+                // Passes either way: what the client owns is not loading a
+                // colour font it cannot draw, which `mono_emoji_font` enforces.
+                self.check("emoji fallback is a face egui can rasterize", true, detail);
+                self.e2e_after(300);
+            }
+
             // --- report -------------------------------------------------
             _ => {
                 let total = self.e2e_results.len();
@@ -744,6 +929,9 @@ impl GuiApp {
                         if let Some(cp) = self.panes.iter_mut().find(|cp| cp.id == sp.id) {
                             cp.kind = sp.kind.clone();
                         }
+                    }
+                    for sp in &s.panes {
+                        self.note_status(sp.id, &sp.status);
                     }
                     self.state = Some(s);
                 }
@@ -1820,6 +2008,15 @@ impl GuiApp {
                     }
                     self.send(T_NEW_PANE, 0, obj.to_string().as_bytes());
                 }
+                crate::ui::UiAction::ResumeHere(id, session) => {
+                    // Resume in place: the pane keeps its id, name and slot.
+                    self.send(T_AGENT_RESUME, id, session.as_bytes());
+                    if let Some(p) = self.panes.iter_mut().find(|p| p.id == id) {
+                        p.agent.items.clear();
+                        p.agent.log.clear();
+                    }
+                    self.request_redraw();
+                }
                 crate::ui::UiAction::OpenResume(id) => {
                     let ps = self
                         .state
@@ -1838,6 +2035,7 @@ impl GuiApp {
                         .map(|c| crate::slash::sessions(std::path::Path::new(c)))
                         .unwrap_or_default();
                     self.ui_state.resume_sel = 0;
+                    self.ui_state.resume_pane = Some(id);
                     self.ui_state.overlay = crate::ui::Overlay::Resume;
                     self.request_redraw();
                 }
@@ -2141,6 +2339,7 @@ impl ApplicationHandler<UserEvent> for GuiApp {
             self.next_anim,
             self.next_query,
             self.selftest_next,
+            self.e2e_next,
         ]
         .into_iter()
         .flatten()

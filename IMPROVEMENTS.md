@@ -12,6 +12,12 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 11. README: document the new features
+Updated `zodiac-gui/README.md` to reflect what shipped: Observatory
+arrow/Enter nav + vertical cards, transcript markdown (h1–h6, nested lists,
+task checkboxes, tables, strikethrough, browser-opening links),
+PageUp/PageDown scroll, the wrapping composer, per-view font sizes, and Alt+Z.
+
 ### 10. Auto-expand failed tool boxes
 Tool call boxes default to collapsed; error results are important, so a tool
 box whose result `is_error` now starts expanded (successful ones stay

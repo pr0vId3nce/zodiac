@@ -20,7 +20,9 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
 
 - **Observatory** (home) — a responsive card grid of the session's panes from
   live `T_STATE`: sigil tile, agent+version chip, cwd, one-line subtitle,
-  transcript-tail well, status pill, left status rail. Click a card to open it.
+  transcript-tail well, status pill, left status rail. Cards stack one per row.
+  Click a card to open it; **arrow keys** move the selection and **Enter/Space**
+  opens the selected pane.
 - **Focused pane** — sidebar (pane list, click to switch) · main · activity
   rail. The view follows the pane **kind** (shown as a chip in the header):
   agent panes are headless structured NDJSON — no pty — so they render the
@@ -28,11 +30,15 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
   **terminal** grid. There is no toggle: each kind has exactly one real view,
   so neither can land on an empty black screen. The transcript renders agent
   turns with the Claude-Code feel: user bubbles, `⏺` assistant recaps with
-  **Markdown** (headings, lists, quotes, **bold**/*italic*/`code`, links) and
-  fenced **code in its own boxes**, **expandable tool boxes** (full command +
-  collapsed output, red on error), **collapsible thinking** panels plus the live
-  orange "Cogitating…" sayings and spinner, and the streaming tail. The composer
-  sends to the agent (Enter / **Send** → `T_AGENT_INPUT`). A pending permission
+  **Markdown** (h1–h6 headings, nested lists, task-list checkboxes, quotes,
+  **bold**/*italic*/`code`/~~strike~~, aligned **tables**, and clickable links
+  that open in the OS browser) and fenced **code in its own boxes**,
+  **expandable tool boxes** (full command + collapsed output, red and
+  auto-expanded on error), **collapsible thinking** panels plus the live orange
+  "Cogitating…" sayings and spinner, and the streaming tail. **PageUp/PageDown**
+  scroll the transcript. The composer is a wrapping multiline field (**Enter**
+  sends, **Shift+Enter** newline; **Send** → `T_AGENT_INPUT`). A pending
+  permission
   raises a **modal question popup** navigable by mouse, number keys, ↑/↓ (or
   j/k), and Enter (Esc denies) → `T_PERM_RESP`. When the agent is running a plan
   (`TodoWrite`), the activity rail shows a **PLAN** panel with a progress bar and
@@ -40,10 +46,11 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
   returns.
 - **⌘K / Ctrl+K** — command palette (fuzzy pane jump; ↑/↓, Enter, Esc).
 - **⌘, / Ctrl+,** — settings (grouped; edits real `config.json` keys, persists).
+  Includes independent per-view **font sizes** (Terminal / GUI / Agent chat).
 - **Alt+O** — the Oracle panel (gradient orb; presentational for now).
 - **Alt+N** — new agent (structured) pane; **Alt+Shift+N** — new shell pane.
   **Alt+←/→** (or **Alt+↑/↓** with side tabs) and **Alt+1–9** switch panes;
-  **Alt+W** closes the active pane.
+  **Alt+W** closes the active pane; **Alt+Z** returns to the Observatory.
 - **/** — in a structured agent pane, jumps to the composer and starts a slash
   command (when you're not already typing there).
 - **Copy / paste** — in the **transcript**, drag to select across turns and

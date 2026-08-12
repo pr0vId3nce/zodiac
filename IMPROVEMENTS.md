@@ -12,6 +12,10 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 16. Ordered lists with `)` delimiter
+`md_split_ordered` only accepted `1. `; GFM also allows `1) `. Now both
+render as ordered-list items. `ui.rs`.
+
 ### 15. Scroll the settings dialog on short windows
 The settings dialog grew (Theme, numerals, view, motion, the 3 font-size rows,
 behavior toggles) and had no scroll, so on a short window or at a large GUI

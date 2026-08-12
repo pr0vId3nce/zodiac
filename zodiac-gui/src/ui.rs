@@ -1688,7 +1688,11 @@ fn md_split_ordered(t: &str) -> Option<(String, &str)> {
     if digits.is_empty() {
         return None;
     }
-    let rest = t[digits.len()..].strip_prefix(". ")?;
+    // GFM allows either `1. ` or `1) ` as the delimiter.
+    let after = &t[digits.len()..];
+    let rest = after
+        .strip_prefix(". ")
+        .or_else(|| after.strip_prefix(") "))?;
     Some((digits, rest))
 }
 

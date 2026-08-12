@@ -12,6 +12,11 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 17. Copy button on code boxes
+Hovering a fenced code box now shows a small "copy" button in the top-right
+that copies the raw code to the system clipboard (via the arboard-backed
+`copy_text` path). `ui.rs` (`code_box`).
+
 ### 16. Ordered lists with `)` delimiter
 `md_split_ordered` only accepted `1. `; GFM also allows `1) `. Now both
 render as ordered-list items. `ui.rs`.

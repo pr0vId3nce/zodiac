@@ -2005,7 +2005,7 @@ fn parse_www_url(chars: &[char], i: usize) -> Option<(String, String, usize)> {
 /// A monospace code box: bordered, horizontally scrollable so long lines
 /// don't wrap.
 fn code_box(ui: &mut egui::Ui, code: &str) {
-    Frame::NONE
+    let r = Frame::NONE
         .fill(theme::bg_raised())
         .stroke(Stroke::new(1.0, theme::LINE_BORDER))
         .corner_radius(CornerRadius::same(8))
@@ -2024,6 +2024,26 @@ fn code_box(ui: &mut egui::Ui, code: &str) {
                     );
                 });
         });
+    // Copy affordance: a small button in the top-right, shown on hover.
+    let rect = r.response.rect;
+    if ui.rect_contains_pointer(rect) {
+        let size = egui::vec2(44.0, 19.0);
+        let at = egui::Rect::from_min_size(
+            egui::pos2(rect.max.x - size.x - 6.0, rect.min.y + 5.0),
+            size,
+        );
+        let btn = egui::Button::new(RichText::new("copy").size(10.5).color(theme::TEXT_DIM))
+            .fill(theme::bg_chrome())
+            .stroke(Stroke::new(1.0, theme::LINE_BORDER))
+            .small();
+        if ui
+            .put(at, btn)
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
+            .clicked()
+        {
+            ui.ctx().copy_text(code.to_string());
+        }
+    }
 }
 
 /// A tool result box: capped height with a scroll, red-tinted on error.

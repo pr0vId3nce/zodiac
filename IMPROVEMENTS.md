@@ -12,6 +12,12 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 2. Nested list indentation in the transcript
+Sub-lists were flattened because `md_block` trims leading whitespace. Now the
+leading indent (2 spaces / 1 tab per level, capped at 6) is measured and
+applied as a pixel inset to bullet, task, and ordered-list rows, so nested
+lists read as nested. `ui.rs` (`list_indent_px`).
+
 ### 1. Markdown task-list checkboxes in the transcript
 `- [ ] todo` / `- [x] done` now render a checkbox glyph (☐ / ☑) instead of a
 plain bullet; done items are dimmed. Agents emit these constantly (plans,

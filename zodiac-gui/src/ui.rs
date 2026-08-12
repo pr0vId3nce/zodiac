@@ -1439,27 +1439,29 @@ fn md_block(ui: &mut egui::Ui, line: &str) {
         });
         return;
     }
+    // Nesting: sub-lists are indented in the source; carry that inset through.
+    let indent = list_indent_px(line);
     for pre in ["- ", "* ", "+ "] {
         if let Some(item) = t.strip_prefix(pre) {
             // GFM task list: `- [ ] todo` / `- [x] done`. Render a checkbox
             // glyph instead of the bullet; done items get a dim/struck feel.
             if let Some(rest) = item.strip_prefix("[ ] ") {
-                md_task_row(ui, false, rest);
+                md_task_row(ui, false, rest, indent);
                 return;
             }
             if item
                 .get(..4)
                 .is_some_and(|p| p.eq_ignore_ascii_case("[x] "))
             {
-                md_task_row(ui, true, &item[4..]);
+                md_task_row(ui, true, &item[4..], indent);
                 return;
             }
-            md_bullet_row(ui, "•".to_string(), item);
+            md_bullet_row(ui, "•".to_string(), item, indent);
             return;
         }
     }
     if let Some((num, rest)) = md_split_ordered(t) {
-        md_bullet_row(ui, format!("{num}."), rest);
+        md_bullet_row(ui, format!("{num}."), rest, indent);
         return;
     }
     md_line(ui, t.trim_end(), 14.5, theme::TEXT_BODY);
@@ -1607,11 +1609,25 @@ fn md_heading(ui: &mut egui::Ui, text: &str, size: f32) {
 }
 
 /// A list row: an accent marker + the item's inline-formatted text.
+/// Leading-whitespace indent of a list item, mapped to a pixel inset for
+/// nesting (2 spaces or 1 tab per level, capped so deep nesting stays sane).
+fn list_indent_px(line: &str) -> f32 {
+    let mut cols = 0usize;
+    for c in line.chars() {
+        match c {
+            ' ' => cols += 1,
+            '\t' => cols += 4,
+            _ => break,
+        }
+    }
+    ((cols / 2).min(6) as f32) * 16.0
+}
+
 /// A GFM task-list item: a checkbox glyph (checked = accent, unchecked = dim)
 /// followed by the item text (dimmed when done).
-fn md_task_row(ui: &mut egui::Ui, done: bool, item: &str) {
+fn md_task_row(ui: &mut egui::Ui, done: bool, item: &str, indent: f32) {
     ui.horizontal_top(|ui| {
-        ui.add_space(6.0);
+        ui.add_space(6.0 + indent);
         let (glyph, col) = if done {
             ("\u{2611}", theme::accent()) // ballot box with check
         } else {
@@ -1631,9 +1647,9 @@ fn md_task_row(ui: &mut egui::Ui, done: bool, item: &str) {
     });
 }
 
-fn md_bullet_row(ui: &mut egui::Ui, marker: String, item: &str) {
+fn md_bullet_row(ui: &mut egui::Ui, marker: String, item: &str, indent: f32) {
     ui.horizontal_top(|ui| {
-        ui.add_space(6.0);
+        ui.add_space(6.0 + indent);
         ui.label(
             RichText::new(marker)
                 .color(theme::accent())

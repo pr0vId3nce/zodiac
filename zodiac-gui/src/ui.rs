@@ -1137,16 +1137,11 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
     // font, so the pty is sized to the actual egui terminal widget rather
     // than the legacy full-window grid. Recorded for the app to send as
     // T_RESIZE after the frame.
-    {
-        let font = egui::FontId::monospace(13.0 * d.term_scale);
-        let (cw, ch) = ui.fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
-        let avail = ui.available_size();
-        if cw > 1.0 && ch > 1.0 {
-            let cols = ((avail.x / cw).floor() as i32).clamp(10, 1000) as u16;
-            let rows = ((avail.y / ch).floor() as i32).clamp(2, 1000) as u16;
-            st.term_grid = Some((rows, cols, cw.round() as u16, ch.round() as u16));
-        }
-    }
+    // (The pty grid is measured inside `terminal_view`, against the real
+    // content rect. Measuring here — before the terminal frame's margins —
+    // over-reported the size by a couple of rows and columns, so the child
+    // drew into space that was never painted: a full-width TUI like Claude
+    // Code lost its right border and had its bottom line clipped in half.)
     // Body: the view is determined by the pane kind (see the header note).
     let show_term = !p.is_agent();
     if show_term {
@@ -2902,6 +2897,17 @@ fn terminal_view(ui: &mut egui::Ui, st: &mut UiState, p: &CPane, scale: f32) {
         .inner_margin(Margin::same(12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
+            // Size the pty to the area actually painted — inside this frame's
+            // margins. This is the number the child lays its UI out against, so
+            // it has to match the drawn grid exactly or the last row/column is
+            // cut off (Claude Code's prompt box loses its border and its
+            // bottom line is clipped).
+            let avail = ui.available_size();
+            if cw > 1.0 && ch > 1.0 {
+                let c = ((avail.x / cw).floor() as i32).clamp(10, 1000) as u16;
+                let r = ((avail.y / ch).floor() as i32).clamp(2, 1000) as u16;
+                st.term_grid = Some((r, c, cw.round() as u16, ch.round() as u16));
+            }
             egui::ScrollArea::both()
                 .id_salt("term")
                 .auto_shrink([false, false])

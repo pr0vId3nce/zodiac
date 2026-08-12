@@ -23,6 +23,7 @@ mod macos_menu;
 mod palette;
 mod placeholder;
 mod render;
+mod slash;
 mod theme;
 mod ui;
 

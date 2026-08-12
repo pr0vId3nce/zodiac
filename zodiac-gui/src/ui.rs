@@ -91,6 +91,8 @@ pub struct UiState {
     /// Per-pane composer drafts (keyed by pane id), so a draft survives
     /// switching panes and each agent keeps its own in-progress message.
     pub composers: std::collections::HashMap<u64, String>,
+    /// Highlighted row in the slash-command picker.
+    pub slash_sel: usize,
     /// Measured transcript item heights per pane, used to cull off-screen
     /// turns. Rebuilt lazily as items render; cleared on a width change.
     pub item_heights: std::collections::HashMap<u64, Vec<f32>>,
@@ -1175,7 +1177,28 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
                 if has_perm {
                     perm_hint(ui);
                 } else {
-                    composer_bar(ui, p, st.composers.entry(p.id).or_default(), actions);
+                    // Slash commands are a Claude Code feature; only offer the
+                    // picker for panes actually running that harness.
+                    let cmds = if d.ps(p).and_then(|s| s.agent.as_deref()) == Some("claude") {
+                        crate::slash::commands(
+                            d.ps(p)
+                                .and_then(|s| s.cwd.as_deref())
+                                .map(std::path::Path::new),
+                        )
+                    } else {
+                        Vec::new()
+                    };
+                    // Disjoint field borrows so the picker's selection and the
+                    // pane's draft can both be edited.
+                    let (composers, slash_sel) = (&mut st.composers, &mut st.slash_sel);
+                    composer_bar(
+                        ui,
+                        p,
+                        composers.entry(p.id).or_default(),
+                        slash_sel,
+                        actions,
+                        &cmds,
+                    );
                 }
             });
         egui::CentralPanel::default()
@@ -2437,14 +2460,139 @@ fn turn_tool_box(
     });
 }
 
+/// The slash-command menu drawn above the composer. Returns the index of a
+/// row the user clicked, if any.
+fn slash_menu(ui: &mut egui::Ui, matches: &[crate::slash::SlashCmd], sel: usize) -> Option<usize> {
+    const MAX_ROWS: usize = 8;
+    let mut clicked = None;
+    Frame::NONE
+        .fill(theme::bg_card())
+        .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
+        .corner_radius(CornerRadius::same(10))
+        .inner_margin(Margin::symmetric(8, 6))
+        .outer_margin(Margin::symmetric(18, 0))
+        .show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            // Keep the selected row on screen when the list is long.
+            let first = sel.saturating_sub(MAX_ROWS - 1).min(matches.len());
+            let shown = matches.iter().enumerate().skip(first).take(MAX_ROWS);
+            for (i, c) in shown {
+                let on = i == sel;
+                let r = Frame::NONE
+                    .fill(if on {
+                        theme::bg_selected()
+                    } else {
+                        Color32::TRANSPARENT
+                    })
+                    .corner_radius(CornerRadius::same(6))
+                    .inner_margin(Margin::symmetric(8, 4))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!("/{}", c.name))
+                                    .color(if on {
+                                        theme::accent()
+                                    } else {
+                                        theme::TEXT_BODY
+                                    })
+                                    .size(13.0)
+                                    .monospace()
+                                    .strong(),
+                            );
+                            if !c.desc.is_empty() {
+                                ui.add_space(8.0);
+                                ui.add(
+                                    Label::new(
+                                        RichText::new(&c.desc).color(theme::TEXT_FAINT).size(11.5),
+                                    )
+                                    .truncate(),
+                                );
+                            }
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(
+                                    RichText::new(c.origin).color(theme::TEXT_GHOST).size(10.5),
+                                );
+                            });
+                        });
+                    });
+                if r.response.interact(Sense::click()).clicked() {
+                    clicked = Some(i);
+                }
+            }
+            if matches.len() > MAX_ROWS {
+                ui.label(
+                    RichText::new(format!("+{} more — keep typing", matches.len() - MAX_ROWS))
+                        .color(theme::TEXT_GHOST)
+                        .size(10.5),
+                );
+            }
+            ui.label(
+                RichText::new("↑↓ select · enter complete")
+                    .color(theme::TEXT_GHOST)
+                    .size(10.5),
+            );
+        });
+    ui.add_space(6.0);
+    clicked
+}
+
 /// The composer: a live one-line prompt editor. Enter (or Send) submits to
 /// the agent as T_AGENT_INPUT and clears the buffer.
-fn composer_bar(ui: &mut egui::Ui, p: &CPane, composer: &mut String, actions: &mut Vec<UiAction>) {
+fn composer_bar(
+    ui: &mut egui::Ui,
+    p: &CPane,
+    composer: &mut String,
+    slash_sel: &mut usize,
+    actions: &mut Vec<UiAction>,
+    cmds: &[crate::slash::SlashCmd],
+) {
     Frame::NONE
         .inner_margin(Margin::symmetric(18, 14))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
             let mut submit = false;
+            // Slash-command picker. Shown while the composer holds a bare
+            // `/token`, above the prompt (this panel lays out top-down, so
+            // drawing it first puts it above the field). Arrow keys move the
+            // selection and Enter accepts — all consumed before the TextEdit
+            // sees them, so Enter completes instead of sending.
+            let edit_id = egui::Id::new(("composer", p.id));
+            let composer_focused = ui.memory(|m| m.has_focus(edit_id));
+            let matches = crate::slash::active_query(composer)
+                .map(|q| crate::slash::matching(cmds, q))
+                .unwrap_or_default();
+            let picking = composer_focused && !matches.is_empty();
+            if !picking {
+                *slash_sel = 0;
+            } else {
+                *slash_sel = (*slash_sel).min(matches.len() - 1);
+                let n = matches.len();
+                let mut accept = false;
+                ui.input_mut(|i| {
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                        *slash_sel = (*slash_sel + 1) % n;
+                    }
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                        *slash_sel = (*slash_sel + n - 1) % n;
+                    }
+                    if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                        || i.consume_key(egui::Modifiers::NONE, egui::Key::Tab)
+                    {
+                        accept = true;
+                    }
+                });
+                if let Some(hit) = slash_menu(ui, &matches, *slash_sel) {
+                    *slash_sel = hit;
+                    accept = true;
+                }
+                if accept {
+                    // Complete the token (with a trailing space, which also
+                    // dismisses the picker); Enter again sends it.
+                    *composer = format!("/{} ", matches[*slash_sel].name);
+                    *slash_sel = 0;
+                }
+            }
             Frame::NONE
                 .fill(theme::bg_raised())
                 .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
@@ -2456,9 +2604,9 @@ fn composer_bar(ui: &mut egui::Ui, p: &CPane, composer: &mut String, actions: &m
                         // plain Enter *before* the field sees it (checking last
                         // frame's focus) so it submits instead of typing a
                         // newline — Shift+Enter passes through to wrap the line.
-                        let edit_id = egui::Id::new(("composer", p.id));
-                        let focused = ui.memory(|m| m.has_focus(edit_id));
-                        let send_enter = focused
+                        // (If the slash picker took the Enter above, this sees
+                        // nothing and the keystroke completes rather than sends.)
+                        let send_enter = composer_focused
                             && ui.input_mut(|i| {
                                 i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
                             });
@@ -2470,6 +2618,12 @@ fn composer_bar(ui: &mut egui::Ui, p: &CPane, composer: &mut String, actions: &m
                         let resp = egui::ScrollArea::vertical()
                             .id_salt(("composer_scroll", p.id))
                             .max_height(132.0)
+                            // Shrink to the text's height. Without this the
+                            // scroll area expands to the panel's available
+                            // height, and since the panel sizes itself from its
+                            // content that feeds back into a composer several
+                            // hundred pixels tall covering the transcript.
+                            .auto_shrink([false, true])
                             .show(ui, |ui| {
                                 let edit = egui::TextEdit::multiline(composer)
                                     .id(edit_id)

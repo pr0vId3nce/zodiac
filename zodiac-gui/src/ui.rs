@@ -1838,6 +1838,21 @@ fn parse_inline(s: &str) -> Vec<MdSpan> {
                 continue;
             }
         }
+        // Bare `www.` host with no scheme — link it with an https:// href.
+        if (c == 'w' || c == 'W') && starts_with_www(&chars, i) {
+            if let Some((text, href, adv)) = parse_www_url(&chars, i) {
+                flush(&mut cur, &mut spans, bold, italic);
+                spans.push(MdSpan {
+                    text,
+                    bold,
+                    italic,
+                    code: false,
+                    url: Some(href),
+                });
+                i += adv;
+                continue;
+            }
+        }
         if c == '*' && i + 1 < chars.len() && chars[i + 1] == '*' {
             flush(&mut cur, &mut spans, bold, italic);
             bold = !bold;
@@ -1887,23 +1902,48 @@ fn starts_with_url(chars: &[char], i: usize) -> bool {
     low.starts_with("http://") || low.starts_with("https://")
 }
 
-/// Parse a bare URL at `i`; returns (url, chars_consumed). Runs to the first
-/// whitespace, then trims trailing sentence punctuation and a single closing
-/// bracket so surrounding prose isn't swallowed.
-fn parse_bare_url(chars: &[char], i: usize) -> Option<(String, usize)> {
+/// Does the slice at `i` start a bare `www.` host?
+fn starts_with_www(chars: &[char], i: usize) -> bool {
+    let rest: String = chars[i..].iter().take(4).collect();
+    rest.eq_ignore_ascii_case("www.")
+}
+
+/// Consume a URL-ish token from `i` to the next whitespace, trimming trailing
+/// sentence punctuation / a closing bracket. Returns (token, chars_consumed).
+fn consume_url_token(chars: &[char], i: usize) -> (String, usize) {
     let mut j = i;
     while j < chars.len() && !chars[j].is_whitespace() {
         j += 1;
     }
-    let mut url: String = chars[i..j].iter().collect();
-    let n = url.len();
-    let trimmed = url.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '"', '\'']);
+    let mut tok: String = chars[i..j].iter().collect();
+    let n = tok.len();
+    let trimmed = tok.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '"', '\'']);
     let consumed = j - i - (n - trimmed.len());
-    url.truncate(trimmed.len());
+    tok.truncate(trimmed.len());
+    (tok, consumed)
+}
+
+/// Parse a bare URL at `i`; returns (url, chars_consumed). Runs to the first
+/// whitespace, then trims trailing sentence punctuation and a single closing
+/// bracket so surrounding prose isn't swallowed.
+fn parse_bare_url(chars: &[char], i: usize) -> Option<(String, usize)> {
+    let (url, consumed) = consume_url_token(chars, i);
     if url.len() <= "https://".len() {
         return None;
     }
     Some((url, consumed))
+}
+
+/// Parse a bare `www.host/…` at `i`; returns (display, href, chars_consumed).
+/// The href gets an `https://` scheme so it opens; the display keeps `www.`.
+fn parse_www_url(chars: &[char], i: usize) -> Option<(String, String, usize)> {
+    let (text, consumed) = consume_url_token(chars, i);
+    // Require a dot after the `www.` and something after it (a real host).
+    if text.len() < 6 || !text[4..].contains('.') {
+        return None;
+    }
+    let href = format!("https://{text}");
+    Some((text, href, consumed))
 }
 
 /// A monospace code box: bordered, horizontally scrollable so long lines
@@ -3908,6 +3948,20 @@ mod inline_link_tests {
     fn non_http_scheme_not_linked() {
         assert!(urls("run file:///etc/passwd please").is_empty());
         assert!(urls("no links here at all").is_empty());
+    }
+
+    #[test]
+    fn bare_www_gets_https_href() {
+        // Display keeps www.; the href gains a scheme so it opens.
+        assert_eq!(
+            urls("see www.example.com for more"),
+            vec![(
+                "www.example.com".to_string(),
+                "https://www.example.com".to_string()
+            )]
+        );
+        // "www." with no host is not a link.
+        assert!(urls("the www. prefix").is_empty());
     }
 }
 

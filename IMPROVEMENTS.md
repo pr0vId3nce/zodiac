@@ -12,6 +12,12 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 3. Bare `www.` links in the transcript
+`www.example.com` (no scheme) is now detected and rendered as a clickable
+link with an `https://` href, alongside the existing bare-http detection.
+Requires a dot after `www.` so `www.` alone isn't linked. `ui.rs`
+(`parse_www_url`, shared `consume_url_token`).
+
 ### 2. Nested list indentation in the transcript
 Sub-lists were flattened because `md_block` trims leading whitespace. Now the
 leading indent (2 spaces / 1 tab per level, capped at 6) is measured and

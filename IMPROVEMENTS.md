@@ -200,42 +200,50 @@ routes to a new `md_task_row`. `ui.rs`.
 
 ## Unresolved / follow-ups
 
-<!-- anything found but not fixed, with enough detail to pick up later -->
-- ~~Composer draft is shared, not per-pane.~~ **Done in #21** — per-pane
-  `composers: HashMap<u64,String>`; closed panes' drafts are pruned on
-  `T_PANE_CLOSED` (#23).
+_Refreshed 2026-08-12 after the slash-command/terminal work. Resolved items are
+struck through so the list stays honest about what's actually open._
+
+### Open
+
+- **Perf: a large idle transcript still costs ~8–10% of a core.** After
+  virtualizing + caching layout, cost is flat in transcript length (1600 vs
+  4800 items), but it doesn't fall to idle. Not startup — sampling at t=25s
+  gives the same figure. Hypothesis: a repaint feedback loop (measured heights
+  nudge content height, which nudges the stick-to-bottom ScrollArea, which
+  repaints), now bounded by the 16ms clamp so it reads as a fixed cost.
+  Confirm with a frame counter or `perf top` before trusting that.
+  See `zodiac-gui/HANDOFF.md`.
+- **Perf was never measured against a *streaming* pane.** My fixture seeds a
+  transcript but nothing streams, and streaming is what pinned the repaint
+  clock in the original profile. The closest analogue showed ~40x, but a real
+  streaming session is the honest confirmation.
+- **Terminal mouse mapping is unverified on-device.** `grid_cell` now maps
+  through the geometry `terminal_view` actually draws with, but I can't
+  synthesise mouse input here — needs a click test in a mouse-driven TUI (vim,
+  htop).
+- **Missing color-emoji glyphs in terminal panes.** `🦀` draws as `□` while
+  `📦` is fine, so the fallback chain has gaps. `font.rs` / `theme.rs`.
+- **Kitty graphics inside terminal mode.** Long-standing follow-on: the grid
+  draws text and colors but not images.
+- **`/resume` opens a new pane** rather than resuming in place. Replacing in
+  place needs a server-side "respawn this pane's agent" path.
+- **Slash picker is claude-only.** Pi has its own command set; nothing is
+  offered for pi panes.
 - **Finish sound never plays on agent completion (GUI, and seemingly TUI).**
-  The `finish_sound`/ringtone setting exists and `protocol::play_sound` works,
-  but the only call site is `client.rs::cycle_finish_sound` — a *preview* when
-  you change the setting. I couldn't find a working→done transition that
-  actually plays it in the TUI, and the GUI has no audio wiring at all. To
-  finish it: track each pane's previous status in `GuiApp`, and on a
-  working→done edge call `zodiac::protocol::play_sound(settings.finish_sound_path())`.
-  Left out because the intended trigger/debounce is unclear (a mis-timed sound
-  on every state flip would be worse than silence) and it wants on-device
-  audio testing.
-- **Transcript re-parses everything every frame.** `transcript_view` renders
-  all `items` (and re-parses the streaming tail's markdown) each frame with no
-  virtualization; a very long transcript or a very long single streaming
-  message is O(n)/frame. Fine today; if it ever drags, cache parsed turns or
-  cull with `ScrollArea::show_viewport`.
-- **Couldn't find `zodiac-gui/handoff.md`.** The user referenced findings from
-  another agent at `zodiac-gui/handoff.md`, but as of these commits it isn't in
-  the working tree, on `origin/main`, in any branch/PR ref, or anywhere on disk
-  under `/home/d3s` (searched case-insensitively — only the unrelated
-  `HANDOFF.md` iOS handoff exists). Likely committed to a different clone/remote
-  that hasn't reached `pr0vId3nce/zodiac`. Needs the correct path/repo to fold
-  its findings in.
-- **Terminal mouse coordinate mismatch (pre-existing).** `GuiApp::grid_cell`
-  (app.rs) maps `cursor_px` → (col,row) using the wgpu renderer's `r.cell` and
-  `r.grid_origin()`. But the terminal is drawn by egui `terminal_view` (ui.rs)
-  at `13.0 * term_scale`, inside a Frame with `inner_margin(12)` and a header
-  panel above it — so the cell size and the content origin both differ from
-  what `grid_cell` assumes. Result: mouse reporting to terminal apps (vim,
-  htop, tmux) can land on the wrong cell; the new terminal-font scale widens
-  the gap. Proper fix: record the terminal grid's real rect (origin + scaled
-  cell) from `terminal_view` into `UiState` (like `term_grid` already records
-  rows/cols/cw/ch) and have `grid_cell` use that, accounting for
-  points↔pixels and the egui zoom. Left out here because it's a larger change
-  than the surrounding polish and needs on-device verification with a
-  mouse-driven TUI.
+  `finish_sound` + `protocol::play_sound` exist, but the only call site is
+  `client.rs::cycle_finish_sound` — a *preview* when the setting changes. To
+  finish: track each pane's previous status and call `play_sound` on a
+  working→done edge. Left alone because the trigger/debounce is a judgement
+  call (a mis-timed sound is worse than silence) and it wants audio testing.
+- **Enter on the Observatory didn't reliably open a pane** during scripted
+  testing (I worked around it with Alt+1–9, which now also switches to the
+  pane). Might be my synthetic input rather than a real bug — worth a quick
+  manual check that Enter opens the highlighted card.
+
+### Resolved since this list was written
+
+- ~~Composer draft is shared, not per-pane.~~ Done (#21/#23).
+- ~~Transcript re-parses everything every frame.~~ Done (#26) — virtualized
+  with `show_viewport` + cached item heights, plus a galley cache.
+- ~~Terminal mouse coordinate mismatch.~~ Fixed; verification still open above.
+- ~~Couldn't find `zodiac-gui/handoff.md`.~~ It landed later; acted on in full.

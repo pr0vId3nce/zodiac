@@ -42,10 +42,11 @@ const BUILTINS: &[(&str, &str)] = &[
     ("help", "List available commands"),
 ];
 
-/// Commands zodiac intercepts instead of forwarding to the harness, because
-/// they need multiplexer-side action (respawning the pane's process).
+/// Commands zodiac answers itself instead of forwarding to the harness,
+/// because they need multiplexer-side action (spawning a pane). Kept as the
+/// single source of truth for the interception in `composer_bar`.
 pub fn is_zodiac_handled(name: &str) -> bool {
-    matches!(name, "resume" | "continue")
+    matches!(name, "resume")
 }
 
 /// Every command available to a claude pane rooted at `cwd`, sorted by name.
@@ -382,5 +383,7 @@ mod tests {
     fn resume_is_handled_by_zodiac_not_the_cli() {
         assert!(is_zodiac_handled("resume"));
         assert!(!is_zodiac_handled("cost"));
+        // The interception in composer_bar routes on exactly this.
+        assert!(!is_zodiac_handled("compact"));
     }
 }

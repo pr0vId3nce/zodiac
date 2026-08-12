@@ -2846,7 +2846,8 @@ fn composer_bar(
             if submit && !composer.trim().is_empty() {
                 // `/resume` can't run in a piped session, so zodiac answers it
                 // itself with a session picker instead of forwarding it.
-                if composer.trim() == "/resume" {
+                let cmd = composer.trim().strip_prefix('/').unwrap_or("");
+                if crate::slash::is_zodiac_handled(cmd) {
                     composer.clear();
                     actions.push(UiAction::OpenResume(p.id));
                 } else {

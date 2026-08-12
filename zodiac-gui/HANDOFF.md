@@ -1,5 +1,61 @@
 # zodiac-gui handoff — the GUI burns a full CPU core
 
+> ## RESOLUTION (2026-08-12, from NTP424/linux) — all four fixes landed
+>
+> Commits `3d07c51` (cache + clamp + throttle) and `74987aa` (virtualization).
+> Your diagnosis held up: both causes were real, portable, and still present.
+> Status of each suggested fix, then what I measured, then what's still open.
+>
+> | # | Fix | Status |
+> |---|-----|--------|
+> | 1 | Virtualize the transcript | **Done** — `show_viewport` + per-pane cached item heights; off-screen turns collapse into one spacer (600px overscan). |
+> | 2 | Cache per-item layout | **Done** — finished galleys cached by content + wrap width + scale + ppp; covers `md_line`'s non-link path and the code/result boxes. `result_box` no longer re-runs `clip_lines` on a big tool output every frame. |
+> | 3 | Clamp the frame rate | **Done** — the zero-delay case is floored at 16ms instead of `Instant::now()`. |
+> | 4 | Throttle when unfocused/occluded | **Done** — occluded windows get no animation frames; visible-but-unfocused drop to ~15fps (a background pane must still stream visibly, so I throttled rather than stopped). |
+>
+> Two things I had to get right that aren't obvious from the outside:
+> heights must be measured as the **cursor advance**, not the drawn rect —
+> egui inserts `item_spacing` between widgets, so a rect-based height makes the
+> spacers standing in for culled items drift; and table egui-ids had to move
+> from a per-render counter to the item index, or culling an item above shifts
+> every table's id and resets its scroll state.
+>
+> ### Measured (release, synthetic fixture, this box)
+>
+> `ZODIAC_GUI_SEED_ITEMS=<n>` seeds a long transcript; `ZODIAC_GUI_PERF_OFF=1`
+> restores the old path, so both arms are measurable **on one binary**:
+>
+> ```
+> fixed   x50 (400 items)   0.2%      prefix  x50    8.6%     <- ~40x at 400 items
+> fixed   x200 (1600)       8.2%      prefix  x200   9.7%
+> fixed   x600 (4800)       8.2%      prefix  x600   8.9%
+> ```
+>
+> The scale check you asked for passes on the fixed build: **cost is flat from
+> 1600 to 4800 items** (8.2% either way), i.e. decoupled from transcript length.
+>
+> ### Still open — read this before assuming it's fully fixed
+>
+> **A large pane still costs ~8-10% of a core when idle, and I did not get to
+> the bottom of why.** The anomaly is `fixed x50 = 0.2%` vs `fixed x200 = 8.2%`:
+> if virtualization were doing all the work the two should match. It is *not*
+> startup cost — sampling from t=25s instead of t=5s gives the same ~10%, so
+> it's steady state. My leading hypothesis is a repaint feedback loop: measured
+> heights feed back into content height, which nudges the `stick_to_bottom`
+> ScrollArea, which requests another repaint — bounded now by the 16ms clamp
+> (so ~60fps of cheap frames rather than a free-running core), which is why it
+> looks like a fixed cost rather than a growing one. Worth confirming with a
+> frame counter or `perf top` before trusting my guess.
+>
+> Also note my fixture is **idle** — it seeds a transcript but nothing streams,
+> so it does not reproduce the exact condition you profiled (streaming pins the
+> repaint clock). The `x50` pair is the closest analogue and it's a ~40x win,
+> but a real streaming session on the mac is still the honest confirmation.
+>
+> `cargo build --profile profiling -p zodiac-gui` now gives you release speed
+> **with symbols** — `strip = true` was what made your `perf`/`sample`
+> attribution guesswork, and that's fixed.
+
 _Written 2026-08-11 from the macbook, for **NTP424** (linux box). Diagnosis only
 — **no code changed**, nothing committed. `git pull` gets you nothing new; this
 file is the whole delivery._

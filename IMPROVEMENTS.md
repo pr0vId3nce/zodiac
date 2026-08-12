@@ -21,6 +21,19 @@ the headless GUI selftest walks every screen + a seeded rich pane and exits 0.
 
 <!-- new entries go here, newest first -->
 
+### 26. CPU-burn handoff: all four fixes (see `zodiac-gui/HANDOFF.md`)
+Acted on the macbook's profiling handoff — the GUI pegged a core while agents
+streamed. Landed all four suggested fixes: virtualized the transcript
+(`show_viewport` + cached item heights), cached laid-out galleys so completed
+turns stop re-parsing Markdown and rebuilding `LayoutJob`s every frame, floored
+the zero-delay repaint at 16ms, and stopped/throttled animation when the window
+is occluded/unfocused. Measured ~40x less CPU at 400 items and cost now flat
+from 1600→4800 items. Added `ZODIAC_GUI_PERF_OFF` (A/B on one binary),
+`ZODIAC_GUI_SEED_ITEMS` (soak fixture), and a `profiling` cargo profile
+(release + symbols; `strip = true` had made `perf` useless). **Residual, still
+open:** a large idle pane costs ~8-10% of a core; details and hypothesis in the
+handoff's RESOLUTION section. Commits `3d07c51`, `74987aa`.
+
 ### 25. Exercise new markdown in the selftest seed
 `seed_agent_pane` (the `ZODIAC_GUI_SELFTEST` rich pane) now includes a table,
 nested list, task-list checkboxes, strikethrough, a link with parens in the

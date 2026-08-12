@@ -1447,7 +1447,10 @@ fn md_block(ui: &mut egui::Ui, line: &str) {
                 md_task_row(ui, false, rest);
                 return;
             }
-            if item.len() >= 4 && item[..4].eq_ignore_ascii_case("[x] ") {
+            if item
+                .get(..4)
+                .is_some_and(|p| p.eq_ignore_ascii_case("[x] "))
+            {
                 md_task_row(ui, true, &item[4..]);
                 return;
             }

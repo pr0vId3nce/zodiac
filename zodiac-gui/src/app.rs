@@ -1421,12 +1421,50 @@ impl GuiApp {
                 }
                 crate::ui::UiAction::NewShell => self.send(T_NEW_PANE, 0, &[]),
                 crate::ui::UiAction::NewAgent => self.open_agent_picker(),
-                crate::ui::UiAction::CreateAgent { agent, model } => {
+                crate::ui::UiAction::CreateAgent {
+                    agent,
+                    model,
+                    session,
+                } => {
                     let mut obj = serde_json::json!({ "kind": "agent", "agent": agent });
                     if let Some(m) = model {
                         obj["model"] = serde_json::Value::String(m);
                     }
+                    if let Some(s) = session {
+                        obj["session"] = serde_json::Value::String(s);
+                    }
+                    // Resume in the active pane's directory, not the server's.
+                    let active = self.panes.get(self.active).map(|p| p.id);
+                    if let Some(cwd) = active.and_then(|id| {
+                        self.state
+                            .as_ref()
+                            .and_then(|st| st.panes.iter().find(|ps| ps.id == id))
+                            .and_then(|ps| ps.cwd.clone())
+                    }) {
+                        obj["cwd"] = serde_json::Value::String(cwd);
+                    }
                     self.send(T_NEW_PANE, 0, obj.to_string().as_bytes());
+                }
+                crate::ui::UiAction::OpenResume(id) => {
+                    let ps = self
+                        .state
+                        .as_ref()
+                        .and_then(|st| st.panes.iter().find(|ps| ps.id == id));
+                    let cwd = ps.and_then(|ps| ps.cwd.clone());
+                    self.ui_state.resume_model =
+                        self.panes.iter().find(|p| p.id == id).and_then(|p| {
+                            p.agent
+                                .model
+                                .clone()
+                                .or_else(|| ps.and_then(|s| s.model.clone()))
+                        });
+                    self.ui_state.resume_list = cwd
+                        .as_deref()
+                        .map(|c| crate::slash::sessions(std::path::Path::new(c)))
+                        .unwrap_or_default();
+                    self.ui_state.resume_sel = 0;
+                    self.ui_state.overlay = crate::ui::Overlay::Resume;
+                    self.request_redraw();
                 }
             }
         }

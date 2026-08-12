@@ -644,6 +644,9 @@ impl Server {
                     /// or pi `provider/id`). None = harness default.
                     #[serde(default)]
                     model: Option<String>,
+                    /// Resume this harness session id (claude `--resume`).
+                    #[serde(default)]
+                    session: Option<String>,
                 }
                 let req: Option<NewPane> = serde_json::from_slice(&f.data).ok();
                 match req {
@@ -654,7 +657,8 @@ impl Server {
                             .and_then(crate::agent::AgentKind::parse)
                             .unwrap_or(crate::agent::AgentKind::Claude);
                         let model = r.model.filter(|m| !m.is_empty());
-                        let _ = self.new_agent_pane(kind, r.cwd.map(PathBuf::from), None, model);
+                        let session = r.session.filter(|s| !s.is_empty());
+                        let _ = self.new_agent_pane(kind, r.cwd.map(PathBuf::from), session, model);
                     }
                     _ => {
                         let _ = self.new_pane(None, None, Vec::new(), true);

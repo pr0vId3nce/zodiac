@@ -54,6 +54,8 @@ pub enum Overlay {
     Raise,
     /// New-agent picker: choose a harness, then a model (Alt+N).
     NewAgent,
+    /// Session picker for `/resume` in a structured claude pane.
+    Resume,
 }
 
 /// One selectable model for a harness in the new-agent picker.
@@ -93,6 +95,11 @@ pub struct UiState {
     pub composers: std::collections::HashMap<u64, String>,
     /// Highlighted row in the slash-command picker.
     pub slash_sel: usize,
+    /// `/resume` session picker: the candidates and the highlighted row.
+    pub resume_list: Vec<crate::slash::SessionEntry>,
+    pub resume_sel: usize,
+    /// Model the pane being resumed was launched with, carried to the new one.
+    pub resume_model: Option<String>,
     /// Measured transcript item heights per pane, used to cull off-screen
     /// turns. Rebuilt lazily as items render; cleared on a width change.
     pub item_heights: std::collections::HashMap<u64, Vec<f32>>,
@@ -176,7 +183,11 @@ pub enum UiAction {
     CreateAgent {
         agent: String,
         model: Option<String>,
+        /// Resume this harness session id instead of starting fresh.
+        session: Option<String>,
     },
+    /// `/resume` was submitted: open the session picker for this pane.
+    OpenResume(u64),
 }
 
 /// Immutable view of the app state the UI reads for one frame.
@@ -324,6 +335,7 @@ pub fn build(
         Overlay::Oracle => oracle_dialog(ui, st, d.motion),
         Overlay::Raise => raise_dialog(ui, d, st, actions),
         Overlay::NewAgent => new_agent_dialog(ui, st, actions),
+        Overlay::Resume => resume_dialog(ui, st, actions),
         Overlay::None => {}
     }
     // A 1px edge border to define the borderless window (decorations are off).
@@ -2455,11 +2467,168 @@ fn turn_tool_box(
     });
 }
 
+/// `/resume`: pick an earlier Claude Code session for this directory. The CLI
+/// can't run its own picker over a pipe ("/resume isn't available in this
+/// environment"), so zodiac lists the sessions and resumes the chosen one by
+/// spawning a pane with `--resume <id>`.
+fn resume_dialog(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<UiAction>) {
+    let screen = ui
+        .ctx()
+        .input(|i| i.raw.screen_rect)
+        .unwrap_or_else(|| ui.max_rect());
+    ui.painter().rect_filled(
+        screen,
+        CornerRadius::ZERO,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 150),
+    );
+    let n = st.resume_list.len();
+    let mut chosen: Option<usize> = None;
+    ui.input_mut(|i| {
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+            st.overlay = Overlay::None;
+        }
+        if n > 0 {
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown) {
+                st.resume_sel = (st.resume_sel + 1) % n;
+            }
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp) {
+                st.resume_sel = (st.resume_sel + n - 1) % n;
+            }
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
+                chosen = Some(st.resume_sel);
+            }
+        }
+    });
+    if st.overlay != Overlay::Resume {
+        return;
+    }
+    let sel = st.resume_sel.min(n.saturating_sub(1));
+    egui::Area::new(egui::Id::new("resume"))
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            Frame::NONE
+                .fill(theme::bg_card())
+                .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
+                .corner_radius(CornerRadius::same(14))
+                .inner_margin(Margin::same(20))
+                .show(ui, |ui| {
+                    ui.set_width(720.0);
+                    ui.label(
+                        RichText::new("Resume a session")
+                            .color(theme::TEXT_PRIMARY)
+                            .size(17.0)
+                            .strong(),
+                    );
+                    ui.add_space(4.0);
+                    ui.label(
+                        RichText::new("Opens a new pane continuing the chosen conversation.")
+                            .color(theme::TEXT_DIM)
+                            .size(12.0),
+                    );
+                    ui.add_space(12.0);
+                    if n == 0 {
+                        ui.label(
+                            RichText::new("No past sessions found for this directory.")
+                                .color(theme::TEXT_FAINT)
+                                .size(13.0),
+                        );
+                    }
+                    egui::ScrollArea::vertical()
+                        .id_salt("resume_rows")
+                        .max_height(360.0)
+                        .show(ui, |ui| {
+                            for (i, s) in st.resume_list.iter().enumerate() {
+                                let on = i == sel;
+                                let r = Frame::NONE
+                                    .fill(if on {
+                                        theme::bg_selected()
+                                    } else {
+                                        Color32::TRANSPARENT
+                                    })
+                                    .corner_radius(CornerRadius::same(8))
+                                    .inner_margin(Margin::symmetric(10, 6))
+                                    .show(ui, |ui| {
+                                        ui.set_width(ui.available_width());
+                                        ui.horizontal(|ui| {
+                                            ui.add(
+                                                Label::new(
+                                                    RichText::new(&s.summary)
+                                                        .color(if on {
+                                                            theme::TEXT_PRIMARY
+                                                        } else {
+                                                            theme::TEXT_BODY
+                                                        })
+                                                        .size(13.0),
+                                                )
+                                                .truncate(),
+                                            );
+                                            ui.with_layout(
+                                                Layout::right_to_left(Align::Center),
+                                                |ui| {
+                                                    ui.label(
+                                                        RichText::new(&s.age)
+                                                            .color(theme::TEXT_GHOST)
+                                                            .size(11.0),
+                                                    );
+                                                },
+                                            );
+                                        });
+                                    });
+                                if r.response.interact(Sense::click()).clicked() {
+                                    chosen = Some(i);
+                                }
+                            }
+                        });
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("↑↓ select · enter resume · esc cancel")
+                            .color(theme::TEXT_GHOST)
+                            .size(11.0),
+                    );
+                });
+        });
+    if let Some(i) = chosen {
+        if let Some(s) = st.resume_list.get(i) {
+            actions.push(UiAction::CreateAgent {
+                agent: "claude".into(),
+                model: st.resume_model.clone(),
+                session: Some(s.id.clone()),
+            });
+        }
+        st.overlay = Overlay::None;
+    }
+}
+
 /// The slash-command menu drawn above the composer. Returns the index of a
 /// row the user clicked, if any.
-fn slash_menu(ui: &mut egui::Ui, matches: &[crate::slash::SlashCmd], sel: usize) -> Option<usize> {
+fn slash_menu(
+    ui: &mut egui::Ui,
+    matches: &[crate::slash::SlashCmd],
+    sel: usize,
+    anchor: egui::Rect,
+) -> Option<usize> {
     const MAX_ROWS: usize = 8;
     let mut clicked = None;
+    egui::Area::new(egui::Id::new("slash_menu"))
+        .order(egui::Order::Foreground)
+        .fixed_pos(egui::pos2(anchor.left() + 18.0, anchor.top() - 6.0))
+        .pivot(egui::Align2::LEFT_BOTTOM)
+        .constrain(true)
+        .show(ui.ctx(), |ui| {
+            ui.set_max_width(anchor.width() - 36.0);
+            slash_menu_body(ui, matches, sel, &mut clicked);
+        });
+    clicked
+}
+
+fn slash_menu_body(
+    ui: &mut egui::Ui,
+    matches: &[crate::slash::SlashCmd],
+    sel: usize,
+    clicked: &mut Option<usize>,
+) {
+    const MAX_ROWS: usize = 8;
     Frame::NONE
         .fill(theme::bg_card())
         .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
@@ -2512,7 +2681,7 @@ fn slash_menu(ui: &mut egui::Ui, matches: &[crate::slash::SlashCmd], sel: usize)
                         });
                     });
                 if r.response.interact(Sense::click()).clicked() {
-                    clicked = Some(i);
+                    *clicked = Some(i);
                 }
             }
             if matches.len() > MAX_ROWS {
@@ -2528,8 +2697,6 @@ fn slash_menu(ui: &mut egui::Ui, matches: &[crate::slash::SlashCmd], sel: usize)
                     .size(10.5),
             );
         });
-    ui.add_space(6.0);
-    clicked
 }
 
 /// The composer: a live one-line prompt editor. Enter (or Send) submits to
@@ -2577,10 +2744,6 @@ fn composer_bar(
                         accept = true;
                     }
                 });
-                if let Some(hit) = slash_menu(ui, &matches, *slash_sel) {
-                    *slash_sel = hit;
-                    accept = true;
-                }
                 if accept {
                     // Complete the token (with a trailing space, which also
                     // dismisses the picker); Enter again sends it.
@@ -2657,8 +2820,25 @@ fn composer_bar(
                         });
                     });
                 });
+            // Draw the picker as a floating overlay anchored just above the
+            // composer. Rendering it inline made it part of this panel, and the
+            // panel sizes from its content, which inflated the composer.
+            if picking {
+                let anchor = ui.min_rect();
+                if let Some(hit) = slash_menu(ui, &matches, *slash_sel, anchor) {
+                    *composer = format!("/{} ", matches[hit].name);
+                    *slash_sel = 0;
+                }
+            }
             if submit && !composer.trim().is_empty() {
-                actions.push(UiAction::SendAgent(p.id));
+                // `/resume` can't run in a piped session, so zodiac answers it
+                // itself with a session picker instead of forwarding it.
+                if composer.trim() == "/resume" {
+                    composer.clear();
+                    actions.push(UiAction::OpenResume(p.id));
+                } else {
+                    actions.push(UiAction::SendAgent(p.id));
+                }
             }
         });
 }
@@ -3130,7 +3310,11 @@ fn agent_activate(
         if h.models.len() <= 1 {
             let model = h.models.first().and_then(|m| m.value.clone());
             let agent = h.name.clone();
-            actions.push(UiAction::CreateAgent { agent, model });
+            actions.push(UiAction::CreateAgent {
+                agent,
+                model,
+                session: None,
+            });
             st.overlay = Overlay::None;
         } else {
             st.agent_picker.step = 1;
@@ -3140,7 +3324,11 @@ fn agent_activate(
         let h = &st.agent_picker.harnesses[h_sel.min(n_h - 1)];
         let model = h.models.get(i).and_then(|m| m.value.clone());
         let agent = h.name.clone();
-        actions.push(UiAction::CreateAgent { agent, model });
+        actions.push(UiAction::CreateAgent {
+            agent,
+            model,
+            session: None,
+        });
         st.overlay = Overlay::None;
     }
 }

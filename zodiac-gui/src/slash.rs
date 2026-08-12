@@ -203,6 +203,107 @@ fn read_head(path: &std::path::Path, max: usize) -> Option<String> {
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
+/// A past Claude Code session that can be resumed.
+#[derive(Clone, Debug)]
+pub struct SessionEntry {
+    /// The session UUID, passed to the CLI as `--resume <id>`.
+    pub id: String,
+    /// First user message, for recognising the session.
+    pub summary: String,
+    /// "3m", "2h", "4d" — how long since it was last written.
+    pub age: String,
+}
+
+/// Past Claude Code sessions for `cwd`, newest first.
+///
+/// The CLI keeps them at `~/.claude/projects/<cwd-with-slashes-as-dashes>/
+/// <uuid>.jsonl`. `/resume` can't run in a piped session ("isn't available in
+/// this environment"), so zodiac enumerates them itself and resumes by
+/// spawning the harness with `--resume <id>`.
+pub fn sessions(cwd: &std::path::Path) -> Vec<SessionEntry> {
+    let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) else {
+        return Vec::new();
+    };
+    let slug = cwd.display().to_string().replace('/', "-");
+    let dir = home.join(".claude/projects").join(slug);
+    let Ok(rd) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out: Vec<(std::time::SystemTime, SessionEntry)> = Vec::new();
+    for e in rd.flatten() {
+        let path = e.path();
+        if path.extension().is_none_or(|x| x != "jsonl") {
+            continue;
+        }
+        let Some(id) = path.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let modified = e
+            .metadata()
+            .and_then(|m| m.modified())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        out.push((
+            modified,
+            SessionEntry {
+                id: id.to_string(),
+                summary: first_user_message(&path).unwrap_or_else(|| "(no prompt)".into()),
+                age: age_str(modified),
+            },
+        ));
+    }
+    out.sort_by_key(|(t, _)| std::cmp::Reverse(*t));
+    out.into_iter().map(|(_, s)| s).take(30).collect()
+}
+
+/// The first user prompt in a session transcript, clipped for display.
+fn first_user_message(path: &std::path::Path) -> Option<String> {
+    use std::io::{BufRead, BufReader};
+    let f = std::fs::File::open(path).ok()?;
+    for line in BufReader::new(f).lines().map_while(Result::ok).take(400) {
+        let v: serde_json::Value = match serde_json::from_str(&line) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if v.get("type").and_then(|t| t.as_str()) != Some("user") {
+            continue;
+        }
+        let content = v.get("message").and_then(|m| m.get("content"))?;
+        let text = match content {
+            serde_json::Value::String(s) => s.clone(),
+            serde_json::Value::Array(a) => a
+                .iter()
+                .filter_map(|b| b.get("text").and_then(|t| t.as_str()))
+                .collect::<Vec<_>>()
+                .join(" "),
+            _ => continue,
+        };
+        let text = text.split_whitespace().collect::<Vec<_>>().join(" ");
+        if text.is_empty() {
+            continue;
+        }
+        return Some(if text.chars().count() > 80 {
+            let t: String = text.chars().take(79).collect();
+            format!("{t}…")
+        } else {
+            text
+        });
+    }
+    None
+}
+
+fn age_str(t: std::time::SystemTime) -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(t)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    match secs {
+        s if s < 90 => "just now".to_string(),
+        s if s < 3600 => format!("{}m", s / 60),
+        s if s < 86400 => format!("{}h", s / 3600),
+        s => format!("{}d", s / 86400),
+    }
+}
+
 /// The in-progress `/command` token being typed, if the composer holds one:
 /// text starts with `/` and no whitespace has been typed yet (once there are
 /// arguments the picker gets out of the way).

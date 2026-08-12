@@ -1441,6 +1441,16 @@ fn md_block(ui: &mut egui::Ui, line: &str) {
     }
     for pre in ["- ", "* ", "+ "] {
         if let Some(item) = t.strip_prefix(pre) {
+            // GFM task list: `- [ ] todo` / `- [x] done`. Render a checkbox
+            // glyph instead of the bullet; done items get a dim/struck feel.
+            if let Some(rest) = item.strip_prefix("[ ] ") {
+                md_task_row(ui, false, rest);
+                return;
+            }
+            if item.len() >= 4 && item[..4].eq_ignore_ascii_case("[x] ") {
+                md_task_row(ui, true, &item[4..]);
+                return;
+            }
             md_bullet_row(ui, "•".to_string(), item);
             return;
         }
@@ -1594,6 +1604,30 @@ fn md_heading(ui: &mut egui::Ui, text: &str, size: f32) {
 }
 
 /// A list row: an accent marker + the item's inline-formatted text.
+/// A GFM task-list item: a checkbox glyph (checked = accent, unchecked = dim)
+/// followed by the item text (dimmed when done).
+fn md_task_row(ui: &mut egui::Ui, done: bool, item: &str) {
+    ui.horizontal_top(|ui| {
+        ui.add_space(6.0);
+        let (glyph, col) = if done {
+            ("\u{2611}", theme::accent()) // ballot box with check
+        } else {
+            ("\u{2610}", theme::TEXT_DIM) // empty ballot box
+        };
+        ui.label(RichText::new(glyph).color(col).size(tsize(14.0)));
+        ui.add_space(6.0);
+        ui.vertical(|ui| {
+            ui.set_max_width(ui.available_width());
+            let color = if done {
+                theme::TEXT_FAINT
+            } else {
+                theme::TEXT_BODY
+            };
+            md_line(ui, item, 14.5, color);
+        });
+    });
+}
+
 fn md_bullet_row(ui: &mut egui::Ui, marker: String, item: &str) {
     ui.horizontal_top(|ui| {
         ui.add_space(6.0);

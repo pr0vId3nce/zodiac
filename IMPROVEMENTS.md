@@ -12,6 +12,11 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 7. Markdown strikethrough (`~~text~~`)
+`parse_inline` now toggles a strike run on `~~` (like `**` for bold) and
+`span_format` draws the strikethrough. Threaded a `strike` flag through the
+`MdSpan` constructions. `ui.rs`.
+
 ### 6. Fix markdown table egui id collision
 `md_table` used the header text as its egui id, so two tables with the same
 header (common when an agent emits several similar tables) collided and the

@@ -1766,6 +1766,9 @@ fn span_format(sp: &MdSpan, size: f32, base: Color32) -> egui::TextFormat {
     if sp.code {
         fmt.background = theme::bg_raised();
     }
+    if sp.strike {
+        fmt.strikethrough = Stroke::new(1.0, color);
+    }
     fmt
 }
 
@@ -1775,6 +1778,8 @@ struct MdSpan {
     bold: bool,
     italic: bool,
     code: bool,
+    /// Strikethrough run (`~~text~~`).
+    strike: bool,
     /// `Some(url)` marks a clickable link (opens in the OS default browser);
     /// the run is also styled with the accent color + underline.
     url: Option<String>,
@@ -1783,12 +1788,13 @@ struct MdSpan {
 /// Split a line into inline runs: `` `code` ``, **bold**, *italic*/_italic_,
 /// and `[text](url)` links (the URL is dropped; the text is styled).
 fn parse_inline(s: &str) -> Vec<MdSpan> {
-    fn flush(cur: &mut String, spans: &mut Vec<MdSpan>, bold: bool, italic: bool) {
+    fn flush(cur: &mut String, spans: &mut Vec<MdSpan>, bold: bool, italic: bool, strike: bool) {
         if !cur.is_empty() {
             spans.push(MdSpan {
                 text: std::mem::take(cur),
                 bold,
                 italic,
+                strike,
                 code: false,
                 url: None,
             });
@@ -1799,11 +1805,12 @@ fn parse_inline(s: &str) -> Vec<MdSpan> {
     let mut cur = String::new();
     let mut bold = false;
     let mut italic = false;
+    let mut strike = false;
     let mut i = 0;
     while i < chars.len() {
         let c = chars[i];
         if c == '`' {
-            flush(&mut cur, &mut spans, bold, italic);
+            flush(&mut cur, &mut spans, bold, italic, strike);
             let mut j = i + 1;
             let mut code = String::new();
             while j < chars.len() && chars[j] != '`' {
@@ -1815,6 +1822,7 @@ fn parse_inline(s: &str) -> Vec<MdSpan> {
                     text: code,
                     bold,
                     italic,
+                    strike,
                     code: true,
                     url: None,
                 });
@@ -1827,11 +1835,12 @@ fn parse_inline(s: &str) -> Vec<MdSpan> {
         }
         if c == '[' {
             if let Some((text, url, adv)) = parse_link(&chars, i) {
-                flush(&mut cur, &mut spans, bold, italic);
+                flush(&mut cur, &mut spans, bold, italic, strike);
                 spans.push(MdSpan {
                     text,
                     bold,
                     italic,
+                    strike,
                     code: false,
                     url: Some(url),
                 });
@@ -1844,11 +1853,12 @@ fn parse_inline(s: &str) -> Vec<MdSpan> {
         // trailing punctuation so "see https://x.com." doesn't eat the period.
         if (c == 'h' || c == 'H') && starts_with_url(&chars, i) {
             if let Some((url, adv)) = parse_bare_url(&chars, i) {
-                flush(&mut cur, &mut spans, bold, italic);
+                flush(&mut cur, &mut spans, bold, italic, strike);
                 spans.push(MdSpan {
                     text: url.clone(),
                     bold,
                     italic,
+                    strike,
                     code: false,
                     url: Some(url),
                 });
@@ -1859,11 +1869,12 @@ fn parse_inline(s: &str) -> Vec<MdSpan> {
         // Bare `www.` host with no scheme — link it with an https:// href.
         if (c == 'w' || c == 'W') && starts_with_www(&chars, i) {
             if let Some((text, href, adv)) = parse_www_url(&chars, i) {
-                flush(&mut cur, &mut spans, bold, italic);
+                flush(&mut cur, &mut spans, bold, italic, strike);
                 spans.push(MdSpan {
                     text,
                     bold,
                     italic,
+                    strike,
                     code: false,
                     url: Some(href),
                 });
@@ -1871,8 +1882,14 @@ fn parse_inline(s: &str) -> Vec<MdSpan> {
                 continue;
             }
         }
+        if c == '~' && i + 1 < chars.len() && chars[i + 1] == '~' {
+            flush(&mut cur, &mut spans, bold, italic, strike);
+            strike = !strike;
+            i += 2;
+            continue;
+        }
         if c == '*' && i + 1 < chars.len() && chars[i + 1] == '*' {
-            flush(&mut cur, &mut spans, bold, italic);
+            flush(&mut cur, &mut spans, bold, italic, strike);
             bold = !bold;
             i += 2;
             continue;
@@ -1889,7 +1906,7 @@ fn parse_inline(s: &str) -> Vec<MdSpan> {
                 i += 1;
                 continue;
             }
-            flush(&mut cur, &mut spans, bold, italic);
+            flush(&mut cur, &mut spans, bold, italic, strike);
             italic = !italic;
             i += 1;
             continue;
@@ -1897,7 +1914,7 @@ fn parse_inline(s: &str) -> Vec<MdSpan> {
         cur.push(c);
         i += 1;
     }
-    flush(&mut cur, &mut spans, bold, italic);
+    flush(&mut cur, &mut spans, bold, italic, strike);
     spans
 }
 
@@ -3974,6 +3991,19 @@ mod inline_link_tests {
     fn non_http_scheme_not_linked() {
         assert!(urls("run file:///etc/passwd please").is_empty());
         assert!(urls("no links here at all").is_empty());
+    }
+
+    #[test]
+    fn strikethrough_marks_the_run() {
+        let spans = parse_inline("keep ~~drop this~~ end");
+        let struck: Vec<&str> = spans
+            .iter()
+            .filter(|s| s.strike)
+            .map(|s| s.text.as_str())
+            .collect();
+        assert_eq!(struck, vec!["drop this"]);
+        // Text outside the ~~ is not struck.
+        assert!(spans.iter().any(|s| s.text.contains("keep") && !s.strike));
     }
 
     #[test]

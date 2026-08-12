@@ -12,6 +12,11 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 13. Markdown links with parens in the URL
+`parse_link` stopped at the first `)`, truncating links like
+`.../wiki/Foo_(bar)`. Scan for the matching close paren with depth tracking
+so balanced parens inside the URL are kept. `ui.rs` + test.
+
 ### 12. README: drop stale "pty not resized" gap
 The known-gaps list claimed terminal-mode pty resize wasn't implemented, but
 the focused terminal's measured grid (`st.term_grid`) is sent via

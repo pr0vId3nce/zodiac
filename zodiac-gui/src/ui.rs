@@ -1924,7 +1924,24 @@ fn parse_link(chars: &[char], open: usize) -> Option<(String, String, usize)> {
     if chars.get(close + 1) != Some(&'(') {
         return None;
     }
-    let end = chars[close + 2..].iter().position(|&c| c == ')')? + close + 2;
+    // Find the closing `)`, allowing balanced parens inside the URL so links
+    // like `.../Foo_(bar)` aren't truncated at the inner `)`.
+    let mut depth = 1usize;
+    let mut end = None;
+    for (k, &c) in chars[close + 2..].iter().enumerate() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    end = Some(close + 2 + k);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end = end?;
     let text: String = chars[open + 1..close].iter().collect();
     let url: String = chars[close + 2..end].iter().collect();
     Some((text, url, end - open + 1))
@@ -4012,6 +4029,17 @@ mod inline_link_tests {
     fn non_http_scheme_not_linked() {
         assert!(urls("run file:///etc/passwd please").is_empty());
         assert!(urls("no links here at all").is_empty());
+    }
+
+    #[test]
+    fn markdown_link_allows_balanced_parens_in_url() {
+        assert_eq!(
+            urls("[wiki](https://en.wikipedia.org/wiki/Foo_(bar)) done"),
+            vec![(
+                "wiki".to_string(),
+                "https://en.wikipedia.org/wiki/Foo_(bar)".to_string()
+            )]
+        );
     }
 
     #[test]

@@ -2151,16 +2151,24 @@ fn composer_bar(ui: &mut egui::Ui, p: &CPane, composer: &mut String, actions: &m
                             });
                         // Multiline + wrap: a long message flows onto new lines
                         // and the box grows downward, so it can never stretch the
-                        // pane horizontally off-screen.
-                        let edit = egui::TextEdit::multiline(composer)
-                            .id(edit_id)
-                            .frame(Frame::NONE)
-                            .desired_width(ui.available_width() - 64.0)
-                            .desired_rows(1)
-                            .hint_text("message the agent…")
-                            .font(egui::FontId::proportional(14.0))
-                            .text_color(theme::TEXT_BODY);
-                        let resp = ui.add(edit);
+                        // pane horizontally off-screen. Capped at ~7 lines with
+                        // an inner scroll so a long paste can't swallow the
+                        // transcript either.
+                        let resp = egui::ScrollArea::vertical()
+                            .id_salt(("composer_scroll", p.id))
+                            .max_height(132.0)
+                            .show(ui, |ui| {
+                                let edit = egui::TextEdit::multiline(composer)
+                                    .id(edit_id)
+                                    .frame(Frame::NONE)
+                                    .desired_width(ui.available_width() - 64.0)
+                                    .desired_rows(1)
+                                    .hint_text("message the agent…")
+                                    .font(egui::FontId::proportional(14.0))
+                                    .text_color(theme::TEXT_BODY);
+                                ui.add(edit)
+                            })
+                            .inner;
                         // A bare "/" (when you're not already typing here) jumps
                         // to the composer so you can start typing. It only moves
                         // focus — the "/" isn't inserted: focus takes effect next

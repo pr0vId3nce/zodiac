@@ -12,6 +12,11 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 5. Cap the composer height
+The multiline composer (from the earlier overflow fix) could grow unbounded
+with a long/pasted message and cover the transcript. Wrap it in a vertical
+scroll capped at ~7 lines (132px); longer input scrolls inside. `ui.rs`.
+
 ### 4. Render `####`/`#####`/`######` headings
 `md_block` only handled h1–h3, so `#### text` showed literally. Now h1–h6 are
 handled (longest marker checked first so `####` isn't captured by `###`).

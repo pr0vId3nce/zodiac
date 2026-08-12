@@ -95,5 +95,10 @@ fn main() -> anyhow::Result<()> {
     if let Some(msg) = app.exit_msg.take() {
         println!("{msg}");
     }
+    // The e2e harness reports through the process exit code so CI (and a
+    // human running it) can't miss a failure buried in the log.
+    if app.e2e_failed {
+        std::process::exit(1);
+    }
     Ok(())
 }

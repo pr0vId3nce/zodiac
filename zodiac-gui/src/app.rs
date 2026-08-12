@@ -24,6 +24,19 @@ use crate::render::Renderer;
 /// How often the GUI polls the server for pane state (status/titles). The
 /// server only sends `T_STATE` in reply to `T_QUERY`; this cadence sets how
 /// quickly the tab spinner/glow reflect an agent starting or stopping work.
+/// `ZODIAC_GUI_DEBUG_REPAINT=1` — tally what drives the frame rate. Cached:
+/// this is consulted per window event.
+fn debug_repaint() -> bool {
+    use std::sync::OnceLock;
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("ZODIAC_GUI_DEBUG_REPAINT").is_some())
+}
+
+thread_local! {
+    static REDRAW_SITES: std::cell::RefCell<std::collections::HashMap<String, usize>> =
+        std::cell::RefCell::new(std::collections::HashMap::new());
+}
+
 const QUERY_INTERVAL: Duration = Duration::from_millis(600);
 
 /// Shortest gap between animation frames while the window is focused (~60fps).
@@ -104,6 +117,19 @@ pub struct GuiApp {
     focused: bool,
     /// One-shot guard for the `ZODIAC_GUI_SEED_ITEMS` soak fixture.
     seeded: bool,
+    /// `ZODIAC_GUI_E2E=1` harness: scripted scenario + assertions.
+    e2e: bool,
+    e2e_step: usize,
+    e2e_next: Option<Instant>,
+    e2e_results: Vec<(String, bool, String)>,
+    /// egui events injected by the harness (drained into the next frame's raw
+    /// input), so UI-level keys reach the same handlers a real keypress would.
+    e2e_events: Vec<egui::Event>,
+    /// Frames rendered, for the idle-repaint check.
+    frames: u64,
+    frames_mark: u64,
+    pub e2e_failed: bool,
+    repaint_hist: Vec<i64>,
 }
 
 impl GuiApp {
@@ -151,6 +177,15 @@ impl GuiApp {
             occluded: false,
             focused: true,
             seeded: false,
+            e2e: std::env::var("ZODIAC_GUI_E2E").is_ok(),
+            e2e_step: 0,
+            e2e_next: None,
+            e2e_results: Vec::new(),
+            e2e_events: Vec::new(),
+            frames: 0,
+            frames_mark: 0,
+            e2e_failed: false,
+            repaint_hist: Vec::new(),
         }
     }
 
@@ -290,7 +325,24 @@ impl GuiApp {
             .unwrap_or((24, 80))
     }
 
+    #[track_caller]
     fn request_redraw(&self) {
+        // Under ZODIAC_GUI_DEBUG_REPAINT, tally which call site is driving the
+        // frame rate — guessing at this wasted more time than measuring it.
+        if debug_repaint() {
+            let loc = std::panic::Location::caller();
+            REDRAW_SITES.with(|m| {
+                let mut m = m.borrow_mut();
+                *m.entry(format!("{}:{}", loc.file(), loc.line()))
+                    .or_insert(0usize) += 1;
+                if m.values().sum::<usize>() >= 200 {
+                    let mut v: Vec<_> = m.iter().map(|(k, c)| (*c, k.clone())).collect();
+                    v.sort_unstable_by_key(|(c, _)| std::cmp::Reverse(*c));
+                    eprintln!("redraw callers (last 200): {:?}", &v[..v.len().min(5)]);
+                    m.clear();
+                }
+            });
+        }
         if let Some(r) = &self.renderer {
             r.window.request_redraw();
         }
@@ -321,6 +373,277 @@ impl GuiApp {
                 .panes
                 .get(self.active)
                 .is_some_and(|p| !p.is_agent() || self.term_mode.contains(&p.id))
+    }
+
+    // ---------------------------------------------------------------- e2e --
+
+    /// Record one assertion.
+    fn check(&mut self, name: &str, ok: bool, detail: String) {
+        self.e2e_results.push((name.to_string(), ok, detail));
+    }
+
+    /// Schedule the next e2e step.
+    fn e2e_after(&mut self, ms: u64) {
+        self.e2e_next = Some(Instant::now() + Duration::from_millis(ms));
+    }
+
+    /// Index of the agent pane the scenario drives.
+    fn e2e_agent(&self) -> Option<usize> {
+        self.panes.iter().position(|p| p.is_agent())
+    }
+
+    /// Push a UI-level key press for the next frame.
+    fn e2e_key(&mut self, key: egui::Key) {
+        self.e2e_events.push(egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed: true,
+            repeat: false,
+            modifiers: egui::Modifiers::NONE,
+        });
+    }
+
+    /// `ZODIAC_GUI_E2E=1`: drive the real handlers through a scripted scenario
+    /// and assert on what actually got laid out. Each check covers a fix from
+    /// PLAN.md, so a regression fails the run instead of being spotted later
+    /// in a screenshot.
+    fn e2e_tick(&mut self, event_loop: &ActiveEventLoop) {
+        use crate::ui::{Overlay, Screen};
+        let step = self.e2e_step;
+        self.e2e_step += 1;
+        match step {
+            // --- setup -------------------------------------------------
+            0 => {
+                self.send(T_NEW_PANE, 0, &[]); // a shell pane
+                self.e2e_after(1800);
+            }
+            1 => {
+                // A real claude agent pane. It is never prompted, so this
+                // spends no tokens, but it makes the harness exercise the
+                // genuine harness-gated paths (the slash picker only offers
+                // itself to a pane the server reports as claude).
+                let obj = serde_json::json!({"kind": "agent", "agent": "claude"});
+                self.send(T_NEW_PANE, 0, obj.to_string().as_bytes());
+                self.e2e_after(7000);
+            }
+            2 => {
+                self.send(T_QUERY, 0, &[]);
+                self.e2e_after(1500);
+            }
+
+            // --- pane switching reaches the focused view ----------------
+            3 => {
+                self.screen = Screen::Observatory;
+                self.mods = ModifiersState::ALT; // the shortcut modifier
+                self.on_key_logical(&Key::Character("1".into()));
+                self.mods = ModifiersState::empty();
+                let ok = self.screen == Screen::Focused && self.active == 0;
+                let d = format!("screen={:?} active={}", self.screen, self.active);
+                self.check("alt+1 focuses pane 1 and shows it", ok, d);
+                self.e2e_after(400);
+            }
+            4 => {
+                self.mods = ModifiersState::ALT;
+                self.on_key_logical(&Key::Character("2".into()));
+                self.mods = ModifiersState::empty();
+                let ok = self.screen == Screen::Focused && self.active == 1;
+                let d = format!("screen={:?} active={}", self.screen, self.active);
+                self.check("alt+2 switches to pane 2", ok, d);
+                self.e2e_after(400);
+            }
+
+            // --- terminal mouse mapping --------------------------------
+            5 => {
+                self.active = 0; // the shell pane
+                self.screen = Screen::Focused;
+                self.request_redraw();
+                self.e2e_after(800);
+            }
+            6 => {
+                // Aim at the centre of cell (row 3, col 5) and ask the mouse
+                // path which cell that is. Before the fix this mapped through
+                // the legacy wgpu grid and answered a different cell.
+                match self.ui_state.term_rect {
+                    Some(t) => {
+                        let ppp = self.egui_ctx.pixels_per_point() as f64;
+                        let x = (t.origin.0 as f64 + 5.5 * t.cell.0 as f64) * ppp;
+                        let y = (t.origin.1 as f64 + 3.5 * t.cell.1 as f64) * ppp;
+                        self.cursor_px = (x, y);
+                        let got = self.grid_cell();
+                        let d = format!(
+                            "expected (5,3) got {got:?} origin={:?} cell={:?}",
+                            t.origin, t.cell
+                        );
+                        self.check("terminal mouse maps to the drawn cell", got == (5, 3), d);
+                    }
+                    None => self.check(
+                        "terminal mouse maps to the drawn cell",
+                        false,
+                        "no term_rect recorded — the terminal never drew".into(),
+                    ),
+                }
+                self.e2e_after(400);
+            }
+
+            // --- keys still reach the pty after Tab --------------------
+            7 => {
+                self.on_key_logical(&Key::Named(NamedKey::Tab));
+                self.request_redraw();
+                self.e2e_after(600);
+            }
+            8 => {
+                let focused = self.egui_ctx.memory(|m| m.focused());
+                let interm = self.in_terminal();
+                let d = format!("egui focus={focused:?} in_terminal={interm}");
+                self.check(
+                    "Tab in a terminal leaves no egui focus (no input freeze)",
+                    focused.is_none() && interm,
+                    d,
+                );
+                self.e2e_after(400);
+            }
+
+            // --- a long message wraps inside the transcript -------------
+            9 => {
+                let Some(i) = self.e2e_agent() else {
+                    self.check("an agent pane was created", false, "none".into());
+                    self.e2e_step = 900;
+                    return self.e2e_after(50);
+                };
+                self.active = i;
+                self.screen = Screen::Focused;
+                let long = "This is a deliberately long user message intended to wrap onto a \
+                            second line in the transcript so the bubble layout can be checked \
+                            automatically rather than by eye.";
+                let line = serde_json::json!({"type": "zodiac_user", "text": long});
+                self.panes[i].agent.apply_line(&line);
+                self.request_redraw();
+                self.e2e_after(900);
+            }
+            10 => {
+                let p = self.ui_state.probe;
+                match (p.transcript, p.user_bubble) {
+                    (Some(t), Some(b)) => {
+                        let inside = b.left() >= t.left() - 1.0 && b.right() <= t.right() + 1.0;
+                        let d = format!(
+                            "bubble {:.0}..{:.0}, transcript {:.0}..{:.0}",
+                            b.left(),
+                            b.right(),
+                            t.left(),
+                            t.right()
+                        );
+                        self.check("long user message wraps inside the transcript", inside, d);
+                    }
+                    other => self.check(
+                        "long user message wraps inside the transcript",
+                        false,
+                        format!("probe missing: {other:?}"),
+                    ),
+                }
+                self.e2e_after(400);
+            }
+
+            // --- slash picker opens, filters, completes -----------------
+            11 => {
+                let Some(i) = self.e2e_agent() else {
+                    return self.e2e_after(50);
+                };
+                let id = self.panes[i].id;
+                self.ui_state.composers.insert(id, "/co".into());
+                self.egui_ctx
+                    .memory_mut(|m| m.request_focus(egui::Id::new(("composer", id))));
+                self.request_redraw();
+                self.e2e_after(900);
+            }
+            12 => {
+                let rows = self.ui_state.probe.slash_rows;
+                self.check(
+                    "slash picker opens and filters on /co",
+                    rows > 0,
+                    format!("{rows} rows offered"),
+                );
+                self.e2e_key(egui::Key::Enter); // accept the highlighted row
+                self.request_redraw();
+                self.e2e_after(900);
+            }
+            13 => {
+                let id = self.e2e_agent().map(|i| self.panes[i].id).unwrap_or(0);
+                let text = self
+                    .ui_state
+                    .composers
+                    .get(&id)
+                    .cloned()
+                    .unwrap_or_default();
+                let ok = text.starts_with("/co") && text.ends_with(' ');
+                self.check(
+                    "enter completes the highlighted slash command",
+                    ok,
+                    format!("composer={text:?}"),
+                );
+                self.e2e_after(400);
+            }
+
+            // --- /resume opens the session picker ----------------------
+            14 => {
+                let Some(i) = self.e2e_agent() else {
+                    return self.e2e_after(50);
+                };
+                let id = self.panes[i].id;
+                self.ui_state.composers.insert(id, "/resume ".into());
+                self.egui_ctx
+                    .memory_mut(|m| m.request_focus(egui::Id::new(("composer", id))));
+                self.e2e_key(egui::Key::Enter);
+                self.request_redraw();
+                self.e2e_after(1200);
+            }
+            15 => {
+                let ok = self.ui_state.overlay == Overlay::Resume;
+                let d = format!(
+                    "overlay={:?} sessions={}",
+                    self.ui_state.overlay,
+                    self.ui_state.resume_list.len()
+                );
+                self.check("/resume opens the session picker", ok, d);
+                self.ui_state.overlay = Overlay::None;
+                self.e2e_after(400);
+            }
+
+            // --- an idle pane must not repaint continuously -------------
+            16 => {
+                self.active = 0; // idle shell pane
+                self.screen = Screen::Focused;
+                self.request_redraw();
+                self.frames_mark = self.frames;
+                self.e2e_after(2000);
+            }
+            17 => {
+                let drawn = self.frames - self.frames_mark;
+                // A repaint loop pinned at the 16ms clamp draws ~120 frames in
+                // 2s; a genuinely idle UI draws a handful (state polls).
+                self.check(
+                    "idle pane does not repaint continuously",
+                    drawn <= 40,
+                    format!("{drawn} frames in 2s"),
+                );
+                self.e2e_after(400);
+            }
+
+            // --- report -------------------------------------------------
+            _ => {
+                let total = self.e2e_results.len();
+                let failed = self.e2e_results.iter().filter(|(_, ok, _)| !ok).count();
+                let mut out = String::from("\n=== zodiac-gui e2e ===\n");
+                for (name, ok, detail) in &self.e2e_results {
+                    let tag = if *ok { "PASS" } else { "FAIL" };
+                    out.push_str(&format!("{tag}  {name}\n      {detail}\n"));
+                }
+                out.push_str(&format!("{}/{total} passed\n", total - failed));
+                self.e2e_failed = failed > 0 || total == 0;
+                self.exit_msg = Some(out);
+                self.send(T_DETACH, 0, &[]);
+                event_loop.exit();
+            }
+        }
     }
 
     fn focus(&mut self, idx: usize) {
@@ -669,6 +992,14 @@ impl GuiApp {
         if ev.state != ElementState::Pressed {
             return;
         }
+        self.on_key_logical(&ev.logical_key);
+    }
+
+    /// The key-press path, split out from the winit event so the e2e harness
+    /// can drive the real handler instead of synthesising OS input (which
+    /// proved unreliable — a missed compositor focus sent keystrokes to
+    /// whatever window happened to be focused).
+    fn on_key_logical(&mut self, logical: &Key) {
         // Tab navigation + new-pane shortcuts, on Alt (Linux) / Cmd (macOS).
         if crate::keys::cmd_held(self.mods) {
             let n = self.panes.len();
@@ -687,7 +1018,7 @@ impl GuiApp {
                     me.request_redraw();
                 }
             };
-            match &ev.logical_key {
+            match logical {
                 // Arrow nav: horizontal for top tabs, vertical for side.
                 Key::Named(NamedKey::ArrowLeft) if !side => return prev(self),
                 Key::Named(NamedKey::ArrowRight) if !side => return next(self),
@@ -722,7 +1053,7 @@ impl GuiApp {
         }
         // Alt/Cmd+1..9 jumps straight to a pane (1 = first).
         if crate::keys::cmd_held(self.mods) {
-            if let Key::Character(s) = &ev.logical_key {
+            if let Key::Character(s) = logical {
                 if let Some(d) = s.chars().next().and_then(|c| c.to_digit(10)) {
                     if d >= 1 && (d as usize) <= self.panes.len() {
                         self.focus(d as usize - 1);
@@ -740,7 +1071,7 @@ impl GuiApp {
         // all, so Ctrl+PageUp/Down below is unreachable without fn-chording.
         #[cfg(target_os = "macos")]
         if self.mods.super_key() {
-            if let Key::Character(s) = &ev.logical_key {
+            if let Key::Character(s) = logical {
                 let n = self.panes.len();
                 match s.as_str() {
                     "[" | "{" if n > 0 => {
@@ -759,7 +1090,7 @@ impl GuiApp {
         }
         // Pane-switch shortcuts (documented in README): Ctrl+PageUp/Down.
         if self.mods.control_key() {
-            match ev.logical_key {
+            match *logical {
                 Key::Named(NamedKey::PageUp) => {
                     let n = self.panes.len();
                     if n > 0 {
@@ -795,7 +1126,8 @@ impl GuiApp {
         {
             let ctrl_or_cmd = self.mods.control_key() || self.mods.super_key();
             let shift = self.mods.shift_key();
-            let is = |lit: &str| matches!(&ev.logical_key, Key::Character(s) if s.eq_ignore_ascii_case(lit));
+            let is =
+                |lit: &str| matches!(logical, Key::Character(s) if s.eq_ignore_ascii_case(lit));
             if ctrl_or_cmd && shift && is("c") {
                 if let Some(text) = self.terminal_selection() {
                     self.egui_ctx.copy_text(text);
@@ -805,7 +1137,7 @@ impl GuiApp {
             }
             let paste = (ctrl_or_cmd && shift && is("v"))
                 || (self.mods.super_key() && is("v"))
-                || (shift && matches!(ev.logical_key, Key::Named(NamedKey::Insert)));
+                || (shift && matches!(logical, Key::Named(NamedKey::Insert)));
             if paste {
                 if let Some(text) = self.read_clipboard() {
                     self.paste_to_pane(text);
@@ -813,7 +1145,7 @@ impl GuiApp {
                 return;
             }
         }
-        let Some(ck) = crate::keys::to_key_event(&ev.logical_key, self.mods) else {
+        let Some(ck) = crate::keys::to_key_event(logical, self.mods) else {
             return;
         };
         let Some(p) = self.panes.get(self.active) else {
@@ -1226,6 +1558,10 @@ impl GuiApp {
             return;
         }
         let mut raw = self.egui_state.as_mut().unwrap().take_egui_input(&win);
+        self.frames += 1;
+        if !self.e2e_events.is_empty() {
+            raw.events.append(&mut self.e2e_events);
+        }
         // egui-winit is built without its `clipboard` feature (copy is served
         // from our arboard handle), which also means egui never turns Ctrl/⌘+V
         // into a Paste event — so pasting into the composer/search fields did
@@ -1333,6 +1669,7 @@ impl GuiApp {
             .unwrap()
             .handle_platform_output(&win, full.platform_output);
         let ppp = full.pixels_per_point;
+        self.ui_state.probe = crate::ui::take_probe();
         let jobs = self.egui_ctx.tessellate(full.shapes, ppp);
 
         // Drive the WaitUntil timer from egui's repaint request: zero delay
@@ -1362,6 +1699,20 @@ impl GuiApp {
         } else {
             Some(UNFOCUSED_FRAME)
         };
+        // `ZODIAC_GUI_DEBUG_REPAINT=1`: report what egui keeps asking for, so a
+        // runaway repaint can be attributed instead of guessed at.
+        if debug_repaint() {
+            let ms = delay.map(|d| d.as_millis() as i64).unwrap_or(-1);
+            self.repaint_hist.push(ms);
+            if self.repaint_hist.len() >= 120 {
+                let mut counts: std::collections::BTreeMap<i64, usize> =
+                    std::collections::BTreeMap::new();
+                for v in self.repaint_hist.drain(..) {
+                    *counts.entry(v).or_default() += 1;
+                }
+                eprintln!("repaint_delay(ms) histogram over 120 frames: {counts:?}");
+            }
+        }
         self.next_anim = match (delay, floor) {
             (_, None) => None,
             (Some(d), Some(f)) if d < Duration::from_secs(24 * 3600) => {
@@ -1618,6 +1969,9 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 if self.selftest {
                     self.selftest_next = Some(Instant::now() + Duration::from_millis(400));
                 }
+                if self.e2e {
+                    self.e2e_next = Some(Instant::now() + Duration::from_millis(600));
+                }
             }
             Err(e) => {
                 self.exit_msg = Some(format!("zodiac-gui: GPU init failed: {e}"));
@@ -1655,9 +2009,30 @@ impl ApplicationHandler<UserEvent> for GuiApp {
         let win = self.renderer.as_ref().map(|r| r.window.clone());
         let mut consumed = false;
         let in_terminal = self.in_terminal();
+        if debug_repaint() {
+            REDRAW_SITES.with(|m| {
+                let mut m = m.borrow_mut();
+                let name = format!("evt:{:?}", std::mem::discriminant(&event));
+                *m.entry(name).or_insert(0usize) += 1;
+                if m.values().sum::<usize>() >= 300 {
+                    let mut v: Vec<_> = m.iter().map(|(k, c)| (*c, k.clone())).collect();
+                    v.sort_unstable_by_key(|(c, _)| std::cmp::Reverse(*c));
+                    eprintln!("window events (last 300): {:?}", &v[..v.len().min(4)]);
+                    m.clear();
+                }
+            });
+        }
+        // Never turn a RedrawRequested back into another redraw request.
+        // egui_winit answers that event with `repaint: true`, so honouring it
+        // asks for the next frame from inside the frame we are already
+        // drawing: a self-sustaining loop that pins the app at vsync forever,
+        // with no animation and no input. This — not the animation timer — was
+        // what kept an idle window burning CPU; the frame-rate clamp bounded
+        // it but could not stop it.
+        let is_redraw = matches!(event, WindowEvent::RedrawRequested);
         if let (Some(st), Some(win)) = (self.egui_state.as_mut(), win.as_ref()) {
             let resp = st.on_window_event(win, &event);
-            if resp.repaint {
+            if resp.repaint && !is_redraw {
                 win.request_redraw();
             }
             consumed = resp.consumed;
@@ -1743,6 +2118,10 @@ impl ApplicationHandler<UserEvent> for GuiApp {
         if self.selftest && self.selftest_next.is_some_and(|t| now >= t) {
             self.selftest_next = None;
             self.selftest_tick(event_loop);
+        }
+        if self.e2e && self.e2e_next.is_some_and(|t| now >= t) {
+            self.e2e_next = None;
+            self.e2e_tick(event_loop);
         }
     }
 

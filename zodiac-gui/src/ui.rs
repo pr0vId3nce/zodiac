@@ -29,7 +29,7 @@ macro_rules! concat_cmd {
 }
 
 /// Which screen the GUI is showing (app-shell router, task #24).
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Screen {
     /// The pane-card home (`draw_home`'s successor).
     Observatory,
@@ -38,7 +38,7 @@ pub enum Screen {
 }
 
 /// A modal overlay open over the current screen.
-#[derive(Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
 pub enum Overlay {
     #[default]
     None,
@@ -95,6 +95,10 @@ pub struct UiState {
     pub composers: std::collections::HashMap<u64, String>,
     /// The focused terminal's drawn geometry, for mouse reporting.
     pub term_rect: Option<TermRect>,
+    /// Probes the e2e harness asserts on (see `app.rs::e2e_tick`). Recording
+    /// them costs a couple of stores per frame and keeps the harness honest:
+    /// it checks what was actually laid out, not what we think was.
+    pub probe: Probe,
     /// Highlighted row in the slash-command picker.
     pub slash_sel: usize,
     /// `/resume` session picker: the candidates and the highlighted row.
@@ -123,6 +127,16 @@ pub struct UiState {
     /// Decoded kitty-image textures for terminal mode, keyed by (pane, img,
     /// ver). egui owns the GPU upload; we just cache the handle.
     pub tex_cache: std::collections::HashMap<(u64, u32, u32), egui::TextureHandle>,
+}
+
+/// Layout facts recorded during a frame for the e2e harness to assert on.
+#[derive(Clone, Copy, Default)]
+pub struct Probe {
+    /// The transcript's viewport rect, and the widest user-bubble drawn in it.
+    pub transcript: Option<egui::Rect>,
+    pub user_bubble: Option<egui::Rect>,
+    /// How many slash-command rows the picker offered (0 = closed).
+    pub slash_rows: usize,
 }
 
 /// Where a terminal's grid is actually drawn, in egui points: its top-left,
@@ -1265,6 +1279,13 @@ fn spinner_frame(t: f64) -> char {
 }
 
 thread_local! {
+    /// Frame-local probe, drained into `UiState` at the end of the frame.
+    static PROBE: std::cell::Cell<Probe> = const { std::cell::Cell::new(Probe {
+        transcript: None,
+        user_bubble: None,
+        slash_rows: 0,
+    }) };
+
     /// The agent-pane font scale (structured-transcript size ÷ GUI zoom), set
     /// only for the duration of [`transcript_view`]. 1.0 everywhere else, so
     /// shared markdown helpers render at chrome size when used off-transcript.
@@ -1449,6 +1470,42 @@ pub fn perf_off() -> bool {
     *OFF.get_or_init(|| std::env::var("ZODIAC_GUI_PERF_OFF").is_ok())
 }
 
+fn st_probe_transcript(ui: &egui::Ui) {
+    PROBE.with(|c| {
+        let mut p = c.get();
+        p.transcript = Some(ui.max_rect());
+        c.set(p);
+    });
+}
+
+fn st_probe_bubble(rect: egui::Rect) {
+    PROBE.with(|c| {
+        let mut p = c.get();
+        // Keep the widest one: that's the one most likely to overflow.
+        if p.user_bubble.is_none_or(|r| rect.width() > r.width()) {
+            p.user_bubble = Some(rect);
+        }
+        c.set(p);
+    });
+}
+
+fn st_probe_slash(rows: usize) {
+    PROBE.with(|c| {
+        let mut p = c.get();
+        p.slash_rows = rows;
+        c.set(p);
+    });
+}
+
+/// Take and reset the frame-local probe.
+pub fn take_probe() -> Probe {
+    PROBE.replace(Probe {
+        transcript: None,
+        user_bubble: None,
+        slash_rows: 0,
+    })
+}
+
 /// Scale a transcript font size by the current agent-pane factor.
 fn tsize(base: f32) -> f32 {
     TRANSCRIPT_SCALE.with(|c| base * c.get())
@@ -1502,6 +1559,7 @@ fn transcript_view(
             // grew past the viewport, and because it lays out right-to-left the
             // overflow ran off the LEFT edge and under the sidebar.
             ui.set_max_width(viewport.width());
+            st_probe_transcript(ui);
             ui.add_space(12.0);
             let inner = 22.0;
             // Own the gaps between items: with the container's automatic
@@ -1610,7 +1668,7 @@ fn turn_user(ui: &mut egui::Ui, text: &str, inner: f32) {
     // ran off the LEFT edge and under the sidebar.
     let room = (ui.available_width() - inner).max(120.0);
     let cap = (room * 0.64).clamp(120.0, room);
-    ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
+    let r = ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
         ui.add_space(inner);
         Frame::NONE
             .fill(theme::bg_selected())
@@ -1631,6 +1689,7 @@ fn turn_user(ui: &mut egui::Ui, text: &str, inner: f32) {
                 );
             });
     });
+    st_probe_bubble(r.response.rect);
 }
 
 /// Assistant/error turn: an avatar glyph + prose column.
@@ -2758,6 +2817,7 @@ fn composer_bar(
                 .map(|q| crate::slash::matching(cmds, q))
                 .unwrap_or_default();
             let picking = composer_focused && !matches.is_empty();
+            st_probe_slash(if picking { matches.len() } else { 0 });
             if !picking {
                 *slash_sel = 0;
             } else {

@@ -12,6 +12,14 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 21. Per-pane composer drafts
+The composer was one shared buffer that got cleared on every pane switch, so a
+draft typed in one agent pane was lost when you switched away. Replaced
+`UiState.composer` with a per-pane `composers: HashMap<u64, String>`: each
+agent keeps its own in-progress message, drafts survive switching, and Send
+clears only that pane's draft. `ui.rs` + `app.rs`. (Resolves the follow-up
+noted below.)
+
 ### 20. Fix drag-and-drop of files onto an agent pane
 `on_drop` appended the dropped path to `p.agent.input` (the TUI-side editor),
 but the GUI composer is `ui_state.composer` and never reads `agent.input` — so
@@ -132,6 +140,14 @@ routes to a new `md_task_row`. `ui.rs`.
 ## Unresolved / follow-ups
 
 <!-- anything found but not fixed, with enough detail to pick up later -->
+- ~~Composer draft is shared, not per-pane.~~ **Done in #21** — per-pane
+  `composers: HashMap<u64,String>`. (Minor: a closed pane's draft entry lingers
+  in the map until process exit; negligible, could prune on pane removal.)
+- **Transcript re-parses everything every frame.** `transcript_view` renders
+  all `items` (and re-parses the streaming tail's markdown) each frame with no
+  virtualization; a very long transcript or a very long single streaming
+  message is O(n)/frame. Fine today; if it ever drags, cache parsed turns or
+  cull with `ScrollArea::show_viewport`.
 - **Couldn't find `zodiac-gui/handoff.md`.** The user referenced findings from
   another agent at `zodiac-gui/handoff.md`, but as of these commits it isn't in
   the working tree, on `origin/main`, in any branch/PR ref, or anywhere on disk

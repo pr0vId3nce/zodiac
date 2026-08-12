@@ -805,11 +805,14 @@ impl GuiApp {
         let Some(p) = self.panes.get(self.active) else {
             return;
         };
+        let id = p.id;
+        let is_agent = p.is_agent();
+        let bracketed = p.parser.screen().bracketed_paste();
         // Agent pane: append to the GUI composer the user actually sees/sends
-        // (`ui_state.composer`), not the TUI-side `agent.input` the GUI never
+        // (`ui_state.composers`), not the TUI-side `agent.input` the GUI never
         // reads — otherwise the dropped path silently vanished.
-        if p.is_agent() {
-            let c = &mut self.ui_state.composer;
+        if is_agent {
+            let c = self.ui_state.composers.entry(id).or_default();
             if !c.is_empty() && !c.ends_with(' ') {
                 c.push(' ');
             }
@@ -817,9 +820,6 @@ impl GuiApp {
             self.request_redraw();
             return;
         }
-        // Pty pane: paste the path into the shell (bracketed if it asked).
-        let id = p.id;
-        let bracketed = p.parser.screen().bracketed_paste();
         let text = format!("{quoted} ");
         let bytes = if bracketed {
             format!("\x1b[200~{text}\x1b[201~").into_bytes()
@@ -1286,15 +1286,9 @@ impl GuiApp {
         for a in actions {
             match a {
                 crate::ui::UiAction::Focus(i) => {
-                    if i != self.active {
-                        self.ui_state.composer.clear();
-                    }
                     self.focus(i);
                 }
                 crate::ui::UiAction::Open(i) => {
-                    if i != self.active {
-                        self.ui_state.composer.clear();
-                    }
                     self.focus(i);
                     self.screen = crate::ui::Screen::Focused;
                 }
@@ -1332,8 +1326,13 @@ impl GuiApp {
                     }
                 }
                 crate::ui::UiAction::SendAgent(id) => {
-                    let text = self.ui_state.composer.trim().to_string();
-                    self.ui_state.composer.clear();
+                    let text = self
+                        .ui_state
+                        .composers
+                        .get(&id)
+                        .map(|s| s.trim().to_string())
+                        .unwrap_or_default();
+                    self.ui_state.composers.remove(&id);
                     if !text.is_empty() {
                         self.send(T_AGENT_INPUT, id, text.as_bytes());
                         if let Some(p) = self.panes.iter_mut().find(|p| p.id == id) {

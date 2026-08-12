@@ -88,8 +88,9 @@ pub struct AgentPicker {
 /// Mutable UI state egui edits in place across frames (buffers + overlays).
 #[derive(Default)]
 pub struct UiState {
-    /// The focused agent pane's composer buffer.
-    pub composer: String,
+    /// Per-pane composer drafts (keyed by pane id), so a draft survives
+    /// switching panes and each agent keeps its own in-progress message.
+    pub composers: std::collections::HashMap<u64, String>,
     /// Which modal overlay is open.
     pub overlay: Overlay,
     /// Command-palette query + selected row.
@@ -1171,7 +1172,7 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
                 if has_perm {
                     perm_hint(ui);
                 } else {
-                    composer_bar(ui, p, &mut st.composer, actions);
+                    composer_bar(ui, p, st.composers.entry(p.id).or_default(), actions);
                 }
             });
         egui::CentralPanel::default()

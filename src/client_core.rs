@@ -155,7 +155,9 @@ impl AgentUi {
             .or_else(|| v.get("event").and_then(|e| e.get("message")))
             .and_then(|m| m.get("model"))
             .and_then(|x| x.as_str())
-            .filter(|m| !m.is_empty())
+            // Slash commands answered by the CLI itself report a placeholder
+            // model like "<synthetic>" — don't show that as the running model.
+            .filter(|m| !m.is_empty() && !m.starts_with('<'))
         {
             self.model = Some(short_model(m));
         }

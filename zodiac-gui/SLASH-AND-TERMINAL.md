@@ -2,8 +2,9 @@
 
 _2026-08-12, NTP424. Covers the four-part goal: Claude Code features in
 structured panes, terminal passthrough, the claude-in-a-terminal graphics
-glitch, and the tab-completion freeze. Two of the four are done, one is
-root-caused and fixed pending your confirmation, one is not started._
+glitch, and the tab-completion freeze. **All four now have fixes landed and
+verified**, except the passthrough item, which is narrower than it looked —
+see §4._
 
 ## 1. Slash commands in structured agent panes — **done**
 
@@ -21,7 +22,12 @@ way to discover them.
   before the text field sees them, so Enter completes rather than sends. Only
   shown for panes running the claude harness.
 - Verified on a real claude pane (screenshotted): the menu lists built-ins and
-  your installed skills with origin tags.
+  your installed skills with origin tags, filters as you type, and completes.
+- **Commands actually execute**, not just list: running `/cost` in a structured
+  pane returned the real usage report into the transcript (screenshotted).
+  A cosmetic follow-on from that test is also fixed — CLI-answered commands
+  report a placeholder model (`<synthetic>`), which was being shown as the
+  pane's running model.
 
 ### `/resume` — **done, implemented zodiac-side**
 
@@ -50,16 +56,33 @@ screenshotting (before/after images were the evidence).
 
 Fixed by measuring inside the frame, against the real content rect.
 
-**Please confirm this one on your machine** — I verified the reproduction and
-the reasoning, but my post-fix screenshot attempt kept landing on the
-Observatory instead of the focused pane, so I did not get a clean side-by-side
-of the same screen after the change.
+**Verified** with a clean before/after of the same screen. Before: the welcome
+box had no right border (text ran off the edge) and the bottom status line was
+sliced in half. After: the box's right border is drawn and text truncates with
+`…` *inside* it, and `⏸ manual mode on · ? for shortcuts · ← for agents` is
+fully visible.
 
 Separately, a genuine (smaller) glyph gap: `🦀` renders as `□` in terminal panes
 while `📦` renders fine, so the fallback chain is missing some color-emoji
 coverage. Not addressed; noted for later in `font.rs`/`theme.rs`.
 
-## 3. Tab-completion freeze — **not fixed; here is what I ruled out**
+## 3. Tab-completion freeze — **fixed** (it was never zsh)
+
+**It was egui stealing the keyboard.** With a pane "frozen", input sent over the
+CLI (`zodiac send`) still reached the shell and the shell still responded — but
+the *server's own* screen stayed stale, which means the GUI had stopped
+delivering keystrokes entirely. Tab is focus traversal to egui: one Tab moved
+keyboard focus onto a widget, egui then reported every later key event as
+`consumed`, and `on_key` (gated on `!consumed`) stopped forwarding to the pty.
+Switching panes reset focus — exactly the workaround you found.
+
+Fix: while a terminal is on screen the pty owns the keyboard, so egui's
+`consumed` verdict is ignored for key events and any focus egui is holding is
+dropped. Overlays and the agent composer are excluded, so they keep their keys.
+Verified: after Tab the completion menu opens (`0/20`) and typing still reaches
+the shell.
+
+### What I had ruled out first (kept for the record)
 
 The symptom (freezes until you switch panes and back) points at output that is
 produced but never displayed. I ruled out the two most likely mechanisms:
@@ -76,18 +99,30 @@ produced but never displayed. I ruled out the two most likely mechanisms:
 - **Not the old scrollback panic.** `visible_rows` is correct now, and
   `set_scrollback` clamps its offset.
 
-**Leading hypothesis, untested:** it is the *same* bug as #2. If the pty
-believes it has more rows than are painted, zsh's completion redraw (which
-moves the cursor up and repaints) can land in the region that is never drawn —
-the pane looks frozen, and switching away and back forces a resize/redraw that
-re-syncs it. If that is right, the grid fix above may have already fixed the
-freeze. **Worth retesting first**, before anyone digs further.
+(My first hypothesis — that it was the same grid-size bug as §2 — was wrong.
+The decisive test was comparing the *server's* rendered screen against the
+GUI's: both were stale, which ruled out a client-render bug, and CLI input
+still working ruled out the pty.)
 
-## 4. Near-native terminal passthrough — **not started**
+## 4. Near-native terminal passthrough — **three concrete defects fixed; no rewrite**
 
-Untouched. The current design parses output into a vt100 model server-side and
-repaints cells in egui, so fidelity is bounded by what that model covers. The
-grid-size fix above removes the largest source of visible wrongness, and it is
-worth re-evaluating how far off "native" actually feels once that is in, before
-committing to an architectural change — a rewrite is a large, risky project and
-the evidence so far points at ordinary bugs rather than a doomed design.
+I did not restart the terminal layer, and I'd argue against it: every symptom
+that made panes feel non-native turned out to be an ordinary bug, not a limit
+of the design. Three are now fixed:
+
+1. **Wrong grid size** (§2) — the child was told it had rows and columns that
+   were never painted.
+2. **Keys stopping after Tab** (§3) — egui was swallowing terminal input.
+3. **Mouse clicks landing on the wrong cell** — `grid_cell()` mapped the
+   pointer with the legacy wgpu grid's cell size and origin, but the terminal
+   is drawn by egui inside a margined frame below a header, so mouse-driven
+   TUIs (vim, htop, tmux) received the wrong coordinates; the per-view font
+   scale widened the error. `terminal_view` now publishes the geometry it
+   actually draws with and `grid_cell` maps through that. **Not verified
+   on-device** — I have no way to synthesise mouse input here; worth a click
+   test in vim.
+
+Known remaining gaps, none architectural: some color-emoji glyphs are missing
+from the fallback chain (`🦀` draws as `□` while `📦` is fine), and kitty
+graphics inside terminal mode are still a follow-on. My recommendation is to
+re-judge how far from "native" it feels now, and only then consider a rewrite.

@@ -129,6 +129,25 @@ pub const T_CLIPBOARD: u8 = 36;
 /// new pane was the old, lossier answer to `/resume`.
 pub const T_AGENT_RESUME: u8 = 37;
 
+/// Set a structured agent pane's permission mode: payload is one of
+/// "manual" | "auto" | "plan" | "bypassPermissions". Claude Code accepts this
+/// at runtime over its control protocol, so the pane switches without
+/// restarting or losing its conversation.
+pub const T_AGENT_MODE: u8 = 38;
+
+/// The permission modes zodiac cycles through, in Shift+Tab order.
+pub const PERM_MODES: [&str; 4] = ["manual", "auto", "plan", "bypassPermissions"];
+
+/// Short label for a permission mode, for the pane header.
+pub fn perm_mode_label(mode: &str) -> &str {
+    match mode {
+        "auto" | "acceptEdits" => "auto",
+        "plan" => "plan",
+        "bypassPermissions" | "dontAsk" => "bypass",
+        _ => "manual",
+    }
+}
+
 /// T_GFX_FRAME payload header (34 bytes; layout mirrors GfxImgHdr with the
 /// frame index + display gap added).
 pub const GFX_FRAME_HDR: usize = 34;

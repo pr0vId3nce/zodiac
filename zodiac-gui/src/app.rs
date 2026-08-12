@@ -412,6 +412,28 @@ impl GuiApp {
         }
     }
 
+    /// Advance an agent pane to the next permission mode and tell the harness.
+    /// The displayed mode is corrected from the stream when the harness
+    /// confirms, so an unsupported switch can't leave the header lying.
+    fn cycle_perm_mode(&mut self, id: u64) {
+        use zodiac::protocol::PERM_MODES;
+        let Some(p) = self.panes.iter_mut().find(|p| p.id == id) else {
+            return;
+        };
+        let cur = p.agent.perm_mode.clone().unwrap_or_else(|| "manual".into());
+        // Match on the canonical spelling *and* the harness's aliases, so a
+        // mode we were told about maps back onto the cycle.
+        let cur_label = zodiac::protocol::perm_mode_label(&cur);
+        let idx = PERM_MODES
+            .iter()
+            .position(|m| zodiac::protocol::perm_mode_label(m) == cur_label)
+            .unwrap_or(0);
+        let next = PERM_MODES[(idx + 1) % PERM_MODES.len()];
+        p.agent.perm_mode = Some(next.to_string());
+        self.send(T_AGENT_MODE, id, next.as_bytes());
+        self.request_redraw();
+    }
+
     // ---------------------------------------------------------------- e2e --
 
     /// Record one assertion.
@@ -426,7 +448,10 @@ impl GuiApp {
 
     /// Index of the agent pane the scenario drives.
     fn e2e_agent(&self) -> Option<usize> {
-        self.panes.iter().position(|p| p.is_agent())
+        // The *last* agent pane: later steps spawn a fresh one when they need
+        // a live harness (an earlier step deliberately resumes into a bogus
+        // session, which leaves that pane's process dead).
+        self.panes.iter().rposition(|p| p.is_agent())
     }
 
     /// Push a UI-level key press for the next frame.
@@ -811,6 +836,70 @@ impl GuiApp {
                 // colour font it cannot draw, which `mono_emoji_font` enforces.
                 self.check("emoji fallback is a face egui can rasterize", true, detail);
                 self.e2e_after(300);
+            }
+
+            // --- shift+tab cycles the permission mode -------------------
+            27 => {
+                // A fresh agent pane: the resume check above intentionally
+                // respawned the other one into a nonexistent session.
+                let obj = serde_json::json!({"kind": "agent", "agent": "claude"});
+                self.send(T_NEW_PANE, 0, obj.to_string().as_bytes());
+                self.e2e_after(8000);
+            }
+            28 => {
+                let Some(i) = self.e2e_agent() else {
+                    return self.e2e_after(50);
+                };
+                self.active = i;
+                self.screen = Screen::Focused;
+                self.panes[i].agent.perm_mode = None; // start from the default
+                self.request_redraw();
+                self.e2e_after(500);
+            }
+            29 => {
+                let i = self.e2e_agent().unwrap_or(0);
+                let id = self.panes[i].id;
+                // Cycle all the way round and check the order the user asked
+                // for: manual -> auto -> plan -> bypass -> manual.
+                let mut seen = Vec::new();
+                for _ in 0..4 {
+                    self.cycle_perm_mode(id);
+                    let i = self.e2e_agent().unwrap_or(0);
+                    let m = self.panes[i].agent.perm_mode.clone().unwrap_or_default();
+                    seen.push(zodiac::protocol::perm_mode_label(&m).to_string());
+                }
+                let ok = seen == ["auto", "plan", "bypass", "manual"];
+                self.check(
+                    "shift+tab cycles manual->auto->plan->bypass",
+                    ok,
+                    format!("{seen:?}"),
+                );
+                self.e2e_after(1500);
+            }
+            30 => {
+                // The harness must have *accepted* it, not just the label
+                // changed: claude echoes permissionMode on a system status
+                // event, which client_core folds back into the pane.
+                let i = self.e2e_agent().unwrap_or(0);
+                let id = self.panes[i].id;
+                self.send(T_AGENT_MODE, id, b"plan");
+                self.e2e_after(2500);
+            }
+            31 => {
+                let i = self.e2e_agent().unwrap_or(0);
+                let reported = self.panes[i].agent.perm_mode.clone().unwrap_or_default();
+                let alive = self
+                    .state
+                    .as_ref()
+                    .and_then(|st| st.panes.iter().find(|ps| ps.id == self.panes[i].id))
+                    .map(|ps| ps.status.clone())
+                    .unwrap_or_default();
+                self.check(
+                    "the harness confirms the permission mode it was given",
+                    zodiac::protocol::perm_mode_label(&reported) == "plan",
+                    format!("harness reported {reported:?} (pane status {alive:?})"),
+                );
+                self.e2e_after(400);
             }
 
             // --- report -------------------------------------------------
@@ -2007,6 +2096,9 @@ impl GuiApp {
                         obj["cwd"] = serde_json::Value::String(cwd);
                     }
                     self.send(T_NEW_PANE, 0, obj.to_string().as_bytes());
+                }
+                crate::ui::UiAction::CyclePermMode(id) => {
+                    self.cycle_perm_mode(id);
                 }
                 crate::ui::UiAction::ResumeHere(id, session) => {
                     // Resume in place: the pane keeps its id, name and slot.

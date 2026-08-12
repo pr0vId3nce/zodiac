@@ -53,6 +53,11 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
   **Alt+W** closes the active pane; **Alt+Z** returns to the Observatory.
 - **/** — in a structured agent pane, jumps to the composer and starts a slash
   command (when you're not already typing there).
+- **Shift+Tab** — in a structured claude pane, cycles the permission mode
+  (**manual → auto → plan → bypass**). The current mode shows as a chip in the
+  pane header next to the model. Claude Code accepts the change at runtime over
+  its control protocol, so the session keeps its conversation; the chip is
+  corrected from the harness's own `permissionMode` report, so it can't drift.
 - **Copy / paste** — in the **transcript**, drag to select across turns and
   **Ctrl/⌘+C** copies; paste into the composer with **Ctrl/⌘+V**. In the
   **terminal**, drag to select (hold **Shift** to select even when a TUI is

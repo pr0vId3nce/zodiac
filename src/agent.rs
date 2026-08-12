@@ -244,6 +244,24 @@ impl AgentRuntime {
         self.write_line(&line)
     }
 
+    /// Switch the session's permission mode at runtime (claude control
+    /// protocol). Verified against the CLI: it answers `control_response`
+    /// success and then reports `permissionMode` on a `system` status event,
+    /// which is what clients render. Pi has no equivalent, so this is a no-op
+    /// there rather than a lie.
+    pub fn send_perm_mode(&mut self, mode: &str) -> bool {
+        if self.kind != AgentKind::Claude {
+            return false;
+        }
+        let line = serde_json::json!({
+            "type": "control_request",
+            "request_id": format!("zodiac-mode-{}", self.generation),
+            "request": {"subtype": "set_permission_mode", "mode": mode},
+        })
+        .to_string();
+        self.write_line(&line)
+    }
+
     /// Answer a pending permission request (claude control protocol).
     pub fn send_perm_response(
         &mut self,

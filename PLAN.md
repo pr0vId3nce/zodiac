@@ -13,7 +13,7 @@ nix develop --command bash -c \
 It attaches to a scratch session, opens a shell pane and a real claude agent
 pane (never prompted, so it spends no tokens), drives the **real handlers** and
 asserts on what actually got laid out. It prints PASS/FAIL per check and exits
-nonzero on any failure. **14/14 passing.**
+nonzero on any failure. **16/16 passing.**
 
 It deliberately does *not* synthesise OS input: during this work a missed
 compositor focus sent test keystrokes into an unrelated window, and a
@@ -42,6 +42,7 @@ A check that cannot fail is worse than no check.
 | 8 | Missing emoji glyphs | **client side done; needs a system font** | `emoji fallback is a face egui can rasterize` |
 | 9 | Finish sound on completion | **implemented** | `finish sound fires once on working->done` |
 | 10 | Kitty graphics in terminal mode | **already implemented** | see below |
+| 11 | Shift+Tab permission modes | **implemented** | `shift+tab cycles…`, `the harness confirms…` |
 
 ### 5 — the idle CPU burn, finally explained
 
@@ -77,6 +78,22 @@ trusting `fc-match`, which substitutes silently.
 **This one needs a system change, not a code change:** install a monochrome
 emoji font (e.g. `noto-fonts-monochrome-emoji`) via home-manager. The e2e check
 reports which case the machine is in.
+
+### 11 — Shift+Tab permission modes
+
+Shift+Tab cycles **manual → auto → plan → bypass** in a structured claude pane,
+with the mode shown as a chip in the header next to the model.
+
+Claude Code accepts `set_permission_mode` at runtime over its control protocol
+(verified against the CLI before building on it: the request returns success
+and the session then reports `permissionMode` on a `system` status event), so
+switching keeps the conversation instead of restarting the harness. The chip
+renders what the *harness* reports, not what zodiac asked for, so a rejected
+switch cannot leave it lying. Shift+Tab is consumed in the egui frame because
+egui treats it as reverse focus traversal and the composer usually holds focus.
+
+Pi has no equivalent control request, so the chip and the shortcut are claude
+-only rather than silently doing nothing.
 
 ### 10 — kitty graphics
 

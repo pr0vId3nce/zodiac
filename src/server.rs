@@ -665,6 +665,14 @@ impl Server {
                     }
                 }
             }
+            T_AGENT_MODE => {
+                if let Ok(mode) = String::from_utf8(f.data.clone()) {
+                    let mode = mode.trim().to_string();
+                    if let Some(rt) = self.pane_mut(f.id).and_then(|p| p.agent_rt_mut()) {
+                        rt.send_perm_mode(&mode);
+                    }
+                }
+            }
             T_AGENT_RESUME => {
                 if let Ok(session) = String::from_utf8(f.data.clone()) {
                     let session = session.trim().to_string();

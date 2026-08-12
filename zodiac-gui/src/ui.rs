@@ -218,6 +218,8 @@ pub enum UiAction {
     OpenResume(u64),
     /// Resume `session` in the pane that asked, keeping its identity.
     ResumeHere(u64, String),
+    /// Advance this agent pane to the next permission mode (shift+tab).
+    CyclePermMode(u64),
 }
 
 /// Immutable view of the app state the UI reads for one frame.
@@ -1173,6 +1175,30 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
                         .show(ui, |ui| {
                             ui.label(RichText::new(label).color(col).size(11.0));
                         });
+                    // Permission mode, next to the model. Claude announces no
+                    // mode at startup, so until it reports one we show its
+                    // documented default rather than an empty slot.
+                    if p.is_agent() && ps.and_then(|s| s.agent.as_deref()) == Some("claude") {
+                        let mode = p.agent.perm_mode.as_deref().unwrap_or("manual");
+                        let label = zodiac::protocol::perm_mode_label(mode);
+                        let col = match label {
+                            "plan" => theme::VIOLET_TEXT,
+                            "auto" => theme::accent(),
+                            "bypass" => theme::STATUS_RAIL[0],
+                            _ => theme::TEXT_DIM,
+                        };
+                        ui.add_space(6.0);
+                        let r = Frame::NONE
+                            .fill(theme::bg_raised())
+                            .corner_radius(CornerRadius::same(6))
+                            .inner_margin(Margin::symmetric(8, 3))
+                            .show(ui, |ui| {
+                                ui.label(RichText::new(label).color(col).size(11.0));
+                            });
+                        r.response
+                            .interact(Sense::hover())
+                            .on_hover_text("permission mode — shift+tab to cycle");
+                    }
                 });
             });
         });
@@ -1185,6 +1211,18 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
     // over-reported the size by a couple of rows and columns, so the child
     // drew into space that was never painted: a full-width TUI like Claude
     // Code lost its right border and had its bottom line clipped in half.)
+    // Shift+Tab cycles the permission mode. Consumed here in the egui frame
+    // because egui treats Shift+Tab as reverse focus traversal and the
+    // composer usually holds focus, so the raw key path never sees it.
+    if p.is_agent() && d.ps(p).and_then(|s| s.agent.as_deref()) == Some("claude") {
+        let hit = ui.input_mut(|i| {
+            i.consume_key(egui::Modifiers::SHIFT, egui::Key::Tab)
+                || i.consume_key(egui::Modifiers::NONE, egui::Key::Tab) && i.modifiers.shift
+        });
+        if hit {
+            actions.push(UiAction::CyclePermMode(p.id));
+        }
+    }
     // Body: the view is determined by the pane kind (see the header note).
     let show_term = !p.is_agent();
     if show_term {

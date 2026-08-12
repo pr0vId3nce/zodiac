@@ -125,6 +125,11 @@ pub struct AgentUi {
     /// The running model as a short display name ("sonnet 4.5"), captured
     /// from the stream's message envelopes. `None` until the first turn.
     pub model: Option<String>,
+    /// The session's permission mode, as the harness reports it on its
+    /// `system` status events. Claude does not announce one at startup, so
+    /// this stays `None` until it changes; the GUI shows claude's default
+    /// ("manual") until then.
+    pub perm_mode: Option<String>,
     /// Assistant text still streaming in (shown at the transcript tail
     /// until the completed block replaces it).
     pub stream: String,
@@ -160,6 +165,16 @@ impl AgentUi {
             .filter(|m| !m.is_empty() && !m.starts_with('<'))
         {
             self.model = Some(short_model(m));
+        }
+        // Permission mode: claude reports it on a `system` status event, both
+        // after a set_permission_mode control request and when it changes for
+        // any other reason, so this stays right without zodiac guessing.
+        if let Some(m) = v
+            .get("permissionMode")
+            .and_then(|x| x.as_str())
+            .filter(|m| !m.is_empty())
+        {
+            self.perm_mode = Some(m.to_string());
         }
         match v.get("type").and_then(|t| t.as_str()) {
             Some("zodiac_user") => {

@@ -12,6 +12,11 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 10. Auto-expand failed tool boxes
+Tool call boxes default to collapsed; error results are important, so a tool
+box whose result `is_error` now starts expanded (successful ones stay
+collapsed). `ui.rs` (`turn_tool_box`).
+
 ### 9. Clearer Observatory empty state
 The Observatory showed "connecting…" whenever there were no panes — including
 when fully connected with everything closed. Now, once state has arrived

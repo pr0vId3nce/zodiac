@@ -2114,10 +2114,12 @@ fn turn_tool_box(
                 } else {
                     theme::accent()
                 };
+                // Errors start expanded so a failure is visible without a
+                // click; successful calls stay collapsed to keep things tidy.
                 egui::collapsing_header::CollapsingState::load_with_default_open(
                     ui.ctx(),
                     id,
-                    false,
+                    tc.is_error,
                 )
                 .show_header(ui, |ui| {
                     ui.label(RichText::new("⏺").color(accent).size(tsize(12.0)));

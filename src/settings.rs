@@ -7,6 +7,15 @@ fn default_true() -> bool {
     true
 }
 
+/// Parse a `"125%"`-style font-size setting into a multiplier (1.25), clamped
+/// to [0.5, 3.0]. Empty or unparseable → 1.0.
+fn parse_percent(s: &str) -> f32 {
+    s.trim_end_matches('%')
+        .parse::<f32>()
+        .map(|p| (p / 100.0).clamp(0.5, 3.0))
+        .unwrap_or(1.0)
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     #[serde(default)]
@@ -118,6 +127,18 @@ pub struct Settings {
     /// GUI font scale as a percent string ("100%", "125%", …). GUI-only.
     #[serde(default)]
     pub gui_scale: String,
+    /// Terminal-view font size, percent string ("100%" default). Independent
+    /// of the other two views. GUI-only.
+    #[serde(default)]
+    pub term_font: String,
+    /// Chrome (observatory / dialogs / headers) font size, percent string
+    /// ("100%" default) — applied as the egui zoom factor. GUI-only.
+    #[serde(default)]
+    pub gui_font: String,
+    /// Structured agent-transcript font size, percent string ("100%" default).
+    /// Independent of the other two views. GUI-only.
+    #[serde(default)]
+    pub agent_font: String,
     /// GUI tab marker glyphs: "dots" (default), "arabic", "roman", "zodiac"
     /// (white/text-presentation sigils). GUI-only.
     #[serde(default)]
@@ -311,6 +332,18 @@ impl Settings {
             .unwrap_or(1.0)
     }
 
+    /// Per-view font sizes as multipliers (percent string → factor, default
+    /// 1.0), clamped to a sane range. Each view is independent.
+    pub fn term_font(&self) -> f32 {
+        parse_percent(&self.term_font)
+    }
+    pub fn gui_font(&self) -> f32 {
+        parse_percent(&self.gui_font)
+    }
+    pub fn agent_font(&self) -> f32 {
+        parse_percent(&self.agent_font)
+    }
+
     /// GUI tab marker style (default "dots").
     pub fn gui_tab_marker(&self) -> &str {
         match self.gui_tab_marker.as_str() {
@@ -392,7 +425,28 @@ impl Settings {
 
 #[cfg(test)]
 mod tests {
-    use super::Settings;
+    use super::{parse_percent, Settings};
+
+    #[test]
+    fn font_percent_parses_and_defaults() {
+        assert_eq!(parse_percent("125%"), 1.25);
+        assert_eq!(parse_percent("80%"), 0.8);
+        assert_eq!(parse_percent("100"), 1.0);
+        // Empty / garbage → 1.0 (the unset default).
+        assert_eq!(parse_percent(""), 1.0);
+        assert_eq!(parse_percent("huge"), 1.0);
+        // Clamped to a sane range.
+        assert_eq!(parse_percent("10%"), 0.5);
+        assert_eq!(parse_percent("900%"), 3.0);
+    }
+
+    #[test]
+    fn font_accessors_default_to_one() {
+        let s = Settings::default();
+        assert_eq!(s.term_font(), 1.0);
+        assert_eq!(s.gui_font(), 1.0);
+        assert_eq!(s.agent_font(), 1.0);
+    }
 
     /// A config written before the chat panel and pane monitor were renamed
     /// still loads: every key kept a serde alias for its old name.

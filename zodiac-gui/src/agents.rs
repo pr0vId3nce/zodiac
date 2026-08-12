@@ -129,11 +129,18 @@ fn claude_models() -> Vec<ModelChoice> {
     .collect()
 }
 
-/// Pi's locally-configured models, read from `~/.pi/agent/models.json`
-/// (`PI_CODING_AGENT_DIR` overrides the dir). Each becomes a `provider/id`
-/// value, which pi's `--model` accepts. Falls back to a single "Default".
+/// Pi's selectable models. Sourced from `pi --list-models` (cached), which is
+/// authoritative: it lists every provider pi actually has — including ones
+/// registered by an extension at runtime, like the `claude-bridge` provider
+/// (`claude-bridge/claude-opus-4-8`, …) that `models.json` never mentions.
+/// Falls back to reading `models.json` directly if the CLI can't be run, then
+/// to a single "Default". Each choice's value is a `provider/id` string, which
+/// pi's `--model` accepts.
 fn pi_models() -> Vec<ModelChoice> {
-    let models = read_pi_models().unwrap_or_default();
+    let mut models = pi_models_via_cli();
+    if models.is_empty() {
+        models = read_pi_models().unwrap_or_default();
+    }
     if models.is_empty() {
         vec![ModelChoice {
             label: "Default".into(),
@@ -142,6 +149,83 @@ fn pi_models() -> Vec<ModelChoice> {
     } else {
         models
     }
+}
+
+/// Run `pi --list-models` once per process and parse its table into choices.
+/// Cached because spawning pi (a Node program) is slow, and guarded by a
+/// timeout so a hung pi can never wedge the picker — on timeout or any error
+/// the caller falls back to `models.json`.
+fn pi_models_via_cli() -> Vec<ModelChoice> {
+    use std::sync::OnceLock;
+    static CACHE: OnceLock<Vec<ModelChoice>> = OnceLock::new();
+    CACHE
+        .get_or_init(|| {
+            let Some(pi) = search_dirs()
+                .iter()
+                .map(|d| d.join("pi"))
+                .find(|p| p.is_file())
+            else {
+                return Vec::new();
+            };
+            // Give the child the fuller PATH detection built (a GUI launched
+            // from the Dock has only launchd's bare PATH, and pi needs Node).
+            let path = std::env::join_paths(search_dirs()).unwrap_or_default();
+            let (tx, rx) = std::sync::mpsc::channel();
+            std::thread::spawn(move || {
+                let out = std::process::Command::new(&pi)
+                    .arg("--list-models")
+                    .env("PATH", &path)
+                    .stdin(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
+                    .output();
+                let _ = tx.send(out);
+            });
+            match rx.recv_timeout(std::time::Duration::from_secs(8)) {
+                Ok(Ok(out)) if out.status.success() => {
+                    parse_pi_list_models(&String::from_utf8_lossy(&out.stdout))
+                }
+                _ => Vec::new(),
+            }
+        })
+        .clone()
+}
+
+/// Parse the `pi --list-models` table. Columns are whitespace-separated with
+/// `provider` and `model` first; the header row (`provider model …`) and blank
+/// lines are skipped. Display names from `models.json` are used when present,
+/// else the bare model id.
+fn parse_pi_list_models(text: &str) -> Vec<ModelChoice> {
+    let names = pi_model_names();
+    let mut out = Vec::new();
+    for line in text.lines() {
+        let mut cols = line.split_whitespace();
+        let (Some(provider), Some(id)) = (cols.next(), cols.next()) else {
+            continue;
+        };
+        if provider == "provider" {
+            continue; // header
+        }
+        let value = format!("{provider}/{id}");
+        let label = names.get(&value).cloned().unwrap_or_else(|| id.to_string());
+        out.push(ModelChoice {
+            label,
+            value: Some(value),
+        });
+    }
+    out
+}
+
+/// Map of `provider/id` → display name from `models.json`, to prettify labels
+/// for models it knows (bridge-provided models aren't in it, so they keep the
+/// bare id).
+fn pi_model_names() -> std::collections::HashMap<String, String> {
+    let mut map = std::collections::HashMap::new();
+    for c in read_pi_models().unwrap_or_default() {
+        if let Some(v) = c.value {
+            map.insert(v, c.label);
+        }
+    }
+    map
 }
 
 fn read_pi_models() -> Option<Vec<ModelChoice>> {
@@ -180,6 +264,25 @@ mod tests {
     /// list* rather than on a real binary so it means the same thing on a
     /// CI runner with no agent installed.
     #[test]
+    fn parses_pi_list_models_table_including_bridge() {
+        // Real `pi --list-models` output shape: header + provider/model columns.
+        let table = "provider       model              context  max-out  thinking  images\n\
+                     claude-bridge  claude-opus-4-8    1M       128K     yes       yes\n\
+                     llama-local    qwen3.6-35b-a3b    32.8K    8.2K     yes       no\n";
+        let choices = super::parse_pi_list_models(table);
+        let vals: Vec<Option<&str>> = choices.iter().map(|c| c.value.as_deref()).collect();
+        assert_eq!(
+            vals,
+            vec![
+                Some("claude-bridge/claude-opus-4-8"),
+                Some("llama-local/qwen3.6-35b-a3b"),
+            ]
+        );
+        // The header row must not become a phantom model.
+        assert!(choices.iter().all(|c| c.label != "model"));
+    }
+
+    #[test]
     fn search_covers_real_install_dirs_under_a_bare_path() {
         // SAFETY: single-threaded test, set before the OnceLock is filled.
         unsafe { std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin") };
@@ -187,11 +290,13 @@ mod tests {
         let has = |p: &str| dirs.iter().any(|d| d.ends_with(p));
         assert!(has(".local/bin"), "~/.local/bin missing: {dirs:?}");
         assert!(
-            dirs.iter().any(|d| d == std::path::Path::new("/usr/local/bin")),
+            dirs.iter()
+                .any(|d| d == std::path::Path::new("/usr/local/bin")),
             "/usr/local/bin missing: {dirs:?}"
         );
         assert!(
-            dirs.iter().any(|d| d == std::path::Path::new("/opt/homebrew/bin")),
+            dirs.iter()
+                .any(|d| d == std::path::Path::new("/opt/homebrew/bin")),
             "/opt/homebrew/bin missing: {dirs:?}"
         );
     }

@@ -229,15 +229,7 @@ impl AgentUi {
                     let id = s(b, "tool_use_id").unwrap_or_default();
                     let text = tool_result_text(b);
                     let is_err = b.get("is_error").and_then(|e| e.as_bool()) == Some(true);
-                    for item in self.items.iter_mut().rev() {
-                        if let ChatItem::Tool(tc) = item {
-                            if tc.id == id && tc.result.is_none() {
-                                tc.result = Some(text);
-                                tc.is_error = is_err;
-                                break;
-                            }
-                        }
-                    }
+                    self.fill_tool_result(&id, text, is_err);
                 }
             }
             Some("stream_event") => {
@@ -295,37 +287,106 @@ impl AgentUi {
                     self.perms.retain(|p| p.request_id != rid);
                 }
             }
-            // pi rpc shapes (ADR 0002).
+            // pi rpc shapes (ADR 0002). Pi emits a richer stream than claude's:
+            // a completed assistant `message_end` carries thinking / toolCall /
+            // text blocks, and tool results arrive later as `tool_execution_end`
+            // (or a `toolResult`-role `message_end`). Render all three the same
+            // way claude panes do, so a pi pane — including one backed by the
+            // claude-code bridge — gets thinking prose + tool boxes, not just
+            // bare assistant text.
             Some("message_end") => {
                 let Some(m) = v.get("message") else { return };
-                if m.get("role").and_then(|r| r.as_str()) != Some("assistant") {
-                    return;
-                }
-                for b in m
-                    .get("content")
-                    .and_then(|c| c.as_array())
-                    .into_iter()
-                    .flatten()
-                {
-                    if b.get("type").and_then(|t| t.as_str()) == Some("text") {
-                        if let Some(t) = s(b, "text") {
-                            self.log.push((ARole::Assistant, t.clone()));
-                            self.items.push(ChatItem::Assistant(t));
+                match m.get("role").and_then(|r| r.as_str()) {
+                    Some("assistant") => {
+                        for b in m
+                            .get("content")
+                            .and_then(|c| c.as_array())
+                            .into_iter()
+                            .flatten()
+                        {
+                            match b.get("type").and_then(|t| t.as_str()) {
+                                Some("text") => {
+                                    if let Some(t) = s(b, "text") {
+                                        self.log.push((ARole::Assistant, t.clone()));
+                                        self.items.push(ChatItem::Assistant(t));
+                                    }
+                                }
+                                Some("thinking") => {
+                                    let t = s(b, "thinking").unwrap_or_default();
+                                    if !t.trim().is_empty() {
+                                        self.items.push(ChatItem::Thinking(t));
+                                    }
+                                }
+                                // Pi names the block `toolCall` and puts its
+                                // parameters under `arguments` (claude uses
+                                // `tool_use` / `input`).
+                                Some("toolCall") => {
+                                    let name = s(b, "name").unwrap_or_else(|| "tool".into());
+                                    let args = b
+                                        .get("arguments")
+                                        .cloned()
+                                        .unwrap_or(serde_json::Value::Null);
+                                    let arg = tool_compact(&args);
+                                    if name == "TodoWrite" {
+                                        self.todos = parse_todos(&args);
+                                    }
+                                    self.log.push((ARole::Tool, format!("{name}({arg})")));
+                                    self.items.push(ChatItem::Tool(ToolCall {
+                                        id: s(b, "id").unwrap_or_default(),
+                                        name,
+                                        command: tool_command(&args),
+                                        result: None,
+                                        is_error: false,
+                                    }));
+                                }
+                                _ => {}
+                            }
                         }
+                        self.stream.clear();
+                        self.think_stream.clear();
+                        self.thinking = false;
                     }
+                    // A tool result echoed as its own message — fill the call
+                    // if `tool_execution_end` didn't already.
+                    Some("toolResult") => {
+                        let id = s(m, "toolCallId").unwrap_or_default();
+                        let text = pi_content_text(m.get("content"));
+                        let is_err = m.get("isError").and_then(|e| e.as_bool()) == Some(true);
+                        self.fill_tool_result(&id, text, is_err);
+                    }
+                    _ => {}
                 }
-                self.stream.clear();
-                self.think_stream.clear();
-                self.thinking = false;
+            }
+            // A tool finished executing: attach its output to the pending call.
+            Some("tool_execution_end") => {
+                let id = s(v, "toolCallId").unwrap_or_default();
+                let text = v
+                    .get("result")
+                    .map(|r| pi_content_text(r.get("content")))
+                    .unwrap_or_default();
+                let is_err = v.get("isError").and_then(|e| e.as_bool()) == Some(true);
+                self.fill_tool_result(&id, text, is_err);
             }
             Some("message_update") => {
                 let Some(ev) = v.get("assistantMessageEvent") else {
                     return;
                 };
-                if ev.get("type").and_then(|t| t.as_str()) == Some("text_delta") {
-                    if let Some(t) = ev.get("delta").and_then(|d| d.as_str()) {
-                        self.stream.push_str(t);
+                match ev.get("type").and_then(|t| t.as_str()) {
+                    Some("text_delta") => {
+                        if let Some(t) = ev.get("delta").and_then(|d| d.as_str()) {
+                            self.stream.push_str(t);
+                        }
+                        self.thinking = false;
                     }
+                    Some("thinking_start") => self.thinking = true,
+                    Some("thinking_delta") => {
+                        if let Some(t) = ev.get("delta").and_then(|d| d.as_str()) {
+                            self.think_stream.push_str(t);
+                        }
+                        self.thinking = true;
+                    }
+                    Some("thinking_end") => self.thinking = false,
+                    _ => {}
                 }
             }
             Some("turn_end") | Some("agent_end") => {
@@ -334,6 +395,21 @@ impl AgentUi {
                 self.thinking = false;
             }
             _ => {}
+        }
+    }
+
+    /// Attach `text`/`is_err` to the most recent still-open tool call whose id
+    /// matches — how both claude (`tool_result`) and pi (`tool_execution_end`)
+    /// results are matched back to their call box.
+    fn fill_tool_result(&mut self, id: &str, text: String, is_err: bool) {
+        for item in self.items.iter_mut().rev() {
+            if let ChatItem::Tool(tc) = item {
+                if tc.id == id && tc.result.is_none() {
+                    tc.result = Some(text);
+                    tc.is_error = is_err;
+                    break;
+                }
+            }
         }
     }
 }
@@ -404,6 +480,20 @@ pub fn tool_command(input: &serde_json::Value) -> String {
 /// and ignoring non-text (image) parts.
 fn tool_result_text(block: &serde_json::Value) -> String {
     match block.get("content") {
+        Some(serde_json::Value::String(s)) => s.clone(),
+        Some(serde_json::Value::Array(a)) => a
+            .iter()
+            .filter_map(|c| c.get("text").and_then(|t| t.as_str()))
+            .collect::<Vec<_>>()
+            .join("\n"),
+        _ => String::new(),
+    }
+}
+
+/// Flatten a pi content value (`[{type:"text",text},…]` or a bare string) to
+/// display text, ignoring non-text parts — used for pi tool results.
+fn pi_content_text(content: Option<&serde_json::Value>) -> String {
+    match content {
         Some(serde_json::Value::String(s)) => s.clone(),
         Some(serde_json::Value::Array(a)) => a
             .iter()
@@ -1063,5 +1153,53 @@ mod apply_line_tests {
         };
         assert_eq!(tc.result.as_deref(), Some("boom"));
         assert!(tc.is_error);
+    }
+
+    #[test]
+    fn pi_rpc_renders_thinking_tool_and_text() {
+        // A real pi `--mode rpc` turn (claude-code bridge): the assistant
+        // message_end carries thinking + toolCall blocks, the result lands as
+        // tool_execution_end, then a final assistant message_end has the text.
+        let ui = fold(&[
+            json!({
+                "type": "message_end",
+                "message": {"role": "assistant", "model": "claude-haiku-4-5", "content": [
+                    {"type": "thinking", "thinking": "I should run echo hello."},
+                    {"type": "toolCall", "id": "toolu_1", "name": "bash",
+                     "arguments": {"command": "echo hello", "timeout": 120}},
+                ]}
+            }),
+            json!({
+                "type": "tool_execution_end", "toolCallId": "toolu_1", "toolName": "bash",
+                "result": {"content": [{"type": "text", "text": "hello\n"}]}, "isError": false
+            }),
+            json!({
+                "type": "message_end",
+                "message": {"role": "assistant", "content": [
+                    {"type": "text", "text": "DONE"},
+                ]}
+            }),
+            json!({"type": "turn_end"}),
+        ]);
+        // Model is picked up from the assistant envelope.
+        assert_eq!(ui.model.as_deref(), Some("haiku 4.5"));
+        let kinds: Vec<&str> = ui
+            .items
+            .iter()
+            .map(|it| match it {
+                ChatItem::Thinking(_) => "thinking",
+                ChatItem::Tool(_) => "tool",
+                ChatItem::Assistant(_) => "assistant",
+                _ => "other",
+            })
+            .collect();
+        assert_eq!(kinds, ["thinking", "tool", "assistant"]);
+        let ChatItem::Tool(tc) = &ui.items[1] else {
+            panic!("expected a tool item");
+        };
+        assert_eq!(tc.name, "bash");
+        assert_eq!(tc.command, "echo hello");
+        assert_eq!(tc.result.as_deref(), Some("hello\n"));
+        assert!(!tc.is_error);
     }
 }

@@ -190,6 +190,12 @@ pub struct UiData<'a> {
     pub numeral: &'a str,
     /// Observatory layout (home_view): "cards" | "list".
     pub home_view: &'a str,
+    /// Terminal font scale relative to the GUI zoom (terminal size ÷ gui size),
+    /// so the terminal view sizes independently of the chrome zoom.
+    pub term_scale: f32,
+    /// Structured-transcript font scale relative to the GUI zoom (agent size ÷
+    /// gui size), so the agent transcript sizes independently of the chrome.
+    pub agent_scale: f32,
 }
 
 impl UiData<'_> {
@@ -1126,7 +1132,7 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
     // than the legacy full-window grid. Recorded for the app to send as
     // T_RESIZE after the frame.
     {
-        let font = egui::FontId::monospace(13.0);
+        let font = egui::FontId::monospace(13.0 * d.term_scale);
         let (cw, ch) = ui.fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
         let avail = ui.available_size();
         if cw > 1.0 && ch > 1.0 {
@@ -1138,12 +1144,26 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
     // Body: the view is determined by the pane kind (see the header note).
     let show_term = !p.is_agent();
     if show_term {
-        terminal_view(ui, st, p);
+        terminal_view(ui, st, p, d.term_scale);
     } else {
         // A pending permission takes over the bottom bar and raises a modal
         // question popup; otherwise the composer sits there. Transcript fills
         // the space above either way.
         let has_perm = !p.agent.perms.is_empty();
+        // PageUp/PageDown scroll the transcript. Consume them here — before
+        // the composer's text field renders — so they drive the scroll view
+        // rather than moving the composer cursor. ~90% of a viewport per press.
+        let scroll_dy = ui.input_mut(|i| {
+            let page = i.raw.screen_rect.map_or(600.0, |r| r.height()) * 0.9;
+            let mut dy = 0.0;
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::PageUp) {
+                dy += page;
+            }
+            if i.consume_key(egui::Modifiers::NONE, egui::Key::PageDown) {
+                dy -= page;
+            }
+            dy
+        });
         egui::Panel::bottom("composer")
             .resizable(false)
             .frame(Frame::NONE.fill(theme::bg_chrome()))
@@ -1156,7 +1176,7 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
             });
         egui::CentralPanel::default()
             .frame(Frame::NONE.fill(theme::bg_window()))
-            .show(ui, |ui| transcript_view(ui, p));
+            .show(ui, |ui| transcript_view(ui, p, scroll_dy, d.agent_scale));
         if has_perm {
             perm_popup(ui, p, st, actions);
         }
@@ -1189,17 +1209,46 @@ fn spinner_frame(t: f64) -> char {
     F[((t * 12.5) as usize) % F.len()]
 }
 
+thread_local! {
+    /// The agent-pane font scale (structured-transcript size ÷ GUI zoom), set
+    /// only for the duration of [`transcript_view`]. 1.0 everywhere else, so
+    /// shared markdown helpers render at chrome size when used off-transcript.
+    static TRANSCRIPT_SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
+}
+
+/// Scale a transcript font size by the current agent-pane factor.
+fn tsize(base: f32) -> f32 {
+    TRANSCRIPT_SCALE.with(|c| base * c.get())
+}
+
+/// Sets the transcript scale for its lifetime and restores 1.0 on drop (so a
+/// panic mid-render can't leak the factor into later chrome).
+struct TranscriptScaleGuard;
+impl Drop for TranscriptScaleGuard {
+    fn drop(&mut self) {
+        TRANSCRIPT_SCALE.with(|c| c.set(1.0));
+    }
+}
+
 /// Native agent transcript: typed turns (user/assistant/thinking/tool/error)
 /// from [`zodiac::client_core::ChatItem`] plus the live streaming tail. This
 /// is the rich view — expandable tool boxes, collapsible thinking prose,
 /// fenced-code blocks, and the orange thinking sayings.
-fn transcript_view(ui: &mut egui::Ui, p: &CPane) {
+fn transcript_view(ui: &mut egui::Ui, p: &CPane, scroll_dy: f32, agent_scale: f32) {
     use zodiac::client_core::ChatItem;
+    let _scale_guard = TranscriptScaleGuard;
+    TRANSCRIPT_SCALE.with(|c| c.set(agent_scale));
     egui::ScrollArea::vertical()
         .id_salt("transcript")
         .stick_to_bottom(true)
         .auto_shrink([false, false])
         .show(ui, |ui| {
+            // PageUp/PageDown delta from focused(); a positive dy scrolls up
+            // (toward earlier turns), disengaging stick-to-bottom until the
+            // user pages back down to the tail.
+            if scroll_dy != 0.0 {
+                ui.scroll_with_delta(egui::vec2(0.0, scroll_dy));
+            }
             ui.add_space(12.0);
             let inner = 22.0;
             for (i, item) in p.agent.items.iter().enumerate() {
@@ -1240,7 +1289,7 @@ fn thinking_indicator(ui: &mut egui::Ui, inner: f32) {
             ui.label(
                 RichText::new(spinner_frame(t))
                     .color(theme::ORANGE)
-                    .size(14.0)
+                    .size(tsize(14.0))
                     .monospace(),
             );
             ui.add_space(6.0);
@@ -1248,7 +1297,7 @@ fn thinking_indicator(ui: &mut egui::Ui, inner: f32) {
                 RichText::new(format!("{word}…"))
                     .color(theme::ORANGE)
                     .italics()
-                    .size(13.5),
+                    .size(tsize(13.5)),
             );
         });
     });
@@ -1276,7 +1325,11 @@ fn turn_user(ui: &mut egui::Ui, text: &str, inner: f32) {
             .inner_margin(Margin::symmetric(12, 8))
             .show(ui, |ui| {
                 ui.set_max_width(ui.available_width() * 0.64);
-                ui.label(RichText::new(text).color(theme::TEXT_BODY).size(14.0));
+                ui.label(
+                    RichText::new(text)
+                        .color(theme::TEXT_BODY)
+                        .size(tsize(14.0)),
+                );
             });
     });
 }
@@ -1285,11 +1338,15 @@ fn turn_user(ui: &mut egui::Ui, text: &str, inner: f32) {
 fn turn_agent(ui: &mut egui::Ui, glyph: &str, col: Color32, text: &str, inner: f32) {
     ui.horizontal_top(|ui| {
         ui.add_space(inner - 18.0);
-        ui.label(RichText::new(glyph).color(col).size(15.0));
+        ui.label(RichText::new(glyph).color(col).size(tsize(15.0)));
         ui.add_space(6.0);
         ui.vertical(|ui| {
             ui.set_max_width(ui.available_width());
-            ui.label(RichText::new(text).color(theme::TEXT_BODY).size(14.5));
+            ui.label(
+                RichText::new(text)
+                    .color(theme::TEXT_BODY)
+                    .size(tsize(14.5)),
+            );
         });
     });
 }
@@ -1299,7 +1356,7 @@ fn turn_agent(ui: &mut egui::Ui, glyph: &str, col: Color32, text: &str, inner: f
 fn turn_assistant(ui: &mut egui::Ui, text: &str, inner: f32) {
     ui.horizontal_top(|ui| {
         ui.add_space(inner - 18.0);
-        ui.label(RichText::new("⏺").color(theme::ORANGE).size(14.0));
+        ui.label(RichText::new("⏺").color(theme::ORANGE).size(tsize(14.0)));
         ui.add_space(6.0);
         ui.vertical(|ui| {
             ui.set_max_width(ui.available_width());
@@ -1392,7 +1449,7 @@ fn md_heading(ui: &mut egui::Ui, text: &str, size: f32) {
     ui.label(
         RichText::new(text)
             .color(theme::TEXT_PRIMARY)
-            .size(size)
+            .size(tsize(size))
             .strong(),
     );
     ui.add_space(1.0);
@@ -1405,7 +1462,7 @@ fn md_bullet_row(ui: &mut egui::Ui, marker: String, item: &str) {
         ui.label(
             RichText::new(marker)
                 .color(theme::accent())
-                .size(14.0)
+                .size(tsize(14.0))
                 .monospace(),
         );
         ui.add_space(6.0);
@@ -1453,7 +1510,7 @@ fn md_line(ui: &mut egui::Ui, line: &str, size: f32, base: Color32) {
                 let text = RichText::new(&sp.text)
                     .color(theme::accent())
                     .underline()
-                    .font(egui::FontId::proportional(size));
+                    .font(egui::FontId::proportional(tsize(size)));
                 let resp = ui
                     .add(egui::Label::new(text).sense(egui::Sense::click()))
                     .on_hover_cursor(egui::CursorIcon::PointingHand);
@@ -1480,9 +1537,9 @@ fn span_format(sp: &MdSpan, size: f32, base: Color32) -> egui::TextFormat {
         base
     };
     let font = if sp.code {
-        egui::FontId::monospace(size - 1.0)
+        egui::FontId::monospace(tsize(size - 1.0))
     } else {
-        egui::FontId::proportional(size)
+        egui::FontId::proportional(tsize(size))
     };
     let mut fmt = egui::TextFormat {
         font_id: font,
@@ -1668,7 +1725,7 @@ fn code_box(ui: &mut egui::Ui, code: &str) {
                     ui.label(
                         RichText::new(code)
                             .color(theme::TEXT_BODY)
-                            .size(12.5)
+                            .size(tsize(12.5))
                             .monospace(),
                     );
                 });
@@ -1696,7 +1753,7 @@ fn result_box(ui: &mut egui::Ui, text: &str, is_error: bool) {
                     ui.label(
                         RichText::new(clip_lines(text, 400))
                             .color(col)
-                            .size(12.0)
+                            .size(tsize(12.0))
                             .monospace(),
                     );
                 });
@@ -1709,14 +1766,18 @@ fn turn_thinking(ui: &mut egui::Ui, pane: u64, idx: usize, text: &str, inner: f3
         let id = ui.make_persistent_id(("think", pane, idx));
         egui::collapsing_header::CollapsingState::load_with_default_open(ui.ctx(), id, false)
             .show_header(ui, |ui| {
-                ui.label(RichText::new("✳ thinking").color(theme::ORANGE).size(12.5));
+                ui.label(
+                    RichText::new("✳ thinking")
+                        .color(theme::ORANGE)
+                        .size(tsize(12.5)),
+                );
             })
             .body(|ui| {
                 ui.label(
                     RichText::new(text)
                         .color(theme::ORANGE_DIM)
                         .italics()
-                        .size(12.5),
+                        .size(tsize(12.5)),
                 );
             });
     });
@@ -1732,17 +1793,21 @@ fn turn_thinking_live(ui: &mut egui::Ui, text: &str, inner: f32) {
             ui.label(
                 RichText::new(spinner_frame(t))
                     .color(theme::ORANGE)
-                    .size(13.0)
+                    .size(tsize(13.0))
                     .monospace(),
             );
             ui.add_space(6.0);
-            ui.label(RichText::new("thinking").color(theme::ORANGE).size(12.5));
+            ui.label(
+                RichText::new("thinking")
+                    .color(theme::ORANGE)
+                    .size(tsize(12.5)),
+            );
         });
         ui.label(
             RichText::new(text)
                 .color(theme::ORANGE_DIM)
                 .italics()
-                .size(12.5),
+                .size(tsize(12.5)),
         );
     });
 }
@@ -1782,12 +1847,12 @@ fn turn_tool_box(
                     false,
                 )
                 .show_header(ui, |ui| {
-                    ui.label(RichText::new("⏺").color(accent).size(12.0));
+                    ui.label(RichText::new("⏺").color(accent).size(tsize(12.0)));
                     ui.add_space(6.0);
                     ui.label(
                         RichText::new(&tc.name)
                             .color(theme::TEXT_DIM)
-                            .size(12.5)
+                            .size(tsize(12.5))
                             .strong()
                             .monospace(),
                     );
@@ -1797,7 +1862,7 @@ fn turn_tool_box(
                         Label::new(
                             RichText::new(teaser)
                                 .color(theme::TEXT_FAINT)
-                                .size(12.0)
+                                .size(tsize(12.0))
                                 .monospace(),
                         )
                         .truncate(),
@@ -2087,10 +2152,10 @@ pub(crate) fn term_selection_text(p: &CPane, sel: Option<TermSel>) -> Option<Str
     }
 }
 
-fn terminal_view(ui: &mut egui::Ui, st: &mut UiState, p: &CPane) {
+fn terminal_view(ui: &mut egui::Ui, st: &mut UiState, p: &CPane, scale: f32) {
     use crate::palette::{cell_colors, CellStyle};
     let c32 = |c: [u8; 3]| Color32::from_rgb(c[0], c[1], c[2]);
-    let font = egui::FontId::monospace(13.0);
+    let font = egui::FontId::monospace(13.0 * scale);
     let (cw, ch) = ui.fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
     let screen = p.parser.screen();
     let (rows, cols) = screen.size();
@@ -2843,6 +2908,19 @@ fn settings_dialog(
                         &[("full", "full"), ("reduced", "reduced"), ("off", "off")],
                         actions,
                     );
+                    ui.add_space(14.0);
+                    group_label(ui, "FONT SIZE");
+                    let sizes = &[
+                        ("80%", "80%"),
+                        ("90%", "90%"),
+                        ("100%", "100%"),
+                        ("110%", "110%"),
+                        ("125%", "125%"),
+                        ("150%", "150%"),
+                    ];
+                    choice_row(ui, "Terminal", &mut s.term_font, "100%", sizes, actions);
+                    choice_row(ui, "GUI", &mut s.gui_font, "100%", sizes, actions);
+                    choice_row(ui, "Agent chat", &mut s.agent_font, "100%", sizes, actions);
                     ui.add_space(14.0);
                     group_label(ui, "BEHAVIOR");
                     toggle_row(ui, "Connection watchdog", &mut s.connection_watch, actions);

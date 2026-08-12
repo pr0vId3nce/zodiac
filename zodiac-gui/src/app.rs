@@ -1172,6 +1172,14 @@ impl GuiApp {
             self.settings.home_view.clone()
         };
         let motion = self.settings.gui_motion != "off";
+        // Per-view font sizes (all independent). The GUI/chrome size is applied
+        // as egui's global zoom; the terminal and transcript then use scales
+        // *relative* to that zoom (view ÷ gui), so after the global zoom each
+        // nets its own absolute size — leaving the three fully independent.
+        let gui_font = self.settings.gui_font();
+        let term_scale = self.settings.term_font() / gui_font;
+        let agent_scale = self.settings.agent_font() / gui_font;
+        self.egui_ctx.set_zoom_factor(gui_font);
         let full = self.egui_ctx.run_ui(raw, |ui| {
             let active_id = self.panes.get(self.active).map(|p| p.id);
             let data = crate::ui::UiData {
@@ -1189,6 +1197,8 @@ impl GuiApp {
                 motion,
                 numeral: numeral.as_str(),
                 home_view: home_view.as_str(),
+                term_scale,
+                agent_scale,
             };
             crate::ui::build(
                 ui,

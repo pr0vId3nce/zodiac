@@ -1552,15 +1552,7 @@ fn md_cell(ui: &mut egui::Ui, text: &str, align: ColAlign, header: bool, cap: f3
     } else {
         theme::TEXT_BODY
     };
-    let mut job = egui::text::LayoutJob::default();
-    job.wrap.max_width = cap;
-    for sp in parse_inline(text) {
-        let mut fmt = span_format(&sp, tsize(13.5), base);
-        if header {
-            fmt.color = theme::TEXT_PRIMARY;
-        }
-        job.append(&sp.text, 0.0, fmt);
-    }
+    let spans = parse_inline(text);
     let layout = match align {
         ColAlign::Left => Layout::left_to_right(Align::Center),
         ColAlign::Center => Layout::top_down(Align::Center),
@@ -1568,7 +1560,25 @@ fn md_cell(ui: &mut egui::Ui, text: &str, align: ColAlign, header: bool, cap: f3
     };
     ui.with_layout(layout, |ui| {
         ui.set_min_width(cap.min(ui.available_width()));
-        ui.label(job);
+        if spans.iter().all(|sp| sp.url.is_none()) {
+            // Fast path: a single non-interactive label, so column alignment
+            // reads cleanly. `span_format` applies the transcript scale itself,
+            // so pass the base size unscaled.
+            let mut job = egui::text::LayoutJob::default();
+            job.wrap.max_width = cap;
+            for sp in &spans {
+                let mut fmt = span_format(sp, 13.5, base);
+                if header {
+                    fmt.color = theme::TEXT_PRIMARY;
+                }
+                job.append(&sp.text, 0.0, fmt);
+            }
+            ui.label(job);
+        } else {
+            // A cell with a link renders its runs individually so the link is
+            // clickable; the outer layout still applies the column alignment.
+            render_inline_spans(ui, &spans, 13.5, base);
+        }
     });
 }
 
@@ -1628,12 +1638,19 @@ fn md_line(ui: &mut egui::Ui, line: &str, size: f32, base: Color32) {
         ui.label(job);
         return;
     }
-    // Link path: lay the runs out left-to-right with wrapping so link runs can
-    // be individual clickable widgets. Clicking opens the URL in the OS default
-    // browser via egui's open_url command (handled in app.rs' output loop).
+    // Link path: lay the runs out with wrapping so link runs can be clickable.
+    render_inline_spans(ui, &spans, size, base);
+}
+
+/// Render inline spans left-to-right with wrapping, drawing link runs as
+/// individual clickable widgets — a click opens the URL in the OS default
+/// browser (via egui's open_url command, handled in app.rs' output loop).
+/// Shared by [`md_line`] and table cells. `size` is unscaled; `span_format`
+/// and the link font both apply the transcript scale.
+fn render_inline_spans(ui: &mut egui::Ui, spans: &[MdSpan], size: f32, base: Color32) {
     ui.horizontal_wrapped(|ui| {
         ui.spacing_mut().item_spacing.x = 0.0;
-        for sp in &spans {
+        for sp in spans {
             if let Some(url) = &sp.url {
                 let text = RichText::new(&sp.text)
                     .color(theme::accent())

@@ -1495,6 +1495,13 @@ fn transcript_view(
             if scroll_dy != 0.0 {
                 ui.scroll_with_delta(egui::vec2(0.0, scroll_dy));
             }
+            // Pin the content to the visible width. `auto_shrink([false,false])`
+            // leaves the content ui effectively unbounded horizontally, so
+            // width-derived sizing (the user bubble's max width) computed off
+            // a huge `available_width()`: the text never wrapped, the bubble
+            // grew past the viewport, and because it lays out right-to-left the
+            // overflow ran off the LEFT edge and under the sidebar.
+            ui.set_max_width(viewport.width());
             ui.add_space(12.0);
             let inner = 22.0;
             // Own the gaps between items: with the container's automatic
@@ -1595,6 +1602,14 @@ fn indent(ui: &mut egui::Ui, x: f32, add: impl FnOnce(&mut egui::Ui)) {
 
 /// User turn: a right-aligned selected-fill bubble.
 fn turn_user(ui: &mut egui::Ui, text: &str, inner: f32) {
+    // Measure the cap from the *vertical* container, before entering the
+    // right-to-left layout: `right_to_left` is a horizontal layout, and egui
+    // neither wraps text nor bounds `available_width` along a horizontal
+    // layout's main axis. Sizing the bubble from inside it produced a single
+    // unwrapped line wider than the pane, which — laying out right-to-left —
+    // ran off the LEFT edge and under the sidebar.
+    let room = (ui.available_width() - inner).max(120.0);
+    let cap = (room * 0.64).clamp(120.0, room);
     ui.with_layout(Layout::right_to_left(Align::TOP), |ui| {
         ui.add_space(inner);
         Frame::NONE
@@ -1603,11 +1618,16 @@ fn turn_user(ui: &mut egui::Ui, text: &str, inner: f32) {
             .corner_radius(CornerRadius::same(12))
             .inner_margin(Margin::symmetric(12, 8))
             .show(ui, |ui| {
-                ui.set_max_width(ui.available_width() * 0.64);
-                ui.label(
-                    RichText::new(text)
-                        .color(theme::TEXT_BODY)
-                        .size(tsize(14.0)),
+                ui.set_max_width(cap);
+                // `.wrap()` is required: a plain label inside a horizontal
+                // layout would not wrap however narrow the cap is.
+                ui.add(
+                    Label::new(
+                        RichText::new(text)
+                            .color(theme::TEXT_BODY)
+                            .size(tsize(14.0)),
+                    )
+                    .wrap(),
                 );
             });
     });

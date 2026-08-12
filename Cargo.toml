@@ -40,3 +40,13 @@ log = "0.4"
 [profile.release]
 lto = true
 strip = true
+
+# Release speed, but with symbols — `strip = true` above leaves a profile with
+# no symbol table, which is exactly what blocked attributing the GUI's CPU burn
+# to named frames (see zodiac-gui/HANDOFF.md). Build with
+# `cargo build --profile profiling -p zodiac-gui`, then `perf top -p $(pidof
+# zodiac-gui)`.
+[profile.profiling]
+inherits = "release"
+strip = false
+debug = true

@@ -102,6 +102,8 @@ pub struct GuiApp {
     /// CPU. Assume visible+focused until told otherwise.
     occluded: bool,
     focused: bool,
+    /// One-shot guard for the `ZODIAC_GUI_SEED_ITEMS` soak fixture.
+    seeded: bool,
 }
 
 impl GuiApp {
@@ -148,6 +150,7 @@ impl GuiApp {
             selftest_next: None,
             occluded: false,
             focused: true,
+            seeded: false,
         }
     }
 
@@ -237,8 +240,18 @@ impl GuiApp {
                 {"type": "text", "text": "## Summary\n\nHere's the **fix** with a `helper`, ~~and a typo~~. See [docs](https://example.com/a_(b)) and www.example.com.\n\n```rust\nfn main() {}\n```\n\n#### Details\n\n- one item\n  - nested item\n- [x] done task\n- [ ] pending task\n\n| Name | Size | OK |\n|:-----|-----:|:--:|\n| alpha | 12kB | y |\n| beta | 3kB | n |\n\nDone."},
             ]}}),
         ];
-        for l in &lines {
-            p.agent.apply_line(l);
+        // `ZODIAC_GUI_SEED_ITEMS=<n>` repeats the seed to build a long
+        // transcript — the soak/perf fixture for the virtualized transcript
+        // (a long pane and a fresh one should cost about the same per frame).
+        let reps = std::env::var("ZODIAC_GUI_SEED_ITEMS")
+            .ok()
+            .and_then(|v| v.parse::<usize>().ok())
+            .unwrap_or(1)
+            .max(1);
+        for _ in 0..reps {
+            for l in &lines {
+                p.agent.apply_line(l);
+            }
         }
         p.agent.perms.push(PermRequest {
             request_id: "selftest".into(),
@@ -416,6 +429,7 @@ impl GuiApp {
             T_PANE_CLOSED => {
                 self.anim.drop_pane(f.id);
                 self.ui_state.composers.remove(&f.id); // drop the closed pane's draft
+                self.ui_state.item_heights.remove(&f.id);
                 if let Some(i) = self.panes.iter().position(|p| p.id == f.id) {
                     self.panes.remove(i);
                     if self.panes.is_empty() {
@@ -1163,6 +1177,16 @@ impl GuiApp {
     }
 
     fn redraw(&mut self) {
+        // Soak fixture: seed a long agent transcript and sit in it, so the
+        // transcript's per-frame cost can be measured against a fresh pane.
+        if !self.seeded {
+            self.seeded = true;
+            if !self.selftest && std::env::var("ZODIAC_GUI_SEED_ITEMS").is_ok() {
+                self.seed_agent_pane();
+                self.active = self.panes.len().saturating_sub(1);
+                self.screen = crate::ui::Screen::Focused;
+            }
+        }
         // Roll output-rate buckets so idle panes decay toward zero even
         // without new output (task #33; time-gated inside rate_tick).
         for p in &mut self.panes {
@@ -1305,7 +1329,9 @@ impl GuiApp {
         // so without this an invisible window keeps burning CPU. Unfocused but
         // visible windows keep animating, just slower — watching an agent
         // stream in a background window is the whole point of a multiplexer.
-        let floor = if self.occluded {
+        let floor = if crate::ui::perf_off() {
+            Some(Duration::ZERO)
+        } else if self.occluded {
             None
         } else if self.focused {
             Some(MIN_FRAME)

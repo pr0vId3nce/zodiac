@@ -91,6 +91,9 @@ pub struct UiState {
     /// Per-pane composer drafts (keyed by pane id), so a draft survives
     /// switching panes and each agent keeps its own in-progress message.
     pub composers: std::collections::HashMap<u64, String>,
+    /// Measured transcript item heights per pane, used to cull off-screen
+    /// turns. Rebuilt lazily as items render; cleared on a width change.
+    pub item_heights: std::collections::HashMap<u64, Vec<f32>>,
     /// Which modal overlay is open.
     pub overlay: Overlay,
     /// Command-palette query + selected row.
@@ -1177,7 +1180,15 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
             });
         egui::CentralPanel::default()
             .frame(Frame::NONE.fill(theme::bg_window()))
-            .show(ui, |ui| transcript_view(ui, p, scroll_dy, d.agent_scale));
+            .show(ui, |ui| {
+                transcript_view(
+                    ui,
+                    p,
+                    scroll_dy,
+                    d.agent_scale,
+                    st.item_heights.entry(p.id).or_default(),
+                )
+            });
         if has_perm {
             perm_popup(ui, p, st, actions);
         }
@@ -1216,19 +1227,51 @@ thread_local! {
     /// shared markdown helpers render at chrome size when used off-transcript.
     static TRANSCRIPT_SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
 
-    /// Per-render table counter, reset at the top of [`transcript_view`], so
-    /// each table gets a unique egui id even when two share the same header
-    /// (a header-text id would collide and break the second table's render).
+    /// Per-item table counter, reset for each transcript item, and the index
+    /// of the item being drawn. Together they give every table a unique but
+    /// position-stable egui id — a header-text id would collide when two
+    /// tables share a header, and a whole-render counter would shift whenever
+    /// virtualization culled an item above.
     static TABLE_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    static TABLE_ITEM: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+
+    /// Width the cached item heights were measured at; a change invalidates.
+    static TRANSCRIPT_WIDTH: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
 }
 
-/// The next table sequence number this render (see [`TABLE_SEQ`]).
+/// A stable id for the next table in the item being drawn: the item's index
+/// paired with its own table counter. Derived from the index rather than a
+/// running per-render counter so ids don't shift when virtualization culls
+/// items above (which would reset each table's scroll state).
 fn next_table_seq() -> u64 {
-    TABLE_SEQ.with(|c| {
+    let item = TABLE_ITEM.with(|c| c.get());
+    let n = TABLE_SEQ.with(|c| {
         let v = c.get();
         c.set(v + 1);
         v
-    })
+    });
+    (item << 20) | n
+}
+
+/// Draw transcript item `i`, returning the vertical extent it consumed
+/// including the gap that follows — the value the height cache stores.
+fn draw_item(ui: &mut egui::Ui, p: &CPane, i: usize, inner: f32) -> f32 {
+    use zodiac::client_core::ChatItem;
+    TABLE_ITEM.with(|c| c.set(i as u64));
+    TABLE_SEQ.with(|c| c.set(0));
+    // Measure the cursor advance, not the drawn rect: egui inserts
+    // `item_spacing` between widgets, so a rect-based height would under-count
+    // and the spacers standing in for culled items would drift out of step.
+    let before = ui.cursor().top();
+    ui.scope(|ui| match &p.agent.items[i] {
+        ChatItem::User(t) => turn_user(ui, t, inner),
+        ChatItem::Assistant(t) => turn_assistant(ui, t, inner),
+        ChatItem::Thinking(t) => turn_thinking(ui, p.id, i, t, inner),
+        ChatItem::Tool(tc) => turn_tool_box(ui, p.id, i, tc, inner),
+        ChatItem::Error(t) => turn_agent(ui, "✗", theme::STATUS_RAIL[0], t, inner),
+    });
+    ui.add_space(10.0);
+    ui.cursor().top() - before
 }
 
 thread_local! {
@@ -1278,6 +1321,9 @@ fn cached_galley(
     key: u64,
     job: impl FnOnce() -> egui::text::LayoutJob,
 ) -> std::sync::Arc<egui::Galley> {
+    if perf_off() {
+        return ui.fonts_mut(|f| f.layout_job(job()));
+    }
     let frame = GALLEY_FRAME.with(|c| c.get());
     if let Some(hit) = GALLEY_CACHE.with(|c| {
         c.borrow_mut().get_mut(&key).map(|(g, last)| {
@@ -1350,6 +1396,16 @@ fn style_tag(size: f32, color: Color32) -> u64 {
     (s << 32) | c
 }
 
+/// `ZODIAC_GUI_PERF_OFF=1` restores the pre-optimization render path (no
+/// virtualization, no galley cache, no frame clamp). Kept as an A/B switch so
+/// the CPU-burn fix can be re-measured on one binary — see
+/// zodiac-gui/HANDOFF.md.
+pub fn perf_off() -> bool {
+    use std::sync::OnceLock;
+    static OFF: OnceLock<bool> = OnceLock::new();
+    *OFF.get_or_init(|| std::env::var("ZODIAC_GUI_PERF_OFF").is_ok())
+}
+
 /// Scale a transcript font size by the current agent-pane factor.
 fn tsize(base: f32) -> f32 {
     TRANSCRIPT_SCALE.with(|c| base * c.get())
@@ -1368,17 +1424,28 @@ impl Drop for TranscriptScaleGuard {
 /// from [`zodiac::client_core::ChatItem`] plus the live streaming tail. This
 /// is the rich view — expandable tool boxes, collapsible thinking prose,
 /// fenced-code blocks, and the orange thinking sayings.
-fn transcript_view(ui: &mut egui::Ui, p: &CPane, scroll_dy: f32, agent_scale: f32) {
-    use zodiac::client_core::ChatItem;
+fn transcript_view(
+    ui: &mut egui::Ui,
+    p: &CPane,
+    scroll_dy: f32,
+    agent_scale: f32,
+    heights: &mut Vec<f32>,
+) {
     let _scale_guard = TranscriptScaleGuard;
     TRANSCRIPT_SCALE.with(|c| c.set(agent_scale));
-    TABLE_SEQ.with(|c| c.set(0));
     galley_cache_tick();
+    // Item heights are measured at one width; a resize invalidates them all.
+    let width = ui.available_width();
+    let last_w = TRANSCRIPT_WIDTH.with(|c| c.replace(width));
+    if (last_w - width).abs() > 0.5 {
+        heights.clear();
+    }
+    heights.truncate(p.agent.items.len());
     egui::ScrollArea::vertical()
         .id_salt("transcript")
         .stick_to_bottom(true)
         .auto_shrink([false, false])
-        .show(ui, |ui| {
+        .show_viewport(ui, |ui, viewport| {
             // PageUp/PageDown delta from focused(); a positive dy scrolls up
             // (toward earlier turns), disengaging stick-to-bottom until the
             // user pages back down to the tail.
@@ -1387,15 +1454,48 @@ fn transcript_view(ui: &mut egui::Ui, p: &CPane, scroll_dy: f32, agent_scale: f3
             }
             ui.add_space(12.0);
             let inner = 22.0;
-            for (i, item) in p.agent.items.iter().enumerate() {
-                match item {
-                    ChatItem::User(t) => turn_user(ui, t, inner),
-                    ChatItem::Assistant(t) => turn_assistant(ui, t, inner),
-                    ChatItem::Thinking(t) => turn_thinking(ui, p.id, i, t, inner),
-                    ChatItem::Tool(tc) => turn_tool_box(ui, p.id, i, tc, inner),
-                    ChatItem::Error(t) => turn_agent(ui, "✗", theme::STATUS_RAIL[0], t, inner),
+            // Own the gaps between items: with the container's automatic
+            // spacing zeroed, an item's extent is exactly what `draw_item`
+            // measures, so a spacer can stand in for it precisely.
+            ui.spacing_mut().item_spacing.y = 0.0;
+            // Virtualized draw. Laying out every turn every frame made cost
+            // grow with transcript length (the handoff's dominant finding), so
+            // items whose cached extent falls outside the viewport (plus an
+            // overscan margin) collapse into a single spacer. Heights are
+            // measured as items render; the tail past `heights.len()` is always
+            // drawn, which is how newly-arrived items get measured.
+            const OVERSCAN: f32 = 600.0;
+            let (vis0, vis1) = (viewport.min.y - OVERSCAN, viewport.max.y + OVERSCAN);
+            let mut y = 12.0;
+            let mut skipped = 0.0;
+            let known = if perf_off() {
+                0
+            } else {
+                heights.len().min(p.agent.items.len())
+            };
+            for (i, slot) in heights.iter_mut().enumerate().take(known) {
+                let h = *slot;
+                if y + h >= vis0 && y <= vis1 {
+                    if skipped > 0.0 {
+                        ui.add_space(skipped);
+                        skipped = 0.0;
+                    }
+                    let measured = draw_item(ui, p, i, inner);
+                    // Advance by what was actually emitted, so a stale cached
+                    // height self-corrects instead of skewing later items.
+                    y += measured;
+                    *slot = measured;
+                } else {
+                    skipped += h;
+                    y += h;
                 }
-                ui.add_space(10.0);
+            }
+            if skipped > 0.0 {
+                ui.add_space(skipped);
+            }
+            for i in known..p.agent.items.len() {
+                let measured = draw_item(ui, p, i, inner);
+                heights.push(measured);
             }
             // Live tail: reasoning still streaming, then the thinking sayings,
             // then in-flight assistant text.

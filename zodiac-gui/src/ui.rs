@@ -1214,6 +1214,20 @@ thread_local! {
     /// only for the duration of [`transcript_view`]. 1.0 everywhere else, so
     /// shared markdown helpers render at chrome size when used off-transcript.
     static TRANSCRIPT_SCALE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
+
+    /// Per-render table counter, reset at the top of [`transcript_view`], so
+    /// each table gets a unique egui id even when two share the same header
+    /// (a header-text id would collide and break the second table's render).
+    static TABLE_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The next table sequence number this render (see [`TABLE_SEQ`]).
+fn next_table_seq() -> u64 {
+    TABLE_SEQ.with(|c| {
+        let v = c.get();
+        c.set(v + 1);
+        v
+    })
 }
 
 /// Scale a transcript font size by the current agent-pane factor.
@@ -1238,6 +1252,7 @@ fn transcript_view(ui: &mut egui::Ui, p: &CPane, scroll_dy: f32, agent_scale: f3
     use zodiac::client_core::ChatItem;
     let _scale_guard = TranscriptScaleGuard;
     TRANSCRIPT_SCALE.with(|c| c.set(agent_scale));
+    TABLE_SEQ.with(|c| c.set(0));
     egui::ScrollArea::vertical()
         .id_salt("transcript")
         .stick_to_bottom(true)
@@ -1532,6 +1547,7 @@ fn md_table(ui: &mut egui::Ui, rows: &[&str]) {
         .max(body.iter().map(|r| r.len()).max().unwrap_or(0));
     let align = |c: usize| aligns.get(c).copied().unwrap_or(ColAlign::Left);
     let cap = (ui.available_width() / ncols as f32 - 24.0).clamp(60.0, 340.0);
+    let seq = next_table_seq();
     Frame::NONE
         .stroke(Stroke::new(1.0, theme::LINE_BORDER))
         .corner_radius(CornerRadius::same(8))
@@ -1539,9 +1555,9 @@ fn md_table(ui: &mut egui::Ui, rows: &[&str]) {
         .outer_margin(Margin::symmetric(0, 4))
         .show(ui, |ui| {
             egui::ScrollArea::horizontal()
-                .id_salt(("md_table", rows[0]))
+                .id_salt(("md_table", seq))
                 .show(ui, |ui| {
-                    egui::Grid::new(("md_table_grid", rows[0]))
+                    egui::Grid::new(("md_table_grid", seq))
                         .striped(true)
                         .spacing(egui::vec2(14.0, 6.0))
                         .show(ui, |ui| {

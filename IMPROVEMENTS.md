@@ -12,6 +12,12 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 6. Fix markdown table egui id collision
+`md_table` used the header text as its egui id, so two tables with the same
+header (common when an agent emits several similar tables) collided and the
+second broke. Give each table a per-render unique id via a `TABLE_SEQ`
+thread-local counter reset at the top of `transcript_view`. `ui.rs`.
+
 ### 5. Cap the composer height
 The multiline composer (from the earlier overflow fix) could grow unbounded
 with a long/pasted message and cover the transcript. Wrap it in a vertical

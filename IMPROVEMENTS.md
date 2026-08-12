@@ -12,6 +12,11 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 19. Skip empty code boxes
+An empty fenced block (```` ``` ```` with nothing inside) rendered an empty
+bordered box (now also with a copy button). `render_body` skips a code box
+whose content is blank. `ui.rs`.
+
 ### 18. Show the running model on Observatory cards
 Agent cards now show the running model (e.g. `opus`, `haiku 4.5`) next to the
 agent chip — from `p.agent.model` (claude, via the stream) or `PaneState.model`

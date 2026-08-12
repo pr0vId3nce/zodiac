@@ -1397,7 +1397,10 @@ fn render_body(ui: &mut egui::Ui, text: &str) {
                 i += 1;
             }
             i += 1; // consume the closing fence (or run off the end)
-            code_box(ui, &buf.join("\n"));
+            let code = buf.join("\n");
+            if !code.trim().is_empty() {
+                code_box(ui, &code);
+            }
             continue;
         }
         // GitHub-flavored table: a row followed by a `|---|---|` separator.

@@ -1153,7 +1153,32 @@ impl GuiApp {
         if self.egui_state.is_none() {
             return;
         }
-        let raw = self.egui_state.as_mut().unwrap().take_egui_input(&win);
+        let mut raw = self.egui_state.as_mut().unwrap().take_egui_input(&win);
+        // egui-winit is built without its `clipboard` feature (copy is served
+        // from our arboard handle), which also means egui never turns Ctrl/⌘+V
+        // into a Paste event — so pasting into the composer/search fields did
+        // nothing. Detect the paste chord in the egui event stream and inject
+        // the system clipboard as an egui Paste. (Harmless in terminal mode:
+        // no egui text widget is focused there, so egui ignores it and the
+        // pty paste path still runs.)
+        let wants_paste = raw.events.iter().any(|e| {
+            matches!(
+                e,
+                egui::Event::Key { key: egui::Key::V, pressed: true, modifiers, .. }
+                    if modifiers.command || modifiers.ctrl
+            ) || matches!(
+                e,
+                egui::Event::Key { key: egui::Key::Insert, pressed: true, modifiers, .. }
+                    if modifiers.shift
+            )
+        });
+        if wants_paste {
+            if let Some(text) = self.read_clipboard() {
+                if !text.is_empty() {
+                    raw.events.push(egui::Event::Paste(text));
+                }
+            }
+        }
         let mut actions: Vec<crate::ui::UiAction> = Vec::new();
         // Owned copies so `data` doesn't hold a borrow on `self.settings`
         // while `build` also takes `&mut self.settings`.

@@ -12,6 +12,14 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 14. Fix paste into the composer / egui text fields
+`egui-winit` is built without its `clipboard` feature (copy is served from our
+arboard handle), so egui never converted Ctrl/⌘+V into a Paste event — pasting
+into the composer, palette, or settings fields silently did nothing. Now the
+redraw path detects the paste chord in the egui event stream and injects the
+system clipboard as an `egui::Event::Paste`. Harmless in terminal mode (no
+egui widget focused; the pty paste path still runs). `app.rs`.
+
 ### 13. Markdown links with parens in the URL
 `parse_link` stopped at the first `)`, truncating links like
 `.../wiki/Foo_(bar)`. Scan for the matching close paren with depth tracking

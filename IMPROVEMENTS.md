@@ -12,6 +12,12 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 22. Esc blurs the composer (then returns to Observatory)
+The Esc→Observatory handler is gated on nothing being focused, so Esc did
+nothing while the composer held focus. Now a first Esc surrenders the
+composer's focus and a second Esc returns to the Observatory — the standard
+two-step. `ui.rs` (`composer_bar`).
+
 ### 21. Per-pane composer drafts
 The composer was one shared buffer that got cleared on every pane switch, so a
 draft typed in one agent pane was lost when you switched away. Replaced

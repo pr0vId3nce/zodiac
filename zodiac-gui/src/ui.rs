@@ -2257,6 +2257,13 @@ fn composer_bar(ui: &mut egui::Ui, p: &CPane, composer: &mut String, actions: &m
                         if !resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Slash)) {
                             resp.request_focus();
                         }
+                        // Esc while composing blurs the field, so the next Esc
+                        // (now nothing focused) returns to the Observatory —
+                        // otherwise Esc did nothing while the composer held
+                        // focus (the Back handler is gated on no focus).
+                        if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                            resp.surrender_focus();
+                        }
                         if send_enter {
                             submit = true;
                             resp.request_focus();

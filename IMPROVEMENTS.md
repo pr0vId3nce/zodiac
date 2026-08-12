@@ -12,6 +12,13 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 15. Scroll the settings dialog on short windows
+The settings dialog grew (Theme, numerals, view, motion, the 3 font-size rows,
+behavior toggles) and had no scroll, so on a short window or at a large GUI
+font zoom it could run off-screen with the Done button unreachable. The body
+groups are now in a height-capped vertical scroll; the title and Done footer
+stay pinned. `ui.rs`.
+
 ### 14. Fix paste into the composer / egui text fields
 `egui-winit` is built without its `clipboard` feature (copy is served from our
 arboard handle), so egui never converted Ctrl/⌘+V into a Paste event — pasting

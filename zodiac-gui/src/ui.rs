@@ -3183,81 +3183,90 @@ fn settings_dialog(
                             .strong(),
                     );
                     ui.add_space(12.0);
-                    group_label(ui, "APPEARANCE");
-                    choice_row(
-                        ui,
-                        "Theme",
-                        &mut s.theme,
-                        "night",
-                        &[
-                            ("night", "slate·brass"),
-                            ("oled-orange", "oled·orange"),
-                            ("oled-green", "oled·green"),
-                        ],
-                        actions,
-                    );
-                    choice_row(
-                        ui,
-                        "Card numerals",
-                        &mut s.card_numeral,
-                        "zodiac",
-                        &[
-                            ("zodiac", "zodiac"),
-                            ("roman", "roman"),
-                            ("arabic", "arabic"),
-                        ],
-                        actions,
-                    );
-                    choice_row(
-                        ui,
-                        "Home view",
-                        &mut s.home_view,
-                        "cards",
-                        &[("cards", "cards"), ("list", "list")],
-                        actions,
-                    );
-                    choice_row(
-                        ui,
-                        "Motion",
-                        &mut s.gui_motion,
-                        "full",
-                        &[("full", "full"), ("reduced", "reduced"), ("off", "off")],
-                        actions,
-                    );
-                    ui.add_space(14.0);
-                    group_label(ui, "FONT SIZE");
-                    let sizes = &[
-                        ("80%", "80%"),
-                        ("90%", "90%"),
-                        ("100%", "100%"),
-                        ("110%", "110%"),
-                        ("125%", "125%"),
-                        ("150%", "150%"),
-                    ];
-                    choice_row(ui, "Terminal", &mut s.term_font, "100%", sizes, actions);
-                    choice_row(ui, "GUI", &mut s.gui_font, "100%", sizes, actions);
-                    choice_row(ui, "Agent chat", &mut s.agent_font, "100%", sizes, actions);
-                    ui.add_space(14.0);
-                    group_label(ui, "BEHAVIOR");
-                    toggle_row(ui, "Connection watchdog", &mut s.connection_watch, actions);
-                    toggle_row(
-                        ui,
-                        "Kitty keyboard protocol",
-                        &mut s.kitty_keyboard,
-                        actions,
-                    );
-                    choice_row(
-                        ui,
-                        "Capability floor",
-                        &mut s.capability_floor,
-                        "images",
-                        &[
-                            ("off", "off"),
-                            ("images", "images"),
-                            ("animation", "animation"),
-                        ],
-                        actions,
-                    );
+                    // Cap the scrolling body so the dialog never runs off a
+                    // short window (or at a large GUI font zoom); the title and
+                    // Done footer stay pinned outside the scroll.
+                    let body_h = (screen.height() - 200.0).max(220.0);
+                    egui::ScrollArea::vertical()
+                        .id_salt("settings_body")
+                        .max_height(body_h)
+                        .show(ui, |ui| {
+                            group_label(ui, "APPEARANCE");
+                            choice_row(
+                                ui,
+                                "Theme",
+                                &mut s.theme,
+                                "night",
+                                &[
+                                    ("night", "slate·brass"),
+                                    ("oled-orange", "oled·orange"),
+                                    ("oled-green", "oled·green"),
+                                ],
+                                actions,
+                            );
+                            choice_row(
+                                ui,
+                                "Card numerals",
+                                &mut s.card_numeral,
+                                "zodiac",
+                                &[
+                                    ("zodiac", "zodiac"),
+                                    ("roman", "roman"),
+                                    ("arabic", "arabic"),
+                                ],
+                                actions,
+                            );
+                            choice_row(
+                                ui,
+                                "Home view",
+                                &mut s.home_view,
+                                "cards",
+                                &[("cards", "cards"), ("list", "list")],
+                                actions,
+                            );
+                            choice_row(
+                                ui,
+                                "Motion",
+                                &mut s.gui_motion,
+                                "full",
+                                &[("full", "full"), ("reduced", "reduced"), ("off", "off")],
+                                actions,
+                            );
+                            ui.add_space(14.0);
+                            group_label(ui, "FONT SIZE");
+                            let sizes = &[
+                                ("80%", "80%"),
+                                ("90%", "90%"),
+                                ("100%", "100%"),
+                                ("110%", "110%"),
+                                ("125%", "125%"),
+                                ("150%", "150%"),
+                            ];
+                            choice_row(ui, "Terminal", &mut s.term_font, "100%", sizes, actions);
+                            choice_row(ui, "GUI", &mut s.gui_font, "100%", sizes, actions);
+                            choice_row(ui, "Agent chat", &mut s.agent_font, "100%", sizes, actions);
+                            ui.add_space(14.0);
+                            group_label(ui, "BEHAVIOR");
+                            toggle_row(ui, "Connection watchdog", &mut s.connection_watch, actions);
+                            toggle_row(
+                                ui,
+                                "Kitty keyboard protocol",
+                                &mut s.kitty_keyboard,
+                                actions,
+                            );
+                            choice_row(
+                                ui,
+                                "Capability floor",
+                                &mut s.capability_floor,
+                                "images",
+                                &[
+                                    ("off", "off"),
+                                    ("images", "images"),
+                                    ("animation", "animation"),
+                                ],
+                                actions,
+                            );
+                        });
                     ui.add_space(16.0);
                     ui.horizontal(|ui| {
                         ui.label(

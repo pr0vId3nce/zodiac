@@ -1231,6 +1231,125 @@ fn next_table_seq() -> u64 {
     })
 }
 
+thread_local! {
+    /// Laid-out text, reused across frames.
+    ///
+    /// Completed transcript turns are immutable, but the renderer used to
+    /// re-parse their Markdown and rebuild a `LayoutJob` — fresh `String`s and
+    /// `Vec`s — *every frame*, for *every* item. With agents streaming (which
+    /// pins the repaint clock) that allocation churn was the single largest
+    /// cost in the GUI: a profile of a streaming session put ~35-40% of samples
+    /// in malloc/free/memmove. Keying the finished galley by content + layout
+    /// geometry makes a redraw of unchanged text a hash lookup.
+    static GALLEY_CACHE: std::cell::RefCell<
+        std::collections::HashMap<u64, (std::sync::Arc<egui::Galley>, u64)>,
+    > = std::cell::RefCell::new(std::collections::HashMap::new());
+
+    /// Frame counter for cache aging (bumped once per transcript render).
+    static GALLEY_FRAME: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// Entries untouched for this many transcript frames are dropped. Generous
+/// enough that scrolling back and forth stays warm, small enough that a huge
+/// scrollback doesn't pin every galley it ever laid out.
+const GALLEY_TTL: u64 = 240;
+
+/// Age the galley cache one frame and evict what hasn't been used recently.
+fn galley_cache_tick() {
+    let frame = GALLEY_FRAME.with(|c| {
+        let v = c.get() + 1;
+        c.set(v);
+        v
+    });
+    if !frame.is_multiple_of(120) {
+        return; // sweep occasionally, not every frame
+    }
+    GALLEY_CACHE.with(|c| {
+        c.borrow_mut()
+            .retain(|_, (_, last)| frame.saturating_sub(*last) < GALLEY_TTL)
+    });
+}
+
+/// Lay `job` out once and reuse it while the same text is drawn at the same
+/// geometry. `key` must capture everything the layout depends on (content,
+/// size, color, wrap width, scale, pixels-per-point) — `galley_key` builds one.
+fn cached_galley(
+    ui: &mut egui::Ui,
+    key: u64,
+    job: impl FnOnce() -> egui::text::LayoutJob,
+) -> std::sync::Arc<egui::Galley> {
+    let frame = GALLEY_FRAME.with(|c| c.get());
+    if let Some(hit) = GALLEY_CACHE.with(|c| {
+        c.borrow_mut().get_mut(&key).map(|(g, last)| {
+            *last = frame;
+            g.clone()
+        })
+    }) {
+        return hit;
+    }
+    let galley = ui.fonts_mut(|f| f.layout_job(job()));
+    GALLEY_CACHE.with(|c| {
+        c.borrow_mut().insert(key, (galley.clone(), frame));
+    });
+    galley
+}
+
+/// Hash everything a laid-out run depends on into a cache key: the text, the
+/// wrap width, the device scale, the transcript font scale, and a caller-
+/// supplied `tag` covering style choices (font size, color, which renderer).
+fn galley_key(ui: &egui::Ui, text: &str, width: f32, tag: u64) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    text.hash(&mut h);
+    tag.hash(&mut h);
+    // Quantize the floats — exact bits would miss on sub-pixel jitter.
+    ((width * 4.0) as i64).hash(&mut h);
+    ((ui.ctx().pixels_per_point() * 100.0) as i64).hash(&mut h);
+    ((TRANSCRIPT_SCALE.with(|c| c.get()) * 1000.0) as i64).hash(&mut h);
+    h.finish()
+}
+
+/// Distinguishes monospace-box galleys from proportional ones with the same
+/// text/size/color.
+const MONO_TAG: u64 = 0x6d6f_6e6f_0000_0001;
+
+/// A cached monospace label — the code/result boxes, whose text is immutable
+/// once a tool call completes. `wrap` is the wrap width (`INFINITY` to let long
+/// lines run under a horizontal scroll). `build` produces the display string
+/// and only runs on a cache miss, so per-frame clipping/allocation disappears.
+fn mono_label(
+    ui: &mut egui::Ui,
+    cache_on: &str,
+    size: f32,
+    color: Color32,
+    wrap: f32,
+    build: impl FnOnce() -> String,
+) {
+    let key = galley_key(ui, cache_on, wrap, style_tag(size, color) ^ MONO_TAG);
+    let galley = cached_galley(ui, key, || {
+        let mut job = egui::text::LayoutJob::default();
+        job.wrap.max_width = wrap;
+        job.append(
+            &build(),
+            0.0,
+            egui::TextFormat {
+                font_id: egui::FontId::monospace(size),
+                color,
+                ..Default::default()
+            },
+        );
+        job
+    });
+    ui.add(egui::Label::new(galley));
+}
+
+/// Pack a font size + color into the `tag` half of a galley key.
+fn style_tag(size: f32, color: Color32) -> u64 {
+    let s = (size * 100.0) as u64 & 0xffff_ffff;
+    let c = u32::from_be_bytes(color.to_array()) as u64;
+    (s << 32) | c
+}
+
 /// Scale a transcript font size by the current agent-pane factor.
 fn tsize(base: f32) -> f32 {
     TRANSCRIPT_SCALE.with(|c| base * c.get())
@@ -1254,6 +1373,7 @@ fn transcript_view(ui: &mut egui::Ui, p: &CPane, scroll_dy: f32, agent_scale: f3
     let _scale_guard = TranscriptScaleGuard;
     TRANSCRIPT_SCALE.with(|c| c.set(agent_scale));
     TABLE_SEQ.with(|c| c.set(0));
+    galley_cache_tick();
     egui::ScrollArea::vertical()
         .id_salt("transcript")
         .stick_to_bottom(true)
@@ -1706,15 +1826,20 @@ fn md_line(ui: &mut egui::Ui, line: &str, size: f32, base: Color32) {
     if spans.is_empty() {
         return;
     }
-    // Fast path: a line with no links is one non-interactive LayoutJob label
-    // (preserves exact wrapping/appearance for the common case).
+    // Fast path: a line with no links lays out once and is cached — the same
+    // text at the same width/scale redraws without re-parsing or reallocating.
     if spans.iter().all(|sp| sp.url.is_none()) {
-        let mut job = egui::text::LayoutJob::default();
-        job.wrap.max_width = ui.available_width();
-        for sp in &spans {
-            job.append(&sp.text, 0.0, span_format(sp, size, base));
-        }
-        ui.label(job);
+        let width = ui.available_width();
+        let key = galley_key(ui, line, width, style_tag(size, base));
+        let galley = cached_galley(ui, key, || {
+            let mut job = egui::text::LayoutJob::default();
+            job.wrap.max_width = width;
+            for sp in &spans {
+                job.append(&sp.text, 0.0, span_format(sp, size, base));
+            }
+            job
+        });
+        ui.add(egui::Label::new(galley));
         return;
     }
     // Link path: lay the runs out with wrapping so link runs can be clickable.
@@ -2020,11 +2145,14 @@ fn code_box(ui: &mut egui::Ui, code: &str) {
             egui::ScrollArea::horizontal()
                 .id_salt(egui::Id::new(("code", code.len(), code.as_ptr() as usize)))
                 .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(code)
-                            .color(theme::TEXT_BODY)
-                            .size(tsize(12.5))
-                            .monospace(),
+                    // No wrap: long lines run under the horizontal scroll.
+                    mono_label(
+                        ui,
+                        code,
+                        tsize(12.5),
+                        theme::TEXT_BODY,
+                        f32::INFINITY,
+                        || code.to_string(),
                     );
                 });
         });
@@ -2073,12 +2201,10 @@ fn result_box(ui: &mut egui::Ui, text: &str, is_error: bool) {
                 .id_salt(egui::Id::new(("res", text.len(), text.as_ptr() as usize)))
                 .max_height(240.0)
                 .show(ui, |ui| {
-                    ui.label(
-                        RichText::new(clip_lines(text, 400))
-                            .color(col)
-                            .size(tsize(12.0))
-                            .monospace(),
-                    );
+                    // clip_lines() only runs on a cache miss — it used to
+                    // rebuild a (potentially huge) String every frame.
+                    let w = ui.available_width();
+                    mono_label(ui, text, tsize(12.0), col, w, || clip_lines(text, 400));
                 });
         });
     // Copy the full (unclipped) result.

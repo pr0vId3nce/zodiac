@@ -26,6 +26,15 @@ use crate::render::Renderer;
 /// quickly the tab spinner/glow reflect an agent starting or stopping work.
 const QUERY_INTERVAL: Duration = Duration::from_millis(600);
 
+/// Shortest gap between animation frames while the window is focused (~60fps).
+/// egui requests zero-delay repaints while anything animates; this is what
+/// keeps that from free-running the event loop on CPU cost alone.
+const MIN_FRAME: Duration = Duration::from_millis(16);
+
+/// Animation cadence when the window is visible but unfocused (~15fps): a
+/// background pane still streams visibly, at a fraction of the CPU.
+const UNFOCUSED_FRAME: Duration = Duration::from_millis(66);
+
 /// Events injected into the winit loop from outside: server frames read on
 /// the socket thread.
 pub enum UserEvent {
@@ -87,6 +96,12 @@ pub struct GuiApp {
     selftest: bool,
     selftest_step: usize,
     selftest_next: Option<Instant>,
+    /// Window visibility/focus, from winit — used to throttle (unfocused) or
+    /// stop (occluded) the animation timer. Redraws here are timer-driven, not
+    /// frame-callback-driven, so a hidden window would otherwise keep burning
+    /// CPU. Assume visible+focused until told otherwise.
+    occluded: bool,
+    focused: bool,
 }
 
 impl GuiApp {
@@ -131,6 +146,8 @@ impl GuiApp {
             selftest: std::env::var("ZODIAC_GUI_SELFTEST").is_ok(),
             selftest_step: 0,
             selftest_next: None,
+            occluded: false,
+            focused: true,
         }
     }
 
@@ -1277,9 +1294,29 @@ impl GuiApp {
             .viewport_output
             .get(&egui::ViewportId::ROOT)
             .map(|v| v.repaint_delay);
-        self.next_anim = match delay {
-            Some(d) if d.is_zero() => Some(Instant::now()),
-            Some(d) if d < Duration::from_secs(24 * 3600) => Instant::now().checked_add(d),
+        // Clamp the animation cadence. egui asks for a *zero* delay whenever
+        // something is animating (a streaming transcript, the thinking
+        // spinner); honouring that literally turns `WaitUntil(now)` into a
+        // busy-loop that redraws as fast as the CPU allows — a full core while
+        // agents stream. Floor it at one frame instead.
+        //
+        // Occluded (hidden/minimized) windows get no animation frames at all:
+        // these redraws are timer-driven, not Wayland frame-callback-driven,
+        // so without this an invisible window keeps burning CPU. Unfocused but
+        // visible windows keep animating, just slower — watching an agent
+        // stream in a background window is the whole point of a multiplexer.
+        let floor = if self.occluded {
+            None
+        } else if self.focused {
+            Some(MIN_FRAME)
+        } else {
+            Some(UNFOCUSED_FRAME)
+        };
+        self.next_anim = match (delay, floor) {
+            (_, None) => None,
+            (Some(d), Some(f)) if d < Duration::from_secs(24 * 3600) => {
+                Instant::now().checked_add(d.max(f))
+            }
             _ => None,
         };
 
@@ -1557,6 +1594,19 @@ impl ApplicationHandler<UserEvent> for GuiApp {
                 self.request_redraw();
             }
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
+            // Visibility/focus drive the animation throttle (see `next_anim`).
+            // Coming back into view needs an explicit redraw: the animation
+            // timer was disarmed while hidden, so nothing else would wake us.
+            WindowEvent::Occluded(hidden) => {
+                self.occluded = hidden;
+                if !hidden {
+                    self.request_redraw();
+                }
+            }
+            WindowEvent::Focused(has_focus) => {
+                self.focused = has_focus;
+                self.request_redraw();
+            }
             WindowEvent::KeyboardInput { event, .. } if !consumed => self.on_key(event),
             WindowEvent::Ime(Ime::Commit(text)) if !consumed => self.on_ime(text),
             WindowEvent::CursorMoved { position, .. } => {

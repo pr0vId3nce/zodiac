@@ -12,6 +12,10 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 23. Prune composer draft on pane close
+Follow-up to #21: when `T_PANE_CLOSED` removes a pane, drop its entry from the
+per-pane `composers` map so drafts for closed panes don't linger. `app.rs`.
+
 ### 22. Esc blurs the composer (then returns to Observatory)
 The Esc→Observatory handler is gated on nothing being focused, so Esc did
 nothing while the composer held focus. Now a first Esc surrenders the
@@ -147,8 +151,8 @@ routes to a new `md_task_row`. `ui.rs`.
 
 <!-- anything found but not fixed, with enough detail to pick up later -->
 - ~~Composer draft is shared, not per-pane.~~ **Done in #21** — per-pane
-  `composers: HashMap<u64,String>`. (Minor: a closed pane's draft entry lingers
-  in the map until process exit; negligible, could prune on pane removal.)
+  `composers: HashMap<u64,String>`; closed panes' drafts are pruned on
+  `T_PANE_CLOSED` (#23).
 - **Transcript re-parses everything every frame.** `transcript_view` renders
   all `items` (and re-parses the streaming tail's markdown) each frame with no
   virtualization; a very long transcript or a very long single streaming

@@ -398,6 +398,7 @@ impl GuiApp {
             }
             T_PANE_CLOSED => {
                 self.anim.drop_pane(f.id);
+                self.ui_state.composers.remove(&f.id); // drop the closed pane's draft
                 if let Some(i) = self.panes.iter().position(|p| p.id == f.id) {
                     self.panes.remove(i);
                     if self.panes.is_empty() {

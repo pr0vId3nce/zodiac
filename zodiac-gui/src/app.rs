@@ -1206,15 +1206,25 @@ impl GuiApp {
         // copy uses rather than linking a second clipboard implementation.
         let mut full = full;
         for cmd in &full.platform_output.commands {
-            if let egui::OutputCommand::CopyText(text) = cmd {
-                if !text.is_empty() {
+            match cmd {
+                egui::OutputCommand::CopyText(text) if !text.is_empty() => {
                     self.write_clipboard("c", text.clone());
                 }
+                // Clickable transcript links: egui_winit's default-features
+                // are off, so nothing opens URLs for us — hand them to the OS
+                // default browser (xdg-open on Linux, `open` on macOS).
+                egui::OutputCommand::OpenUrl(u) if !u.url.is_empty() => {
+                    open_in_browser(&u.url);
+                }
+                _ => {}
             }
         }
-        full.platform_output
-            .commands
-            .retain(|c| !matches!(c, egui::OutputCommand::CopyText(_)));
+        full.platform_output.commands.retain(|c| {
+            !matches!(
+                c,
+                egui::OutputCommand::CopyText(_) | egui::OutputCommand::OpenUrl(_)
+            )
+        });
         self.egui_state
             .as_mut()
             .unwrap()
@@ -1352,6 +1362,28 @@ fn shell_quote(s: &str) -> String {
     } else {
         format!("'{}'", s.replace('\'', "'\\''"))
     }
+}
+
+/// Open a URL in the OS default browser: `open` on macOS, `xdg-open` on
+/// Linux/BSD. Only http(s) URLs are launched (a transcript can contain
+/// arbitrary text — never hand `file://`, `javascript:`, etc. to a launcher).
+/// Detached and non-blocking; failures are swallowed (best-effort).
+fn open_in_browser(url: &str) {
+    let low = url.to_ascii_lowercase();
+    if !(low.starts_with("http://") || low.starts_with("https://")) {
+        return;
+    }
+    let program = if cfg!(target_os = "macos") {
+        "open"
+    } else {
+        "xdg-open"
+    };
+    let _ = std::process::Command::new(program)
+        .arg(url)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn();
 }
 
 impl ApplicationHandler<UserEvent> for GuiApp {

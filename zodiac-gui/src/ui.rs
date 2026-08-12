@@ -1432,38 +1432,68 @@ fn md_line(ui: &mut egui::Ui, line: &str, size: f32, base: Color32) {
     if spans.is_empty() {
         return;
     }
-    let mut job = egui::text::LayoutJob::default();
-    job.wrap.max_width = ui.available_width();
-    for sp in &spans {
-        let color = if sp.code {
-            theme::AMBER
-        } else if sp.link {
-            theme::accent()
-        } else if sp.bold {
-            theme::TEXT_PRIMARY
-        } else {
-            base
-        };
-        let font = if sp.code {
-            egui::FontId::monospace(size - 1.0)
-        } else {
-            egui::FontId::proportional(size)
-        };
-        let mut fmt = egui::TextFormat {
-            font_id: font,
-            color,
-            italics: sp.italic,
-            ..Default::default()
-        };
-        if sp.code {
-            fmt.background = theme::bg_raised();
+    // Fast path: a line with no links is one non-interactive LayoutJob label
+    // (preserves exact wrapping/appearance for the common case).
+    if spans.iter().all(|sp| sp.url.is_none()) {
+        let mut job = egui::text::LayoutJob::default();
+        job.wrap.max_width = ui.available_width();
+        for sp in &spans {
+            job.append(&sp.text, 0.0, span_format(sp, size, base));
         }
-        if sp.link {
-            fmt.underline = Stroke::new(1.0, theme::accent());
-        }
-        job.append(&sp.text, 0.0, fmt);
+        ui.label(job);
+        return;
     }
-    ui.label(job);
+    // Link path: lay the runs out left-to-right with wrapping so link runs can
+    // be individual clickable widgets. Clicking opens the URL in the OS default
+    // browser via egui's open_url command (handled in app.rs' output loop).
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing.x = 0.0;
+        for sp in &spans {
+            if let Some(url) = &sp.url {
+                let text = RichText::new(&sp.text)
+                    .color(theme::accent())
+                    .underline()
+                    .font(egui::FontId::proportional(size));
+                let resp = ui
+                    .add(egui::Label::new(text).sense(egui::Sense::click()))
+                    .on_hover_cursor(egui::CursorIcon::PointingHand);
+                if resp.clicked() {
+                    ui.ctx().open_url(egui::OpenUrl::new_tab(url));
+                }
+            } else {
+                let mut job = egui::text::LayoutJob::default();
+                job.wrap.max_width = ui.available_width();
+                job.append(&sp.text, 0.0, span_format(sp, size, base));
+                ui.label(job);
+            }
+        }
+    });
+}
+
+/// The egui `TextFormat` for a non-link inline run (code / bold / italic).
+fn span_format(sp: &MdSpan, size: f32, base: Color32) -> egui::TextFormat {
+    let color = if sp.code {
+        theme::AMBER
+    } else if sp.bold {
+        theme::TEXT_PRIMARY
+    } else {
+        base
+    };
+    let font = if sp.code {
+        egui::FontId::monospace(size - 1.0)
+    } else {
+        egui::FontId::proportional(size)
+    };
+    let mut fmt = egui::TextFormat {
+        font_id: font,
+        color,
+        italics: sp.italic,
+        ..Default::default()
+    };
+    if sp.code {
+        fmt.background = theme::bg_raised();
+    }
+    fmt
 }
 
 /// One inline-formatted run of Markdown text.
@@ -1472,7 +1502,9 @@ struct MdSpan {
     bold: bool,
     italic: bool,
     code: bool,
-    link: bool,
+    /// `Some(url)` marks a clickable link (opens in the OS default browser);
+    /// the run is also styled with the accent color + underline.
+    url: Option<String>,
 }
 
 /// Split a line into inline runs: `` `code` ``, **bold**, *italic*/_italic_,
@@ -1485,7 +1517,7 @@ fn parse_inline(s: &str) -> Vec<MdSpan> {
                 bold,
                 italic,
                 code: false,
-                link: false,
+                url: None,
             });
         }
     }
@@ -1511,7 +1543,7 @@ fn parse_inline(s: &str) -> Vec<MdSpan> {
                     bold,
                     italic,
                     code: true,
-                    link: false,
+                    url: None,
                 });
                 i = j + 1;
                 continue;
@@ -1521,14 +1553,31 @@ fn parse_inline(s: &str) -> Vec<MdSpan> {
             continue;
         }
         if c == '[' {
-            if let Some((text, adv)) = parse_link(&chars, i) {
+            if let Some((text, url, adv)) = parse_link(&chars, i) {
                 flush(&mut cur, &mut spans, bold, italic);
                 spans.push(MdSpan {
                     text,
                     bold,
                     italic,
                     code: false,
-                    link: true,
+                    url: Some(url),
+                });
+                i += adv;
+                continue;
+            }
+        }
+        // Bare URL (http:// or https://) not wrapped in Markdown link syntax —
+        // agents often print raw links. Consume up to whitespace, trimming
+        // trailing punctuation so "see https://x.com." doesn't eat the period.
+        if (c == 'h' || c == 'H') && starts_with_url(&chars, i) {
+            if let Some((url, adv)) = parse_bare_url(&chars, i) {
+                flush(&mut cur, &mut spans, bold, italic);
+                spans.push(MdSpan {
+                    text: url.clone(),
+                    bold,
+                    italic,
+                    code: false,
+                    url: Some(url),
                 });
                 i += adv;
                 continue;
@@ -1564,15 +1613,42 @@ fn parse_inline(s: &str) -> Vec<MdSpan> {
     spans
 }
 
-/// Parse `[text](url)` at `open` ('['); returns (text, chars_consumed).
-fn parse_link(chars: &[char], open: usize) -> Option<(String, usize)> {
+/// Parse `[text](url)` at `open` ('['); returns (text, url, chars_consumed).
+fn parse_link(chars: &[char], open: usize) -> Option<(String, String, usize)> {
     let close = chars[open + 1..].iter().position(|&c| c == ']')? + open + 1;
     if chars.get(close + 1) != Some(&'(') {
         return None;
     }
     let end = chars[close + 2..].iter().position(|&c| c == ')')? + close + 2;
     let text: String = chars[open + 1..close].iter().collect();
-    Some((text, end - open + 1))
+    let url: String = chars[close + 2..end].iter().collect();
+    Some((text, url, end - open + 1))
+}
+
+/// Does the char slice at `i` begin with an `http://` / `https://` scheme?
+fn starts_with_url(chars: &[char], i: usize) -> bool {
+    let rest: String = chars[i..].iter().take(8).collect();
+    let low = rest.to_ascii_lowercase();
+    low.starts_with("http://") || low.starts_with("https://")
+}
+
+/// Parse a bare URL at `i`; returns (url, chars_consumed). Runs to the first
+/// whitespace, then trims trailing sentence punctuation and a single closing
+/// bracket so surrounding prose isn't swallowed.
+fn parse_bare_url(chars: &[char], i: usize) -> Option<(String, usize)> {
+    let mut j = i;
+    while j < chars.len() && !chars[j].is_whitespace() {
+        j += 1;
+    }
+    let mut url: String = chars[i..j].iter().collect();
+    let n = url.len();
+    let trimmed = url.trim_end_matches(['.', ',', ';', ':', '!', '?', ')', ']', '"', '\'']);
+    let consumed = j - i - (n - trimmed.len());
+    url.truncate(trimmed.len());
+    if url.len() <= "https://".len() {
+        return None;
+    }
+    Some((url, consumed))
 }
 
 /// A monospace code box: bordered, horizontally scrollable so long lines
@@ -3037,12 +3113,52 @@ fn observatory(root: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
                 });
                 return;
             }
+            observatory_nav(ui, d, actions);
             if d.home_view == "list" {
                 card_list(ui, d, actions);
             } else {
                 card_grid(ui, d, actions);
             }
         });
+}
+
+/// Keyboard navigation on the Observatory: arrow keys move the selection
+/// (wrapping), Enter/Space opens the selected pane. Handled here in the egui
+/// frame — which sees window events before the raw pty path — and only when no
+/// text widget holds focus, so overlays and the composer keep their own keys.
+/// Consumes the keys so the card ScrollArea doesn't also scroll on them.
+fn observatory_nav(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
+    let n = d.panes.len();
+    if n == 0 || ui.memory(|m| m.focused()).is_some() {
+        return;
+    }
+    let mut sel = d.active.min(n - 1);
+    let (mut moved, mut open) = (false, false);
+    ui.input_mut(|i| {
+        use egui::{Key, Modifiers};
+        for k in [Key::ArrowDown, Key::ArrowRight] {
+            if i.consume_key(Modifiers::NONE, k) {
+                sel = (sel + 1) % n;
+                moved = true;
+            }
+        }
+        for k in [Key::ArrowUp, Key::ArrowLeft] {
+            if i.consume_key(Modifiers::NONE, k) {
+                sel = (sel + n - 1) % n;
+                moved = true;
+            }
+        }
+        for k in [Key::Enter, Key::Space] {
+            if i.consume_key(Modifiers::NONE, k) {
+                open = true;
+            }
+        }
+    });
+    if open {
+        actions.push(UiAction::Open(sel));
+    } else if moved {
+        actions.push(UiAction::Focus(sel));
+    }
 }
 
 /// Observatory list layout (home_view = "list"): one compact row per pane
@@ -3179,24 +3295,15 @@ fn amber_button(ui: &mut egui::Ui, text: &str) -> egui::Response {
 fn card_grid(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
     let gap = 14.0;
     egui::ScrollArea::vertical().show(ui, |ui| {
-        // Measure inside the scroll area so the width already excludes the
-        // scrollbar; column count and card width then tile it exactly, with
-        // the gap living in item_spacing so there's no trailing overflow that
-        // pushes the last card off the right edge.
+        // One card per row, stacked top-to-bottom. Each card spans the full
+        // available width (measured inside the scroll area so the scrollbar is
+        // already excluded), so nothing can run off the right edge regardless
+        // of window size or long inner content.
         let avail = ui.available_width();
-        let min_card = 300.0;
-        let cols = (((avail + gap) / (min_card + gap)).floor() as usize).max(1);
-        let card_w = (((avail - gap * (cols as f32 - 1.0)) / cols as f32).floor()).max(1.0);
-        let items: Vec<(usize, &CPane)> = d.panes.iter().enumerate().collect();
-        for row in items.chunks(cols) {
-            ui.horizontal_top(|ui| {
-                ui.spacing_mut().item_spacing.x = gap;
-                for (i, p) in row {
-                    ui.allocate_ui(egui::vec2(card_w, 0.0), |ui| {
-                        ui.set_width(card_w);
-                        pane_card(ui, d, *i, p, actions);
-                    });
-                }
+        for (i, p) in d.panes.iter().enumerate() {
+            ui.allocate_ui(egui::vec2(avail, 0.0), |ui| {
+                ui.set_width(avail);
+                pane_card(ui, d, i, p, actions);
             });
             ui.add_space(gap);
         }
@@ -3443,4 +3550,71 @@ fn fade(c: Color32, a: f32) -> Color32 {
     let bg = theme::bg_window();
     let mix = |x: u8, y: u8| ((y as f32) + ((x as f32) - (y as f32)) * a).round() as u8;
     Color32::from_rgb(mix(c.r(), bg.r()), mix(c.g(), bg.g()), mix(c.b(), bg.b()))
+}
+
+#[cfg(test)]
+mod inline_link_tests {
+    use super::*;
+
+    fn urls(s: &str) -> Vec<(String, String)> {
+        parse_inline(s)
+            .into_iter()
+            .filter_map(|sp| sp.url.map(|u| (sp.text, u)))
+            .collect()
+    }
+
+    #[test]
+    fn markdown_link_keeps_text_and_url() {
+        assert_eq!(
+            urls("see [the docs](https://example.com/x) now"),
+            vec![("the docs".to_string(), "https://example.com/x".to_string())]
+        );
+    }
+
+    #[test]
+    fn bare_url_is_linked() {
+        assert_eq!(
+            urls("visit https://example.com/a here"),
+            vec![(
+                "https://example.com/a".to_string(),
+                "https://example.com/a".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn bare_url_trailing_punctuation_trimmed() {
+        // The period is prose, not part of the URL.
+        assert_eq!(
+            urls("go to https://example.com."),
+            vec![(
+                "https://example.com".to_string(),
+                "https://example.com".to_string()
+            )]
+        );
+        // And a closing paren from "(see https://x.io)".
+        assert_eq!(
+            urls("(see https://x.io)"),
+            vec![("https://x.io".to_string(), "https://x.io".to_string())]
+        );
+    }
+
+    #[test]
+    fn text_after_trimmed_url_survives() {
+        // Char accounting must be exact: the trailing "." is trimmed from the
+        // link yet the following word must still render.
+        let spans = parse_inline("a https://x.io. b");
+        let text: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert_eq!(text, "a https://x.io. b");
+        assert_eq!(
+            urls("a https://x.io. b"),
+            vec![("https://x.io".to_string(), "https://x.io".to_string())]
+        );
+    }
+
+    #[test]
+    fn non_http_scheme_not_linked() {
+        assert!(urls("run file:///etc/passwd please").is_empty());
+        assert!(urls("no links here at all").is_empty());
+    }
 }

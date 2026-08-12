@@ -12,6 +12,11 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 18. Show the running model on Observatory cards
+Agent cards now show the running model (e.g. `opus`, `haiku 4.5`) next to the
+agent chip — from `p.agent.model` (claude, via the stream) or `PaneState.model`
+(pi) → `short_model`. Matches the focused-header treatment. `ui.rs`.
+
 ### 17. Copy button on code boxes
 Hovering a fenced code box now shows a small "copy" button in the top-right
 that copies the raw code to the system clipboard (via the arboard-backed

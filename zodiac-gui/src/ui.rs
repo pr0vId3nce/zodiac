@@ -3803,6 +3803,20 @@ fn pane_card(ui: &mut egui::Ui, d: &UiData, i: usize, p: &CPane, actions: &mut V
                         );
                         if let Some(agent) = ps.and_then(|s| s.agent.as_deref()) {
                             agent_chip(ui, agent, ps.and_then(|s| s.version.as_deref()));
+                            // Running model, when known (claude reports it on
+                            // the stream, pi via PaneState).
+                            let model = p.agent.model.clone().or_else(|| {
+                                ps.and_then(|s| s.model.as_deref())
+                                    .map(zodiac::client_core::short_model)
+                            });
+                            if let Some(m) = model {
+                                ui.label(
+                                    RichText::new(m)
+                                        .color(theme::VIOLET_TEXT)
+                                        .size(11.0)
+                                        .monospace(),
+                                );
+                            }
                         }
                     });
                     if let Some(cwd) = ps.and_then(|s| s.cwd.as_deref()) {

@@ -21,6 +21,21 @@ the headless GUI selftest walks every screen + a seeded rich pane and exits 0.
 
 <!-- new entries go here, newest first -->
 
+### 27. Claude Code slash commands + the terminal-clipping root cause
+Four-part goal: slash commands in structured panes, terminal passthrough
+fidelity, the claude-in-a-terminal graphics glitch, and the tab-completion
+freeze. Status of each is in **`zodiac-gui/SLASH-AND-TERMINAL.md`** — read that
+for the detail, including the two items not finished.
+
+Landed: slash-command discovery + a floating picker above the composer
+(arrows/Enter/Tab/click, filters as you type, claude panes only); `/resume`
+implemented zodiac-side with a real session picker (the CLI refuses it over a
+pipe); `T_NEW_PANE` gained a `session` field; **the terminal grid is now
+measured inside the frame margins** — it was over-reported by ~2 columns and
+~1–2 rows, which is why Claude Code's prompt box lost its right border and had
+its bottom line clipped; and a composer-inflation regression from the earlier
+wrapping-composer change. Commits `729cb12`, `2c39eaa`, `4860552`.
+
 ### 26. CPU-burn handoff: all four fixes (see `zodiac-gui/HANDOFF.md`)
 Acted on the macbook's profiling handoff — the GUI pegged a core while agents
 streamed. Landed all four suggested fixes: virtualized the transcript

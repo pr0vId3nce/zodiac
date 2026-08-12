@@ -26,10 +26,89 @@ pub fn harnesses() -> Vec<HarnessInfo> {
     out
 }
 
-/// Is `bin` an executable on `$PATH`?
+/// Is `bin` an executable anywhere we know to look?
 fn which(bin: &str) -> bool {
-    std::env::var_os("PATH")
-        .is_some_and(|paths| std::env::split_paths(&paths).any(|dir| dir.join(bin).is_file()))
+    search_dirs().iter().any(|dir| dir.join(bin).is_file())
+}
+
+/// Where to look for harness binaries.
+///
+/// `$PATH` alone is not enough for a GUI. A window launched from Finder,
+/// the Dock or Spotlight inherits launchd's environment, which on macOS is
+/// a bare `/usr/bin:/bin:/usr/sbin:/sbin` — none of the places a user
+/// actually installs a coding agent. The harness then looks uninstalled
+/// even though it plainly is not, and the picker says "no agent harnesses
+/// found" on a machine running one.
+///
+/// (An `LSEnvironment` PATH in the app bundle is *not* a fix: Launch
+/// Services caches it and ignores it often enough to be untrustworthy.
+/// This has to be answered by the program, not its Info.plist.)
+///
+/// Note the panes themselves were never affected — the server spawns each
+/// one as a login shell, so it rebuilds the real PATH. It was only ever
+/// detection that was blind.
+fn search_dirs() -> &'static [std::path::PathBuf] {
+    use std::sync::OnceLock;
+    static DIRS: OnceLock<Vec<std::path::PathBuf>> = OnceLock::new();
+    DIRS.get_or_init(|| {
+        let mut out: Vec<std::path::PathBuf> = Vec::new();
+        let mut push = |d: std::path::PathBuf| {
+            if !out.contains(&d) {
+                out.push(d);
+            }
+        };
+        if let Some(paths) = std::env::var_os("PATH") {
+            for d in std::env::split_paths(&paths) {
+                push(d);
+            }
+        }
+        for d in login_shell_path() {
+            push(d);
+        }
+        // Common install prefixes, so detection still works when the login
+        // shell can't be asked (or sets PATH only for interactive use).
+        if let Some(home) = std::env::var_os("HOME").map(std::path::PathBuf::from) {
+            for rel in [
+                ".local/bin",
+                ".local/share/claude/bin",
+                ".bun/bin",
+                ".deno/bin",
+                ".cargo/bin",
+                ".npm-global/bin",
+                ".yarn/bin",
+                ".volta/bin",
+            ] {
+                push(home.join(rel));
+            }
+        }
+        for abs in ["/usr/local/bin", "/opt/homebrew/bin", "/opt/local/bin"] {
+            push(std::path::PathBuf::from(abs));
+        }
+        out
+    })
+}
+
+/// The PATH the user's login shell builds — the one their terminal has,
+/// and the one the pane will get when the server spawns its login shell.
+/// Best-effort: a shell that fails, hangs past its own startup, or prints
+/// nothing simply contributes no directories.
+fn login_shell_path() -> Vec<std::path::PathBuf> {
+    let Some(shell) = std::env::var_os("SHELL") else {
+        return Vec::new();
+    };
+    let out = std::process::Command::new(shell)
+        .args(["-lc", "printf %s \"$PATH\""])
+        .stdin(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .output();
+    let Ok(out) = out else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    let text = String::from_utf8_lossy(&out.stdout);
+    std::env::split_paths(text.trim()).collect()
 }
 
 /// Claude's `--model` aliases (cloud models — not local, but this is how you
@@ -91,4 +170,29 @@ fn read_pi_models() -> Option<Vec<ModelChoice>> {
         }
     }
     Some(out)
+}
+
+#[cfg(test)]
+mod tests {
+    /// A GUI launched from Finder/Dock/Spotlight inherits launchd's bare
+    /// PATH. Detection must not depend on it, or every harness looks
+    /// uninstalled on a machine that has one. Asserts on the *directory
+    /// list* rather than on a real binary so it means the same thing on a
+    /// CI runner with no agent installed.
+    #[test]
+    fn search_covers_real_install_dirs_under_a_bare_path() {
+        // SAFETY: single-threaded test, set before the OnceLock is filled.
+        unsafe { std::env::set_var("PATH", "/usr/bin:/bin:/usr/sbin:/sbin") };
+        let dirs = super::search_dirs();
+        let has = |p: &str| dirs.iter().any(|d| d.ends_with(p));
+        assert!(has(".local/bin"), "~/.local/bin missing: {dirs:?}");
+        assert!(
+            dirs.iter().any(|d| d == std::path::Path::new("/usr/local/bin")),
+            "/usr/local/bin missing: {dirs:?}"
+        );
+        assert!(
+            dirs.iter().any(|d| d == std::path::Path::new("/opt/homebrew/bin")),
+            "/opt/homebrew/bin missing: {dirs:?}"
+        );
+    }
 }

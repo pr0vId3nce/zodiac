@@ -49,10 +49,12 @@ if [ -f "$ICON_SRC" ] && command -v iconutil >/dev/null 2>&1; then
 fi
 
 # ---- Info.plist --------------------------------------------------------
-# LSEnvironment matters more than it looks: an app launched from Finder or
-# the Dock inherits a bare PATH, so the agent harnesses zodiac spawns
-# (claude, pi) would be invisible to every pane — the app would open,
-# connect, and then be unable to start a single agent.
+# LSEnvironment is a hint, not a guarantee: Launch Services caches it and
+# ignores it often enough that it cannot be relied on — measured here, an
+# app opened from Finder still came up with a bare
+# /usr/bin:/bin:/usr/sbin:/sbin. Harness detection therefore resolves its
+# own search paths in agents.rs rather than trusting this. Kept because it
+# costs nothing and helps when it is honoured.
 cat > "$APP/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

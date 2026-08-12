@@ -2028,25 +2028,30 @@ fn code_box(ui: &mut egui::Ui, code: &str) {
                     );
                 });
         });
-    // Copy affordance: a small button in the top-right, shown on hover.
-    let rect = r.response.rect;
-    if ui.rect_contains_pointer(rect) {
-        let size = egui::vec2(44.0, 19.0);
-        let at = egui::Rect::from_min_size(
-            egui::pos2(rect.max.x - size.x - 6.0, rect.min.y + 5.0),
-            size,
-        );
-        let btn = egui::Button::new(RichText::new("copy").size(10.5).color(theme::TEXT_DIM))
-            .fill(theme::bg_chrome())
-            .stroke(Stroke::new(1.0, theme::LINE_BORDER))
-            .small();
-        if ui
-            .put(at, btn)
-            .on_hover_cursor(egui::CursorIcon::PointingHand)
-            .clicked()
-        {
-            ui.ctx().copy_text(code.to_string());
-        }
+    copy_overlay(ui, r.response.rect, code);
+}
+
+/// A small "copy" button shown in the top-right of `rect` while it's hovered;
+/// clicking copies `text` to the system clipboard (arboard-backed path).
+fn copy_overlay(ui: &mut egui::Ui, rect: egui::Rect, text: &str) {
+    if !ui.rect_contains_pointer(rect) {
+        return;
+    }
+    let size = egui::vec2(44.0, 19.0);
+    let at = egui::Rect::from_min_size(
+        egui::pos2(rect.max.x - size.x - 6.0, rect.min.y + 5.0),
+        size,
+    );
+    let btn = egui::Button::new(RichText::new("copy").size(10.5).color(theme::TEXT_DIM))
+        .fill(theme::bg_chrome())
+        .stroke(Stroke::new(1.0, theme::LINE_BORDER))
+        .small();
+    if ui
+        .put(at, btn)
+        .on_hover_cursor(egui::CursorIcon::PointingHand)
+        .clicked()
+    {
+        ui.ctx().copy_text(text.to_string());
     }
 }
 
@@ -2057,7 +2062,7 @@ fn result_box(ui: &mut egui::Ui, text: &str, is_error: bool) {
     } else {
         theme::TEXT_DIM
     };
-    Frame::NONE
+    let r = Frame::NONE
         .fill(theme::bg_panel())
         .stroke(Stroke::new(1.0, theme::LINE_HAIRLINE))
         .corner_radius(CornerRadius::same(8))
@@ -2076,6 +2081,8 @@ fn result_box(ui: &mut egui::Ui, text: &str, is_error: bool) {
                     );
                 });
         });
+    // Copy the full (unclipped) result.
+    copy_overlay(ui, r.response.rect, text);
 }
 
 /// A finished reasoning block: a collapsible orange panel, closed by default.

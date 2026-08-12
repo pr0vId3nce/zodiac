@@ -12,6 +12,12 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 24. Copy button on tool result boxes
+Extended the hover "copy" affordance to tool **result** boxes (copies the full,
+unclipped output — errors and command output are worth grabbing). Factored the
+button into a shared `copy_overlay` helper used by both code and result boxes.
+`ui.rs`.
+
 ### 23. Prune composer draft on pane close
 Follow-up to #21: when `T_PANE_CLOSED` removes a pane, drop its entry from the
 per-pane `composers` map so drafts for closed panes don't linger. `app.rs`.
@@ -153,6 +159,16 @@ routes to a new `md_task_row`. `ui.rs`.
 - ~~Composer draft is shared, not per-pane.~~ **Done in #21** — per-pane
   `composers: HashMap<u64,String>`; closed panes' drafts are pruned on
   `T_PANE_CLOSED` (#23).
+- **Finish sound never plays on agent completion (GUI, and seemingly TUI).**
+  The `finish_sound`/ringtone setting exists and `protocol::play_sound` works,
+  but the only call site is `client.rs::cycle_finish_sound` — a *preview* when
+  you change the setting. I couldn't find a working→done transition that
+  actually plays it in the TUI, and the GUI has no audio wiring at all. To
+  finish it: track each pane's previous status in `GuiApp`, and on a
+  working→done edge call `zodiac::protocol::play_sound(settings.finish_sound_path())`.
+  Left out because the intended trigger/debounce is unclear (a mis-timed sound
+  on every state flip would be worse than silence) and it wants on-device
+  audio testing.
 - **Transcript re-parses everything every frame.** `transcript_view` renders
   all `items` (and re-parses the streaming tail's markdown) each frame with no
   virtualization; a very long transcript or a very long single streaming

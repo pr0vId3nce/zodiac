@@ -1040,6 +1040,24 @@ impl GuiApp {
     /// Pointer position -> pane-relative cell (0-based), clamped to the
     /// grid (which starts one line below the tab bar).
     fn grid_cell(&self) -> (u16, u16) {
+        // Map through the geometry the terminal was actually drawn with
+        // (recorded by `terminal_view`). The legacy wgpu grid's cell size and
+        // origin no longer describe what's on screen — the terminal is drawn
+        // by egui, inside a frame with margins and a header above it — so
+        // using them reported clicks on the wrong cell to mouse-driven TUIs.
+        // `cursor_px` is physical; egui lays out in points.
+        if let Some(t) = self.ui_state.term_rect {
+            let ppp = self.egui_ctx.pixels_per_point().max(0.1) as f64;
+            let (cw, ch) = (t.cell.0 as f64, t.cell.1 as f64);
+            if cw > 0.5 && ch > 0.5 {
+                let (rows, cols) = t.size;
+                let x = self.cursor_px.0 / ppp - t.origin.0 as f64;
+                let y = self.cursor_px.1 / ppp - t.origin.1 as f64;
+                let col = ((x / cw).floor() as i64).clamp(0, cols as i64 - 1);
+                let row = ((y / ch).floor() as i64).clamp(0, rows as i64 - 1);
+                return (col as u16, row as u16);
+            }
+        }
         let Some(r) = &self.renderer else {
             return (0, 0);
         };

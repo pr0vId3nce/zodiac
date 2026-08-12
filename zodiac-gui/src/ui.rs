@@ -93,6 +93,8 @@ pub struct UiState {
     /// Per-pane composer drafts (keyed by pane id), so a draft survives
     /// switching panes and each agent keeps its own in-progress message.
     pub composers: std::collections::HashMap<u64, String>,
+    /// The focused terminal's drawn geometry, for mouse reporting.
+    pub term_rect: Option<TermRect>,
     /// Highlighted row in the slash-command picker.
     pub slash_sel: usize,
     /// `/resume` session picker: the candidates and the highlighted row.
@@ -121,6 +123,16 @@ pub struct UiState {
     /// Decoded kitty-image textures for terminal mode, keyed by (pane, img,
     /// ver). egui owns the GPU upload; we just cache the handle.
     pub tex_cache: std::collections::HashMap<(u64, u32, u32), egui::TextureHandle>,
+}
+
+/// Where a terminal's grid is actually drawn, in egui points: its top-left,
+/// its cell size, and its dimensions. Mouse reporting maps pointer positions
+/// through this so clicks land on the cell the user sees.
+#[derive(Clone, Copy)]
+pub struct TermRect {
+    pub origin: (f32, f32),
+    pub cell: (f32, f32),
+    pub size: (u16, u16),
 }
 
 /// A terminal text selection: visible-grid cell coords (row, col) in pane
@@ -322,6 +334,7 @@ pub fn build(
     }
     if d.screen != Screen::Focused {
         st.term_grid = None;
+        st.term_rect = None;
     }
     title_bar(ui, d, st, actions);
     match d.screen {
@@ -3113,6 +3126,14 @@ fn terminal_view(ui: &mut egui::Ui, st: &mut UiState, p: &CPane, scale: f32) {
                     let (rect, resp) = ui
                         .allocate_exact_size(egui::vec2(cols as f32 * cw, rows as f32 * ch), sense);
                     let o = rect.min;
+                    // Publish the grid's real geometry (egui points) so mouse
+                    // reporting maps clicks with the same numbers the glyphs
+                    // are drawn with.
+                    st.term_rect = Some(TermRect {
+                        origin: (o.x, o.y),
+                        cell: (cw, ch),
+                        size: (rows, cols),
+                    });
                     let cell_at = |pos: egui::Pos2| -> (usize, usize) {
                         // `.max(0)` guards a 0-sized grid: clamp(0, -1) panics.
                         let c = (((pos.x - o.x) / cw).floor() as i32)

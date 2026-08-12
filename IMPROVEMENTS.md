@@ -6,6 +6,15 @@ Running log of small improvements and bug fixes, one commit each. Started
 Each entry: what changed, why, and the commit. Unresolved items / follow-ups
 are collected at the bottom.
 
+**Summary (25 changes):** markdown polish (task checkboxes, nested lists, GFM
+tables, strikethrough, h4–h6, `www.`/paren-URL links, code/result copy
+buttons), real bug fixes (composer paste was dead, file drag-drop hit the wrong
+buffer, table egui-id collisions, a UI-freeze loading pi models, a
+multibyte-slice panic, links truncated at parens), and UX (per-pane composer
+drafts, wrapping+capped composer, Observatory arrow-nav empty-state, Esc blur,
+auto-expand failed tools, card model chip, settings scroll). All gate-green;
+the headless GUI selftest walks every screen + a seeded rich pane and exits 0.
+
 ---
 
 ## Changes

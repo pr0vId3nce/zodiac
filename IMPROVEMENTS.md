@@ -12,6 +12,12 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 20. Fix drag-and-drop of files onto an agent pane
+`on_drop` appended the dropped path to `p.agent.input` (the TUI-side editor),
+but the GUI composer is `ui_state.composer` and never reads `agent.input` — so
+files dropped on a structured agent pane silently vanished. Now the path is
+appended to the GUI composer where the user can review and send it. `app.rs`.
+
 ### 19. Skip empty code boxes
 An empty fenced block (```` ``` ```` with nothing inside) rendered an empty
 bordered box (now also with a copy button). `render_body` skips a code box

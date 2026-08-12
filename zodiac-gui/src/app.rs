@@ -802,25 +802,31 @@ impl GuiApp {
     /// trailing space so consecutive drops stay word-separated.
     fn on_drop(&mut self, path: std::path::PathBuf) {
         let quoted = shell_quote(&path.to_string_lossy());
-        let Some(p) = self.panes.get_mut(self.active) else {
+        let Some(p) = self.panes.get(self.active) else {
             return;
         };
+        // Agent pane: append to the GUI composer the user actually sees/sends
+        // (`ui_state.composer`), not the TUI-side `agent.input` the GUI never
+        // reads — otherwise the dropped path silently vanished.
         if p.is_agent() {
-            if !p.agent.input.is_empty() && !p.agent.input.ends_with(' ') {
-                p.agent.input.push(' ');
+            let c = &mut self.ui_state.composer;
+            if !c.is_empty() && !c.ends_with(' ') {
+                c.push(' ');
             }
-            p.agent.input.push_str(&quoted);
-            p.agent.cursor = p.agent.input.chars().count();
-        } else {
-            let id = p.id;
-            let text = format!("{quoted} ");
-            let bytes = if p.parser.screen().bracketed_paste() {
-                format!("\x1b[200~{text}\x1b[201~").into_bytes()
-            } else {
-                text.into_bytes()
-            };
-            self.send_input(id, &bytes);
+            c.push_str(&quoted);
+            self.request_redraw();
+            return;
         }
+        // Pty pane: paste the path into the shell (bracketed if it asked).
+        let id = p.id;
+        let bracketed = p.parser.screen().bracketed_paste();
+        let text = format!("{quoted} ");
+        let bytes = if bracketed {
+            format!("\x1b[200~{text}\x1b[201~").into_bytes()
+        } else {
+            text.into_bytes()
+        };
+        self.send_input(id, &bytes);
         self.request_redraw();
     }
 

@@ -12,6 +12,14 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 25. Exercise new markdown in the selftest seed
+`seed_agent_pane` (the `ZODIAC_GUI_SELFTEST` rich pane) now includes a table,
+nested list, task-list checkboxes, strikethrough, a link with parens in the
+URL, and a bare `www.` link — so the headless selftest actually renders the
+new markdown paths and would panic-fail if any regressed. Verified: the
+selftest walks all screens + this pane and exits 0 (no panic) on a real
+Wayland run. `app.rs`.
+
 ### 24. Copy button on tool result boxes
 Extended the hover "copy" affordance to tool **result** boxes (copies the full,
 unclipped output — errors and command output are worth grabbing). Factored the

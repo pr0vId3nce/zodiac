@@ -217,7 +217,7 @@ impl GuiApp {
                 ]}},
             ]}}),
             serde_json::json!({"type": "assistant", "message": {"content": [
-                {"type": "text", "text": "## Summary\n\nHere's the **fix** with a `helper`:\n\n```rust\nfn main() {}\n```\n\n- one item\n- two *emphasized* item\n\nDone."},
+                {"type": "text", "text": "## Summary\n\nHere's the **fix** with a `helper`, ~~and a typo~~. See [docs](https://example.com/a_(b)) and www.example.com.\n\n```rust\nfn main() {}\n```\n\n#### Details\n\n- one item\n  - nested item\n- [x] done task\n- [ ] pending task\n\n| Name | Size | OK |\n|:-----|-----:|:--:|\n| alpha | 12kB | y |\n| beta | 3kB | n |\n\nDone."},
             ]}}),
         ];
         for l in &lines {

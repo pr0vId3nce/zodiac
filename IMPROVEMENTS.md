@@ -12,6 +12,12 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 9. Clearer Observatory empty state
+The Observatory showed "connecting…" whenever there were no panes — including
+when fully connected with everything closed. Now, once state has arrived
+(`d.state.is_some()`), it shows "No panes yet" plus the Alt+N / Alt+Shift+N /
+Alt+Z hints; "connecting…" only shows pre-connection. `ui.rs`.
+
 ### 8. Non-blocking pi model loading (fix UI freeze)
 The earlier `pi --list-models` change waited on the CLI with an 8s
 `recv_timeout` on the UI thread — the first new-agent-picker open could freeze

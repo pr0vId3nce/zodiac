@@ -3480,11 +3480,30 @@ fn observatory(root: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
             if d.panes.is_empty() {
                 ui.vertical_centered(|ui| {
                     ui.add_space(60.0);
-                    ui.label(
-                        RichText::new("connecting…")
+                    if d.state.is_some() {
+                        // Connected, just nothing running — guide the user
+                        // instead of implying we're still connecting.
+                        ui.label(
+                            RichText::new("No panes yet")
+                                .color(theme::TEXT_DIM)
+                                .size(16.0)
+                                .strong(),
+                        );
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new(
+                                "Alt+N for an agent · Alt+Shift+N for a shell · Alt+Z here",
+                            )
                             .color(theme::TEXT_FAINT)
-                            .size(15.0),
-                    );
+                            .size(13.0),
+                        );
+                    } else {
+                        ui.label(
+                            RichText::new("connecting…")
+                                .color(theme::TEXT_FAINT)
+                                .size(15.0),
+                        );
+                    }
                 });
                 return;
             }

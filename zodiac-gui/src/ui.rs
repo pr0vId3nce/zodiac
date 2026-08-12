@@ -1414,17 +1414,19 @@ fn md_block(ui: &mut egui::Ui, line: &str) {
         ui.separator();
         return;
     }
-    if let Some(h) = t.strip_prefix("### ") {
-        md_heading(ui, h, 14.5);
-        return;
-    }
-    if let Some(h) = t.strip_prefix("## ") {
-        md_heading(ui, h, 16.5);
-        return;
-    }
-    if let Some(h) = t.strip_prefix("# ") {
-        md_heading(ui, h, 19.0);
-        return;
+    // Headings, longest marker first so `####` isn't caught by `###`.
+    for (marker, size) in [
+        ("###### ", 13.0),
+        ("##### ", 13.5),
+        ("#### ", 14.0),
+        ("### ", 14.5),
+        ("## ", 16.5),
+        ("# ", 19.0),
+    ] {
+        if let Some(h) = t.strip_prefix(marker) {
+            md_heading(ui, h, size);
+            return;
+        }
     }
     if let Some(q) = t.strip_prefix("> ") {
         ui.horizontal_top(|ui| {

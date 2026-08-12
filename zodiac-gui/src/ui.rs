@@ -1369,28 +1369,36 @@ fn turn_assistant(ui: &mut egui::Ui, text: &str, inner: f32) {
 /// quotes, rules, and inline **bold** / *italic* / `code` / [links]; ```
 /// fenced blocks break out into their own monospace box.
 fn render_body(ui: &mut egui::Ui, text: &str) {
-    let mut in_code = false;
-    let mut buf: Vec<&str> = Vec::new();
-    for line in text.split('\n') {
+    let lines: Vec<&str> = text.split('\n').collect();
+    let mut i = 0;
+    while i < lines.len() {
+        let line = lines[i];
+        // Fenced code block: gather to the closing fence.
         if line.trim_start().starts_with("```") {
-            if in_code {
-                code_box(ui, &buf.join("\n"));
-                buf.clear();
-                in_code = false;
-            } else {
-                in_code = true;
-                buf.clear();
+            let mut buf: Vec<&str> = Vec::new();
+            i += 1;
+            while i < lines.len() && !lines[i].trim_start().starts_with("```") {
+                buf.push(lines[i]);
+                i += 1;
             }
+            i += 1; // consume the closing fence (or run off the end)
+            code_box(ui, &buf.join("\n"));
             continue;
         }
-        if in_code {
-            buf.push(line);
+        // GitHub-flavored table: a row followed by a `|---|---|` separator.
+        // The separator gate keeps ordinary prose containing a '|' from being
+        // mistaken for a table.
+        if is_table_row(line) && lines.get(i + 1).is_some_and(|n| is_table_separator(n)) {
+            let start = i;
+            i += 2; // header + separator
+            while i < lines.len() && is_table_row(lines[i]) {
+                i += 1;
+            }
+            md_table(ui, &lines[start..i]);
             continue;
         }
         md_block(ui, line);
-    }
-    if in_code && !buf.is_empty() {
-        code_box(ui, &buf.join("\n"));
+        i += 1;
     }
 }
 
@@ -1442,6 +1450,126 @@ fn md_block(ui: &mut egui::Ui, line: &str) {
         return;
     }
     md_line(ui, t.trim_end(), 14.5, theme::TEXT_BODY);
+}
+
+/// A line that could be a GFM table row: non-blank and containing a pipe.
+/// (The table only actually renders when the next line is a separator.)
+fn is_table_row(line: &str) -> bool {
+    let t = line.trim();
+    !t.is_empty() && t.contains('|')
+}
+
+/// The `|---|:--:|--:|` divider under a table header: pipes, dashes, colons and
+/// spaces only, with at least one dash and one pipe.
+fn is_table_separator(line: &str) -> bool {
+    let t = line.trim();
+    !t.is_empty()
+        && t.contains('|')
+        && t.contains('-')
+        && t.chars().all(|c| matches!(c, '|' | '-' | ':' | ' ' | '\t'))
+}
+
+/// Split a table row into trimmed cells, dropping the optional leading/trailing
+/// pipes so both `| a | b |` and `a | b` yield the same cells.
+fn table_cells(row: &str) -> Vec<String> {
+    let t = row.trim().trim_start_matches('|').trim_end_matches('|');
+    t.split('|').map(|c| c.trim().to_string()).collect()
+}
+
+/// Per-column alignment parsed from the separator row.
+#[derive(Clone, Copy, PartialEq, Debug)]
+enum ColAlign {
+    Left,
+    Center,
+    Right,
+}
+
+fn parse_aligns(sep: &str) -> Vec<ColAlign> {
+    table_cells(sep)
+        .iter()
+        .map(|c| {
+            let left = c.starts_with(':');
+            let right = c.ends_with(':');
+            match (left, right) {
+                (true, true) => ColAlign::Center,
+                (false, true) => ColAlign::Right,
+                _ => ColAlign::Left,
+            }
+        })
+        .collect()
+}
+
+/// Render a GFM pipe table (`rows[0]` header, `rows[1]` separator, rest body)
+/// as an aligned, striped grid. Wrapped in a horizontal scroll so a very wide
+/// table scrolls instead of stretching the pane off-screen; each cell is width
+/// -capped and wraps, and supports inline markdown.
+fn md_table(ui: &mut egui::Ui, rows: &[&str]) {
+    if rows.len() < 2 {
+        return;
+    }
+    let header = table_cells(rows[0]);
+    let aligns = parse_aligns(rows[1]);
+    let body: Vec<Vec<String>> = rows[2..].iter().map(|r| table_cells(r)).collect();
+    let ncols = header
+        .len()
+        .max(body.iter().map(|r| r.len()).max().unwrap_or(0));
+    let align = |c: usize| aligns.get(c).copied().unwrap_or(ColAlign::Left);
+    let cap = (ui.available_width() / ncols as f32 - 24.0).clamp(60.0, 340.0);
+    Frame::NONE
+        .stroke(Stroke::new(1.0, theme::LINE_BORDER))
+        .corner_radius(CornerRadius::same(8))
+        .inner_margin(Margin::symmetric(4, 2))
+        .outer_margin(Margin::symmetric(0, 4))
+        .show(ui, |ui| {
+            egui::ScrollArea::horizontal()
+                .id_salt(("md_table", rows[0]))
+                .show(ui, |ui| {
+                    egui::Grid::new(("md_table_grid", rows[0]))
+                        .striped(true)
+                        .spacing(egui::vec2(14.0, 6.0))
+                        .show(ui, |ui| {
+                            for c in 0..ncols {
+                                let txt = header.get(c).map(String::as_str).unwrap_or("");
+                                md_cell(ui, txt, align(c), true, cap);
+                            }
+                            ui.end_row();
+                            for row in &body {
+                                for c in 0..ncols {
+                                    let txt = row.get(c).map(String::as_str).unwrap_or("");
+                                    md_cell(ui, txt, align(c), false, cap);
+                                }
+                                ui.end_row();
+                            }
+                        });
+                });
+        });
+}
+
+/// One table cell: inline-formatted, width-capped/wrapped, aligned per column.
+fn md_cell(ui: &mut egui::Ui, text: &str, align: ColAlign, header: bool, cap: f32) {
+    let base = if header {
+        theme::TEXT_PRIMARY
+    } else {
+        theme::TEXT_BODY
+    };
+    let mut job = egui::text::LayoutJob::default();
+    job.wrap.max_width = cap;
+    for sp in parse_inline(text) {
+        let mut fmt = span_format(&sp, tsize(13.5), base);
+        if header {
+            fmt.color = theme::TEXT_PRIMARY;
+        }
+        job.append(&sp.text, 0.0, fmt);
+    }
+    let layout = match align {
+        ColAlign::Left => Layout::left_to_right(Align::Center),
+        ColAlign::Center => Layout::top_down(Align::Center),
+        ColAlign::Right => Layout::right_to_left(Align::Center),
+    };
+    ui.with_layout(layout, |ui| {
+        ui.set_min_width(cap.min(ui.available_width()));
+        ui.label(job);
+    });
 }
 
 fn md_heading(ui: &mut egui::Ui, text: &str, size: f32) {
@@ -1898,10 +2026,25 @@ fn composer_bar(ui: &mut egui::Ui, p: &CPane, composer: &mut String, actions: &m
                 .corner_radius(CornerRadius::same(11))
                 .inner_margin(Margin::symmetric(12, 8))
                 .show(ui, |ui| {
-                    ui.horizontal(|ui| {
-                        let edit = egui::TextEdit::singleline(composer)
+                    ui.horizontal_top(|ui| {
+                        // Enter sends; Shift+Enter inserts a newline. Consume a
+                        // plain Enter *before* the field sees it (checking last
+                        // frame's focus) so it submits instead of typing a
+                        // newline — Shift+Enter passes through to wrap the line.
+                        let edit_id = egui::Id::new(("composer", p.id));
+                        let focused = ui.memory(|m| m.has_focus(edit_id));
+                        let send_enter = focused
+                            && ui.input_mut(|i| {
+                                i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                            });
+                        // Multiline + wrap: a long message flows onto new lines
+                        // and the box grows downward, so it can never stretch the
+                        // pane horizontally off-screen.
+                        let edit = egui::TextEdit::multiline(composer)
+                            .id(edit_id)
                             .frame(Frame::NONE)
                             .desired_width(ui.available_width() - 64.0)
+                            .desired_rows(1)
                             .hint_text("message the agent…")
                             .font(egui::FontId::proportional(14.0))
                             .text_color(theme::TEXT_BODY);
@@ -1914,8 +2057,9 @@ fn composer_bar(ui: &mut egui::Ui, p: &CPane, composer: &mut String, actions: &m
                         if !resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Slash)) {
                             resp.request_focus();
                         }
-                        if resp.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        if send_enter {
                             submit = true;
+                            resp.request_focus();
                         }
                         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                             if amber_button(ui, "Send").clicked() {
@@ -3694,5 +3838,51 @@ mod inline_link_tests {
     fn non_http_scheme_not_linked() {
         assert!(urls("run file:///etc/passwd please").is_empty());
         assert!(urls("no links here at all").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod md_table_tests {
+    use super::*;
+
+    #[test]
+    fn separator_is_distinguished_from_prose_and_hr() {
+        assert!(is_table_separator("|---|---|"));
+        assert!(is_table_separator("| :-- | --: | :-: |"));
+        assert!(is_table_separator("---|---"));
+        // A horizontal rule has no pipe — not a table separator.
+        assert!(!is_table_separator("---"));
+        // Prose with a pipe is not a separator.
+        assert!(!is_table_separator("| a | b |"));
+        assert!(!is_table_separator("cats | dogs"));
+    }
+
+    #[test]
+    fn row_detection_needs_a_pipe() {
+        assert!(is_table_row("| a | b |"));
+        assert!(is_table_row("a | b"));
+        assert!(!is_table_row("just text"));
+        assert!(!is_table_row("   "));
+    }
+
+    #[test]
+    fn cells_split_with_or_without_edge_pipes() {
+        assert_eq!(table_cells("| a | b | c |"), vec!["a", "b", "c"]);
+        assert_eq!(table_cells("a | b | c"), vec!["a", "b", "c"]);
+        assert_eq!(table_cells("|  x  |  y  |"), vec!["x", "y"]);
+    }
+
+    #[test]
+    fn alignments_parse_from_separator() {
+        let a = parse_aligns("| :-- | :-: | --: | --- |");
+        assert_eq!(
+            a,
+            vec![
+                ColAlign::Left,
+                ColAlign::Center,
+                ColAlign::Right,
+                ColAlign::Left
+            ]
+        );
     }
 }

@@ -137,10 +137,16 @@ fn claude_models() -> Vec<ModelChoice> {
 /// to a single "Default". Each choice's value is a `provider/id` string, which
 /// pi's `--model` accepts.
 fn pi_models() -> Vec<ModelChoice> {
-    let mut models = pi_models_via_cli();
-    if models.is_empty() {
-        models = read_pi_models().unwrap_or_default();
+    // Ensure a background fetch is in flight, then use it if it has landed.
+    prewarm_pi_models();
+    if let Some(models) = PI_MODELS_CACHE.lock().ok().and_then(|g| g.clone()) {
+        if !models.is_empty() {
+            return models;
+        }
     }
+    // Not ready yet (or pi absent): fall back to models.json without blocking.
+    // Once the background fetch lands, a later open shows the full list.
+    let models = read_pi_models().unwrap_or_default();
     if models.is_empty() {
         vec![ModelChoice {
             label: "Default".into(),
@@ -151,43 +157,49 @@ fn pi_models() -> Vec<ModelChoice> {
     }
 }
 
-/// Run `pi --list-models` once per process and parse its table into choices.
-/// Cached because spawning pi (a Node program) is slow, and guarded by a
-/// timeout so a hung pi can never wedge the picker — on timeout or any error
-/// the caller falls back to `models.json`.
-fn pi_models_via_cli() -> Vec<ModelChoice> {
-    use std::sync::OnceLock;
-    static CACHE: OnceLock<Vec<ModelChoice>> = OnceLock::new();
-    CACHE
-        .get_or_init(|| {
-            let Some(pi) = search_dirs()
-                .iter()
-                .map(|d| d.join("pi"))
-                .find(|p| p.is_file())
-            else {
-                return Vec::new();
-            };
-            // Give the child the fuller PATH detection built (a GUI launched
-            // from the Dock has only launchd's bare PATH, and pi needs Node).
-            let path = std::env::join_paths(search_dirs()).unwrap_or_default();
-            let (tx, rx) = std::sync::mpsc::channel();
-            std::thread::spawn(move || {
-                let out = std::process::Command::new(&pi)
-                    .arg("--list-models")
-                    .env("PATH", &path)
-                    .stdin(std::process::Stdio::null())
-                    .stderr(std::process::Stdio::null())
-                    .output();
-                let _ = tx.send(out);
-            });
-            match rx.recv_timeout(std::time::Duration::from_secs(8)) {
-                Ok(Ok(out)) if out.status.success() => {
-                    parse_pi_list_models(&String::from_utf8_lossy(&out.stdout))
-                }
-                _ => Vec::new(),
+/// Background cache of `pi --list-models`, filled by [`prewarm_pi_models`].
+static PI_MODELS_CACHE: std::sync::Mutex<Option<Vec<ModelChoice>>> = std::sync::Mutex::new(None);
+static PI_WARM_STARTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Kick off `pi --list-models` in a background thread (at most once) and cache
+/// the parsed result. Non-blocking and safe to call from the UI thread — call
+/// it at startup so the new-agent picker has the full list (including the
+/// runtime-registered `claude-bridge` models) ready by the time it opens,
+/// without ever freezing the UI while pi (a Node program) starts up.
+pub fn prewarm_pi_models() {
+    use std::sync::atomic::Ordering;
+    if PI_WARM_STARTED.swap(true, Ordering::SeqCst) {
+        return; // already started this process
+    }
+    let Some(pi) = search_dirs()
+        .iter()
+        .map(|d| d.join("pi"))
+        .find(|p| p.is_file())
+    else {
+        return;
+    };
+    // A GUI launched from the Dock has only launchd's bare PATH, and pi needs
+    // Node — hand it the fuller PATH detection built.
+    let path = std::env::join_paths(search_dirs()).unwrap_or_default();
+    std::thread::spawn(move || {
+        let out = std::process::Command::new(&pi)
+            .arg("--list-models")
+            .env("PATH", &path)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output();
+        let models = match out {
+            Ok(o) if o.status.success() => {
+                parse_pi_list_models(&String::from_utf8_lossy(&o.stdout))
             }
-        })
-        .clone()
+            _ => Vec::new(),
+        };
+        if !models.is_empty() {
+            if let Ok(mut guard) = PI_MODELS_CACHE.lock() {
+                *guard = Some(models);
+            }
+        }
+    });
 }
 
 /// Parse the `pi --list-models` table. Columns are whitespace-separated with

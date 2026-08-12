@@ -12,6 +12,14 @@ are collected at the bottom.
 
 <!-- new entries go here, newest first -->
 
+### 8. Non-blocking pi model loading (fix UI freeze)
+The earlier `pi --list-models` change waited on the CLI with an 8s
+`recv_timeout` on the UI thread — the first new-agent-picker open could freeze
+the GUI for up to 8s while pi (Node) started. Now the fetch runs as a
+background prewarm kicked off at startup (`prewarm_pi_models`), cached in a
+`Mutex`; the picker reads the cache if ready else falls back to `models.json`
+without blocking. `agents.rs` + `app.rs`.
+
 ### 7. Markdown strikethrough (`~~text~~`)
 `parse_inline` now toggles a strike run on `~~` (like `**` for bold) and
 `span_format` draws the strikethrough. Threaded a `strike` flag through the
@@ -56,6 +64,13 @@ routes to a new `md_task_row`. `ui.rs`.
 ## Unresolved / follow-ups
 
 <!-- anything found but not fixed, with enough detail to pick up later -->
+- **Couldn't find `zodiac-gui/handoff.md`.** The user referenced findings from
+  another agent at `zodiac-gui/handoff.md`, but as of these commits it isn't in
+  the working tree, on `origin/main`, in any branch/PR ref, or anywhere on disk
+  under `/home/d3s` (searched case-insensitively — only the unrelated
+  `HANDOFF.md` iOS handoff exists). Likely committed to a different clone/remote
+  that hasn't reached `pr0vId3nce/zodiac`. Needs the correct path/repo to fold
+  its findings in.
 - **Terminal mouse coordinate mismatch (pre-existing).** `GuiApp::grid_cell`
   (app.rs) maps `cursor_px` → (col,row) using the wgpu renderer's `r.cell` and
   `r.grid_origin()`. But the terminal is drawn by egui `terminal_view` (ui.rs)

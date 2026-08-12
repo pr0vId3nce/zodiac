@@ -91,6 +91,10 @@ pub struct GuiApp {
 
 impl GuiApp {
     pub fn new(session: String, sock: UnixStream, fonts: Fonts) -> Self {
+        // Warm the pi model list in the background so the new-agent picker
+        // (which lists claude-bridge/* models via `pi --list-models`) never
+        // blocks the UI on its first open.
+        crate::agents::prewarm_pi_models();
         let exit_at = std::env::var("ZODIAC_GUI_EXIT_AFTER_MS")
             .ok()
             .and_then(|v| v.parse::<u64>().ok())

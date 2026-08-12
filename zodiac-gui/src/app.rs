@@ -869,11 +869,7 @@ impl GuiApp {
         };
         #[cfg(all(
             unix,
-            not(any(
-                target_os = "macos",
-                target_os = "android",
-                target_os = "emscripten"
-            ))
+            not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
         ))]
         {
             use arboard::{LinuxClipboardKind, SetExtLinux};
@@ -891,11 +887,7 @@ impl GuiApp {
         }
         #[cfg(not(all(
             unix,
-            not(any(
-                target_os = "macos",
-                target_os = "android",
-                target_os = "emscripten"
-            ))
+            not(any(target_os = "macos", target_os = "android", target_os = "emscripten"))
         )))]
         {
             let _ = selection;

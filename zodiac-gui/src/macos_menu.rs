@@ -47,13 +47,24 @@ pub fn install() {
     // macOS always titles this one after the bundle, ignoring whatever we
     // set, so the submenu's own title is irrelevant.
     let app_menu = NSMenu::new(mtm);
-    item(mtm, &app_menu, "About zodiac", sel!(orderFrontStandardAboutPanel:), "");
+    item(
+        mtm,
+        &app_menu,
+        "About zodiac",
+        sel!(orderFrontStandardAboutPanel:),
+        "",
+    );
     app_menu.addItem(&NSMenuItem::separatorItem(mtm));
     item(mtm, &app_menu, "Hide zodiac", sel!(hide:), "h");
-    let hide_others = item(mtm, &app_menu, "Hide Others", sel!(hideOtherApplications:), "h");
-    hide_others.setKeyEquivalentModifierMask(
-        NSEventModifierFlags::Command | NSEventModifierFlags::Option,
+    let hide_others = item(
+        mtm,
+        &app_menu,
+        "Hide Others",
+        sel!(hideOtherApplications:),
+        "h",
     );
+    hide_others
+        .setKeyEquivalentModifierMask(NSEventModifierFlags::Command | NSEventModifierFlags::Option);
     item(mtm, &app_menu, "Show All", sel!(unhideAllApplications:), "");
     app_menu.addItem(&NSMenuItem::separatorItem(mtm));
     // terminate: rather than zodiac's own detach-and-exit: the session is
@@ -71,11 +82,15 @@ pub fn install() {
     item(mtm, &win_menu, "Zoom", sel!(performZoom:), "");
     win_menu.addItem(&NSMenuItem::separatorItem(mtm));
     let close = item(mtm, &win_menu, "Close Window", sel!(performClose:), "w");
-    close.setKeyEquivalentModifierMask(
-        NSEventModifierFlags::Command | NSEventModifierFlags::Shift,
-    );
+    close.setKeyEquivalentModifierMask(NSEventModifierFlags::Command | NSEventModifierFlags::Shift);
     win_menu.addItem(&NSMenuItem::separatorItem(mtm));
-    item(mtm, &win_menu, "Bring All to Front", sel!(arrangeInFront:), "");
+    item(
+        mtm,
+        &win_menu,
+        "Bring All to Front",
+        sel!(arrangeInFront:),
+        "",
+    );
     let win_item = NSMenuItem::new(mtm);
     win_item.setSubmenu(Some(&win_menu));
     menubar.addItem(&win_item);

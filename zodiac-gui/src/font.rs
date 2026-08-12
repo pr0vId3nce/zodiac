@@ -271,7 +271,9 @@ pub fn egui_ui_font() -> Option<Vec<u8>> {
         if let Some(bytes) = mac::find_family_file(&fam).and_then(|p| std::fs::read(p).ok()) {
             return Some(bytes);
         }
-        eprintln!("zodiac-gui: ZODIAC_GUI_UI_FONT '{fam}' not installed, using the system mono face");
+        eprintln!(
+            "zodiac-gui: ZODIAC_GUI_UI_FONT '{fam}' not installed, using the system mono face"
+        );
     }
     std::fs::read(mac::first_existing(mac::MONO_FILES)?).ok()
 }
@@ -328,7 +330,10 @@ mod mac_tests {
         // sfnt magic: 0x00010000 (TrueType), "true"/"ttcf", or "OTTO" (CFF).
         let magic = &bytes[..4];
         assert!(
-            matches!(magic, [0x00, 0x01, 0x00, 0x00] | b"true" | b"ttcf" | b"OTTO"),
+            matches!(
+                magic,
+                [0x00, 0x01, 0x00, 0x00] | b"true" | b"ttcf" | b"OTTO"
+            ),
             "not a font container: {magic:02x?}"
         );
     }

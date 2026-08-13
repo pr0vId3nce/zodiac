@@ -153,6 +153,11 @@ pub struct Probe {
     /// the harness can tell "the data folded" from "the user can see it".
     pub ctx_fill: Option<egui::Rect>,
     pub file_rows: usize,
+    /// Whether each rail panel announced itself at all. A panel that draws
+    /// nothing when it has no data is indistinguishable from a missing
+    /// feature, which is exactly how this was first reported.
+    pub ctx_header: bool,
+    pub files_header: bool,
 }
 
 impl Probe {
@@ -168,6 +173,8 @@ impl Probe {
             rail: None,
             ctx_fill: None,
             file_rows: 0,
+            ctx_header: false,
+            files_header: false,
         }
     }
 }
@@ -3962,16 +3969,25 @@ fn tok(n: u64) -> String {
 fn context_panel(ui: &mut egui::Ui, p: &CPane) {
     let u = p.agent.usage;
     let limit = zodiac::client_core::context_limit(p.agent.model.as_deref());
-    let Some(frac) = u.context_frac(limit) else {
-        return; // nothing reported yet — an empty gauge would be a lie
-    };
     ui.label(
         RichText::new("CONTEXT")
             .color(theme::TEXT_GHOST)
             .size(11.0)
             .strong(),
     );
+    probe_set(|p| p.ctx_header = true);
     ui.add_space(8.0);
+    // Say so when there's nothing yet. Drawing neither gauge nor header read
+    // as a missing feature — the panel has to be able to say "not yet".
+    let Some(frac) = u.context_frac(limit) else {
+        ui.label(
+            RichText::new("no turn reported yet")
+                .color(theme::TEXT_GHOST)
+                .size(12.0),
+        );
+        ui.add_space(16.0);
+        return;
+    };
     // The bar warms as the window fills: the point is to be noticed late.
     let pct = frac.clamp(0.0, 1.0);
     let col = match pct {
@@ -4033,7 +4049,21 @@ fn context_panel(ui: &mut egui::Ui, p: &CPane) {
 /// copies the path — after tabbing back into a pane this is the first thing
 /// you want, and finding it otherwise means scrolling the transcript.
 fn files_panel(ui: &mut egui::Ui, p: &CPane, actions: &mut Vec<UiAction>) {
+    probe_set(|pr| pr.files_header = true);
     if p.agent.files.is_empty() {
+        ui.label(
+            RichText::new("FILES")
+                .color(theme::TEXT_GHOST)
+                .size(11.0)
+                .strong(),
+        );
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new("nothing changed yet")
+                .color(theme::TEXT_GHOST)
+                .size(12.0),
+        );
+        ui.add_space(16.0);
         return;
     }
     ui.horizontal(|ui| {

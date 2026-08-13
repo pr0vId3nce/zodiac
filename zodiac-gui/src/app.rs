@@ -150,6 +150,8 @@ pub struct GuiApp {
     /// is exercised without prompting a real agent (which would spend tokens
     /// and make the check race the server's next `T_STATE`).
     e2e_force_working: Option<u64>,
+    /// `ZODIAC_GUI_DUMP_AGENT`: when to print the agent dump and exit.
+    dump_next: Option<Instant>,
 }
 
 impl GuiApp {
@@ -216,6 +218,9 @@ impl GuiApp {
             e2e_chord_ok: false,
             e2e_chrome_saved: (String::new(), String::new()),
             e2e_force_working: None,
+            dump_next: std::env::var("ZODIAC_GUI_DUMP_AGENT")
+                .is_ok()
+                .then(|| Instant::now() + Duration::from_millis(4000)),
         }
     }
 
@@ -469,6 +474,46 @@ impl GuiApp {
         // a live harness (an earlier step deliberately resumes into a bogus
         // session, which leaves that pane's process dead).
         self.panes.iter().rposition(|p| p.is_agent())
+    }
+
+    /// `ZODIAC_GUI_DUMP_AGENT=1`: attach, let the replay land, then print what
+    /// each agent pane actually folded, and exit. Separates "the data isn't
+    /// there" from "the panel isn't drawing it" against a *live* session,
+    /// which the e2e (which seeds its own events) cannot do.
+    fn dump_agents(&mut self, _event_loop: &ActiveEventLoop) {
+        // Show the pane too, so the rail can be inspected on screen while the
+        // dump says what it was given. Exit is left to EXIT_AFTER_MS.
+        if let Some(i) = self.panes.iter().position(|p| p.is_agent()) {
+            self.active = i;
+            self.screen = crate::ui::Screen::Focused;
+            self.request_redraw();
+        }
+        let mut out = String::from("\n=== zodiac-gui agent dump ===\n");
+        for p in self.panes.iter().filter(|p| p.is_agent()) {
+            let u = p.agent.usage;
+            let limit = zodiac::client_core::context_limit(p.agent.model.as_deref());
+            out.push_str(&format!(
+                "pane {} model={:?} items={} \n  usage: in={} out={} cache_r={} cache_w={} \
+                 context={} ({:?} of {limit}) cost={} turns={}\n  files: {:?}\n",
+                p.id,
+                p.agent.model,
+                p.agent.items.len(),
+                u.input,
+                u.output,
+                u.cache_read,
+                u.cache_write,
+                u.context,
+                u.context_frac(limit).map(|f| format!("{:.1}%", f * 100.0)),
+                u.cost_usd,
+                u.turns,
+                p.agent
+                    .files
+                    .iter()
+                    .map(|f| format!("{}×{}", f.path, f.edits))
+                    .collect::<Vec<_>>(),
+            ));
+        }
+        println!("{out}");
     }
 
     /// Index of a pty pane. Picking by *kind* rather than by index 0 because
@@ -1201,8 +1246,31 @@ impl GuiApp {
                 };
                 self.active = i;
                 self.screen = Screen::Focused;
-                // Feed real stream shapes: two turns of usage and three file
-                // edits, one of them a repeat.
+                // These checks are about the panels, not about whether the
+                // user happens to keep the rail open — pin it (in memory only)
+                // so a collapsed rail in their config can't fail the run.
+                self.settings.gui_rail = "show".into();
+                self.request_redraw();
+                self.e2e_after(700);
+            }
+            51 => {
+                let Some(i) = self.e2e_agent() else {
+                    return self.e2e_after(50);
+                };
+                // Before any data: the panels must still announce themselves.
+                // Drawing nothing at all is how this first shipped, and it
+                // read as a missing feature rather than an empty one.
+                let pr = self.ui_state.probe;
+                self.check(
+                    "the rail panels announce themselves before any data",
+                    pr.ctx_header && pr.files_header && pr.ctx_fill.is_none(),
+                    format!(
+                        "ctx_header={} files_header={} gauge={:?}",
+                        pr.ctx_header, pr.files_header, pr.ctx_fill
+                    ),
+                );
+                // Feed real stream shapes: a completed turn's usage and three
+                // file edits, one of them a repeat.
                 for line in [
                     serde_json::json!({"type": "assistant", "message": {"content": [],
                         "usage": {"input_tokens": 12, "cache_read_input_tokens": 1000,
@@ -1219,17 +1287,30 @@ impl GuiApp {
                     serde_json::json!({"type": "assistant", "message": {"content": [
                         {"type": "tool_use", "id": "c", "name": "Read",
                          "input": {"file_path": "/tmp/never-written.rs"}}]}}),
+                    // The turn summary is what feeds the session totals: an
+                    // assistant message's output count is still growing.
+                    serde_json::json!({"type": "result", "total_cost_usd": 0.5,
+                        "num_turns": 2,
+                        "usage": {"input_tokens": 20, "output_tokens": 60,
+                                  "cache_read_input_tokens": 41000,
+                                  "cache_creation_input_tokens": 0}}),
                 ] {
                     self.panes[i].agent.apply_line(&line);
                 }
                 self.request_redraw();
                 self.e2e_after(700);
             }
-            51 => {
+            52 => {
                 let i = self.e2e_agent().unwrap_or(0);
                 let u = self.panes[i].agent.usage;
-                // Totals accumulate; context is the newest turn's occupancy.
-                let ok = u.output == 60 && u.cache_read == 41000 && u.context == 40008;
+                // Totals come from the completed turn (not the per-message
+                // envelopes, which claude repeats in `result`); context is the
+                // newest reported occupancy.
+                let ok = u.output == 60
+                    && u.cache_read == 41000
+                    && u.input == 20
+                    && u.context == 41020
+                    && u.cost_usd == 0.5;
                 self.check(
                     "the context meter folds the harness's own usage",
                     ok,
@@ -2979,6 +3060,10 @@ impl ApplicationHandler<UserEvent> for GuiApp {
         if self.e2e && self.e2e_next.is_some_and(|t| now >= t) {
             self.e2e_next = None;
             self.e2e_tick(event_loop);
+        }
+        if self.dump_next.is_some_and(|t| now >= t) {
+            self.dump_next = None;
+            self.dump_agents(event_loop);
         }
     }
 

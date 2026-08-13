@@ -135,23 +135,45 @@ impl TodoItem {
     }
 }
 
-/// The tools that change a file, and the input key naming it. Read-only tools
-/// are deliberately absent: the panel answers "what did it *change*".
-const WRITE_TOOLS: &[(&str, &str)] = &[
-    ("Edit", "file_path"),
-    ("MultiEdit", "file_path"),
-    ("Write", "file_path"),
-    ("NotebookEdit", "notebook_path"),
+/// Tools that *change* a file. Read-only tools are deliberately absent: the
+/// panel answers "what did it change", not "what did it look at". Matched
+/// case-insensitively because harnesses disagree on naming (claude's `Edit`,
+/// pi's lowercase equivalents).
+const WRITE_TOOLS: &[&str] = &[
+    "edit",
+    "multiedit",
+    "write",
+    "notebookedit",
+    "str_replace",
+    "str_replace_editor",
+    "apply_patch",
+    "create_file",
+    "write_file",
+];
+
+/// Keys a tool might name its target file under, across harnesses.
+const PATH_KEYS: &[&str] = &[
+    "file_path",
+    "notebook_path",
+    "filePath",
+    "path",
+    "file",
+    "filename",
 ];
 
 impl AgentUi {
     /// Record a file-changing tool call. Most recently touched sorts first,
     /// and repeat edits to one file bump its count rather than adding a row.
-    fn note_file_edit(&mut self, tool: &str, input: &serde_json::Value) {
-        let Some((_, key)) = WRITE_TOOLS.iter().find(|(t, _)| *t == tool) else {
+    pub(crate) fn note_file_edit(&mut self, tool: &str, input: &serde_json::Value) {
+        let lower = tool.to_ascii_lowercase();
+        if !WRITE_TOOLS.contains(&lower.as_str()) {
             return;
-        };
-        let Some(path) = input.get(*key).and_then(|p| p.as_str()) else {
+        }
+        let Some(path) = PATH_KEYS
+            .iter()
+            .find_map(|k| input.get(*k).and_then(|p| p.as_str()))
+            .filter(|p| !p.is_empty())
+        else {
             return;
         };
         if let Some(i) = self.files.iter().position(|f| f.path == path) {
@@ -169,24 +191,46 @@ impl AgentUi {
         }
     }
 
-    /// Fold a `usage` object from an assistant message. The totals accumulate;
-    /// `context` is a snapshot of the newest turn, since that *is* the window
-    /// occupancy — summing it across turns would be meaningless.
-    fn note_usage(&mut self, u: &serde_json::Value) {
-        let n = |k: &str| u.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
-        let (inp, out) = (n("input_tokens"), n("output_tokens"));
-        let (read, write) = (
-            n("cache_read_input_tokens"),
-            n("cache_creation_input_tokens"),
-        );
-        self.usage.input += inp;
-        self.usage.output += out;
-        self.usage.cache_read += read;
-        self.usage.cache_write += write;
+    /// Read the token fields out of a usage object, tolerating both spellings.
+    fn usage_fields(u: &serde_json::Value) -> (u64, u64, u64, u64) {
+        // claude reports snake_case (`input_tokens`), pi's bridge camelCase
+        // (`input`, `cacheRead`). Accept both rather than silently folding
+        // zeroes for one of the two harnesses.
+        let n = |keys: &[&str]| {
+            keys.iter()
+                .find_map(|k| u.get(*k).and_then(|v| v.as_u64()))
+                .unwrap_or(0)
+        };
+        (
+            n(&["input_tokens", "input"]),
+            n(&["output_tokens", "output"]),
+            n(&["cache_read_input_tokens", "cacheRead"]),
+            n(&["cache_creation_input_tokens", "cacheWrite"]),
+        )
+    }
+
+    /// Window occupancy as of this message: prompt + cache read + cache
+    /// written. A snapshot, never a sum — summing occupancy is meaningless.
+    fn note_context(&mut self, u: &serde_json::Value) {
+        let (inp, _, read, write) = Self::usage_fields(u);
         let ctx = inp + read + write;
         if ctx > 0 {
             self.usage.context = ctx;
         }
+    }
+
+    /// Add a *completed turn's* usage to the session totals. Only turn-final
+    /// events feed this: claude's `result` and pi's `message_end`. The
+    /// per-message envelope can't, for two reasons — claude repeats the turn
+    /// in `result` (which double-counted everything), and its `assistant`
+    /// event carries only the output tokens generated so far, with the real
+    /// figure arriving later in the stream.
+    fn note_turn_totals(&mut self, u: &serde_json::Value) {
+        let (inp, out, read, write) = Self::usage_fields(u);
+        self.usage.input += inp;
+        self.usage.output += out;
+        self.usage.cache_read += read;
+        self.usage.cache_write += write;
     }
 }
 
@@ -286,12 +330,25 @@ impl AgentUi {
         // Token accounting rides on the message envelope wherever it appears
         // (assistant messages carry it per turn; `message_delta` stream events
         // carry the final output count), so fold it once here.
-        if let Some(u) = v
-            .get("message")
-            .and_then(|m| m.get("usage"))
-            .or_else(|| v.get("usage"))
-        {
-            self.note_usage(u);
+        // Occupancy from any message envelope; session totals only from the
+        // turn-final event, whichever the harness sends.
+        let kind = v.get("type").and_then(|t| t.as_str());
+        if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
+            self.note_context(u);
+        }
+        match kind {
+            Some("result") => {
+                if let Some(u) = v.get("usage") {
+                    self.note_context(u);
+                    self.note_turn_totals(u);
+                }
+            }
+            Some("message_end") => {
+                if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
+                    self.note_turn_totals(u);
+                }
+            }
+            _ => {}
         }
         match v.get("type").and_then(|t| t.as_str()) {
             Some("zodiac_user") => {
@@ -472,6 +529,7 @@ impl AgentUi {
                                     if name == "TodoWrite" {
                                         self.todos = parse_todos(&args);
                                     }
+                                    self.note_file_edit(&name, &args);
                                     self.log.push((ARole::Tool, format!("{name}({arg})")));
                                     self.items.push(ChatItem::Tool(ToolCall {
                                         id: s(b, "id").unwrap_or_default(),
@@ -1221,11 +1279,64 @@ mod apply_line_tests {
                 "cache_creation_input_tokens": 0, "output_tokens": out}}})
         };
         let ui = fold(&[turn(10, 1000, 5), turn(2, 4000, 7)]);
-        assert_eq!(ui.usage.output, 12); // summed
-        assert_eq!(ui.usage.cache_read, 5000); // summed
-                                               // Context is occupancy, not a running total: the newest turn wins.
+        // Context is occupancy, not a running total: the newest turn wins.
         assert_eq!(ui.usage.context, 4002);
         assert_eq!(ui.usage.context_frac(200_000), Some(4002.0 / 200_000.0));
+        // An assistant message is not a completed turn — its output count is
+        // still growing — so it must not feed the session totals.
+        assert_eq!(ui.usage.output, 0);
+    }
+
+    #[test]
+    fn pi_tool_calls_also_build_the_file_list() {
+        // Pi names the block `toolCall` and puts parameters under `arguments`
+        // — a different branch entirely, which is why it recorded nothing.
+        let ui = fold(&[json!({
+            "type": "message_end",
+            "message": {"role": "assistant", "content": [
+                {"type": "toolCall", "id": "1", "name": "write",
+                 "arguments": {"path": "/src/from-pi.rs", "content": "x"}},
+            ]}
+        })]);
+        assert_eq!(
+            ui.files,
+            vec![FileEdit {
+                path: "/src/from-pi.rs".into(),
+                edits: 1
+            }]
+        );
+    }
+
+    #[test]
+    fn usage_reads_both_harnesses_spellings() {
+        // Pi's bridge reports camelCase; claude snake_case.
+        let ui = fold(&[json!({
+            "type": "message_end",
+            "message": {"role": "assistant", "content": [], "usage": {
+                "input": 5, "output": 9, "cacheRead": 700, "cacheWrite": 300}}
+        })]);
+        assert_eq!(ui.usage.output, 9);
+        assert_eq!(ui.usage.cache_read, 700);
+        assert_eq!(ui.usage.context, 1005);
+    }
+
+    #[test]
+    fn the_result_event_does_not_double_count_the_turn() {
+        // claude reports the same turn twice: on the assistant message and
+        // again in `result`. Counting both inflated every total.
+        let ui = fold(&[
+            json!({"type": "assistant", "message": {"content": [], "usage": {
+                "input_tokens": 10, "output_tokens": 90,
+                "cache_read_input_tokens": 500, "cache_creation_input_tokens": 0}}}),
+            json!({"type": "result", "total_cost_usd": 0.25, "num_turns": 2, "usage": {
+                "input_tokens": 10, "output_tokens": 90,
+                "cache_read_input_tokens": 500, "cache_creation_input_tokens": 0}}),
+        ]);
+        assert_eq!(ui.usage.output, 90, "the turn was counted twice");
+        assert_eq!(ui.usage.input, 10);
+        // …but the result's cost and turn count are still picked up.
+        assert_eq!(ui.usage.cost_usd, 0.25);
+        assert_eq!(ui.usage.turns, 2);
     }
 
     #[test]

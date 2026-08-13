@@ -102,6 +102,31 @@ newest first, repeat edits counted, click to copy the path. Read is
 deliberately excluded: the panel answers "what did it change", not "what did it
 look at".
 
+### Reported missing — three real bugs behind it
+
+"Context and files seem to be missing from the right sidebar." Investigated by
+dumping what the client actually folded from a *live* prompted pane
+(`ZODIAC_GUI_DUMP_AGENT=1`, kept — it separates "the data isn't there" from
+"the panel isn't drawing it", which the e2e can't do since it seeds its own
+events). Three causes:
+
+1. **Pi panes recorded no files at all.** Pi's tool calls take a different
+   branch (`toolCall` with `arguments`, not `tool_use` with `input`) that never
+   called the recorder. The matcher is now case-insensitive across a set of
+   write-tool names and tries several path keys, so both harnesses land.
+2. **Pi's token usage was silently read as zero.** Its bridge reports
+   camelCase (`input`, `cacheRead`); only claude's snake_case was parsed.
+3. **Claude's totals were double-counted, and its output undercounted.** The
+   `result` event repeats the whole turn the assistant message already
+   reported. Occupancy now comes from any message envelope; session totals only
+   from the turn-final event (claude's `result`, pi's `message_end`) — an
+   assistant message's output count is still growing when it is sent.
+
+**And the design fault that made it unreportable:** both panels drew *nothing*
+when they had no data, which is indistinguishable from a missing feature. They
+now say "no turn reported yet" / "nothing changed yet". Covered by `the rail
+panels announce themselves before any data`.
+
 ### Harness hygiene fixed along the way
 
 Two of my own bugs, both found by the checks rather than by eye:

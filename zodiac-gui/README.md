@@ -42,15 +42,23 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
   raises a **modal question popup** navigable by mouse, number keys, ↑/↓ (or
   j/k), and Enter (Esc denies) → `T_PERM_RESP`. When the agent is running a plan
   (`TodoWrite`), the activity rail shows a **PLAN** panel with a progress bar and
-  the checklist (done struck-through, the in-progress step highlighted). **Esc**
-  returns.
+  the checklist (done struck-through, the in-progress step highlighted).
+  Switching to an agent pane puts the caret in its composer, so it is ready to
+  type in; switching to a pty pane drops the caret so the keys reach the
+  terminal. **Esc** does *not* return to the Observatory (Alt+Z does): Esc is
+  Claude Code's interrupt key, and while an agent pane is working it stops the
+  turn — over the control protocol for structured panes, as the keystroke for
+  pty panes.
 - **⌘K / Ctrl+K** — command palette (fuzzy pane jump; ↑/↓, Enter, Esc).
 - **⌘, / Ctrl+,** — settings (grouped; edits real `config.json` keys, persists).
   Includes independent per-view **font sizes** (Terminal / GUI / Agent chat).
 - **Alt+O** — the Oracle panel (gradient orb; presentational for now).
 - **Alt+N** — new agent (structured) pane; **Alt+Shift+N** — new shell pane.
-  **Alt+←/→** (or **Alt+↑/↓** with side tabs) and **Alt+1–9** switch panes;
-  **Alt+W** closes the active pane; **Alt+Z** returns to the Observatory.
+  **Alt+←/→**, **Alt+↑/↓** and **Alt+1–9** switch panes (both arrow axes work
+  whatever the tab orientation); **Alt+W** closes the active pane; **Alt+Z**
+  returns to the Observatory. These are window-level chords: they are handled
+  before egui sees them, so they keep working while you type in the composer
+  (egui reports every key as consumed while a text field holds focus).
 - **/** — in a structured agent pane, jumps to the composer and starts a slash
   command (when you're not already typing there).
 - **Shift+Tab** — in a structured claude pane, cycles the permission mode

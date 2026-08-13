@@ -1917,6 +1917,8 @@ impl App {
         }
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let half = (self.main_size.0 / 2).max(1) as usize;
+        // Read before the mutable borrow below (Esc consults it).
+        let working = self.active < self.panes.len() && self.working(self.active);
         let Some(p) = self.panes.get_mut(self.active) else {
             return;
         };
@@ -1943,6 +1945,7 @@ impl App {
             }
         }
         let mut submit: Option<String> = None;
+        let mut interrupt = false;
         match key.code {
             KeyCode::PageUp => p.agent.scroll = p.agent.scroll.saturating_add(half),
             KeyCode::PageDown => p.agent.scroll = p.agent.scroll.saturating_sub(half),
@@ -1957,6 +1960,10 @@ impl App {
                     submit = Some(text);
                 }
             }
+            // Esc is claude's interrupt key: while the agent is working it
+            // stops the turn (there is no pty to send the byte to, so it goes
+            // over the control protocol). Idle, it clears the draft as before.
+            KeyCode::Esc if working => interrupt = true,
             KeyCode::Esc => {
                 p.agent.input.clear();
                 p.agent.cursor = 0;
@@ -1978,6 +1985,9 @@ impl App {
                 p.agent.cursor += 1;
             }
             _ => {}
+        }
+        if interrupt {
+            self.send(T_AGENT_INTERRUPT, id, &[]);
         }
         if let Some(text) = submit {
             self.send(T_AGENT_INPUT, id, text.as_bytes());

@@ -138,6 +138,12 @@ pub struct GuiApp {
     last_finish_play: Option<Instant>,
     e2e_pane_before: (usize, u64),
     e2e_stream_ticks: usize,
+    /// Interrupt frames sent (the e2e asserts Esc reaches the wire).
+    e2e_interrupts: usize,
+    /// e2e: hold this pane at "working" across state polls, so the Esc gate
+    /// is exercised without prompting a real agent (which would spend tokens
+    /// and make the check race the server's next `T_STATE`).
+    e2e_force_working: Option<u64>,
 }
 
 impl GuiApp {
@@ -199,6 +205,8 @@ impl GuiApp {
             last_finish_play: None,
             e2e_pane_before: (0, 0),
             e2e_stream_ticks: 0,
+            e2e_interrupts: 0,
+            e2e_force_working: None,
         }
     }
 
@@ -902,6 +910,121 @@ impl GuiApp {
                 self.e2e_after(400);
             }
 
+            // --- a switched-to agent pane is ready to type in ------------
+            32 => {
+                let Some(i) = self.e2e_agent() else {
+                    return self.e2e_after(50);
+                };
+                self.focus(0); // a pty pane: focus must be dropped
+                self.screen = Screen::Focused;
+                self.request_redraw();
+                self.e2e_pane_before = (i, self.panes[i].id);
+                self.e2e_after(600);
+            }
+            33 => {
+                let dropped = self.egui_ctx.memory(|m| m.focused()).is_none();
+                let (i, _) = self.e2e_pane_before;
+                self.focus(i); // back to the agent pane
+                self.check(
+                    "switching to a terminal pane drops the text caret",
+                    dropped,
+                    format!("focused={:?}", self.egui_ctx.memory(|m| m.focused())),
+                );
+                self.request_redraw();
+                self.e2e_after(600);
+            }
+            34 => {
+                let (_, id) = self.e2e_pane_before;
+                let want = egui::Id::new(("composer", id));
+                let got = self.egui_ctx.memory(|m| m.focused());
+                self.check(
+                    "switching to an agent pane focuses its composer",
+                    got == Some(want),
+                    format!("focused={got:?} want={want:?}"),
+                );
+                self.e2e_after(400);
+            }
+
+            // --- alt+arrows survive a focused text field -----------------
+            35 => {
+                // The bug: egui reports *every* key as consumed while a text
+                // field has focus, so pane navigation died as soon as you
+                // started typing. `window_event` asks `is_global_chord` before
+                // handing the key to egui; assert both halves.
+                let before = self.active;
+                self.mods = ModifiersState::ALT;
+                let claimed = self.is_global_chord(&Key::Named(NamedKey::ArrowDown))
+                    && self.is_global_chord(&Key::Named(NamedKey::ArrowUp))
+                    && self.is_global_chord(&Key::Named(NamedKey::ArrowLeft))
+                    && self.is_global_chord(&Key::Named(NamedKey::ArrowRight));
+                let focused = self.egui_ctx.memory(|m| m.focused()).is_some();
+                self.on_key_logical(&Key::Named(NamedKey::ArrowUp));
+                let moved_back = self.active != before;
+                self.on_key_logical(&Key::Named(NamedKey::ArrowDown));
+                let returned = self.active == before;
+                self.mods = ModifiersState::empty();
+                self.check(
+                    "alt+arrows switch panes while the composer holds focus",
+                    claimed && focused && moved_back && returned,
+                    format!(
+                        "chord={claimed} composer_focused={focused} \
+                         up_moved={moved_back} down_returned={returned}"
+                    ),
+                );
+                self.e2e_after(400);
+            }
+
+            // --- Esc belongs to the agent, not to navigation -------------
+            36 => {
+                let Some(i) = self.e2e_agent() else {
+                    return self.e2e_after(50);
+                };
+                self.active = i;
+                self.screen = Screen::Focused;
+                self.e2e_key(egui::Key::Escape);
+                self.request_redraw();
+                self.e2e_after(700);
+            }
+            37 => {
+                // Esc used to return to the Observatory. In a pane running
+                // claude that is the interrupt key, so one press both stopped
+                // the turn and threw you out of the pane.
+                // …and an idle pane is not interrupted either, so the check
+                // below can only pass because the gate really fired.
+                let idle_interrupts = self.e2e_interrupts;
+                self.check(
+                    "Esc does not leave the focused pane",
+                    self.screen == Screen::Focused && idle_interrupts == 0,
+                    format!("screen={:?} idle interrupts={idle_interrupts}", self.screen),
+                );
+                self.e2e_after(300);
+            }
+            38 => {
+                // Esc *does* interrupt while the agent is working. Drive the
+                // real gate: it reads the pane status the server publishes.
+                let Some(i) = self.e2e_agent() else {
+                    return self.e2e_after(50);
+                };
+                let id = self.panes[i].id;
+                self.active = i;
+                self.screen = Screen::Focused;
+                self.e2e_force_working = Some(id);
+                self.e2e_interrupts = 0;
+                self.e2e_key(egui::Key::Escape);
+                self.request_redraw();
+                self.e2e_after(700);
+            }
+            39 => {
+                self.e2e_force_working = None;
+                let sent = self.e2e_interrupts;
+                self.check(
+                    "Esc interrupts a working agent pane",
+                    sent == 1,
+                    format!("{sent} interrupt frame(s) sent"),
+                );
+                self.e2e_after(300);
+            }
+
             // --- report -------------------------------------------------
             _ => {
                 let total = self.e2e_results.len();
@@ -927,12 +1050,21 @@ impl GuiApp {
         // A terminal selection belongs to the pane it was made in.
         self.ui_state.term_sel = None;
         self.active = idx;
-        let id = {
+        let (id, agent) = {
             let p = &mut self.panes[idx];
             p.clear_flags();
-            p.id
+            (p.id, p.is_agent())
         };
         self.send(T_FOCUS, id, &[]);
+        // Switching to a pty pane drops egui focus so the keys go to the
+        // terminal: focus left over from the previous pane's composer would
+        // otherwise keep eating keystrokes into a field no longer on screen.
+        // (Agent panes take the caret in `redraw`, which also covers panes
+        // whose kind hasn't arrived yet.)
+        if !agent {
+            self.egui_ctx.memory_mut(|m| m.stop_text_input());
+        }
+        self.request_redraw();
     }
 
     /// Send a grid size + cell px to the server (deduped on `sent_grid`) and
@@ -1272,6 +1404,49 @@ impl GuiApp {
         self.on_key_logical(&ev.logical_key);
     }
 
+    /// Chords that belong to the window rather than to whatever widget has
+    /// focus: pane navigation, new/close pane, and the jump to the
+    /// Observatory. `window_event` routes these straight to `on_key_logical`
+    /// so a focused text field can't swallow them.
+    ///
+    /// Kept in step with the `cmd_held` block in `on_key_logical` — a chord
+    /// listed there but missing here still works, it just stops working while
+    /// you type, which is the bug this exists to prevent.
+    fn is_global_chord(&self, logical: &Key) -> bool {
+        if crate::keys::cmd_held(self.mods) {
+            let named = matches!(
+                logical,
+                Key::Named(
+                    NamedKey::ArrowLeft
+                        | NamedKey::ArrowRight
+                        | NamedKey::ArrowUp
+                        | NamedKey::ArrowDown
+                )
+            );
+            let chars = matches!(logical, Key::Character(s)
+                if s.eq_ignore_ascii_case("n")
+                    || s.eq_ignore_ascii_case("w")
+                    || s.eq_ignore_ascii_case("z")
+                    || s.chars().next().is_some_and(|c| c.is_ascii_digit()));
+            if named || chars {
+                return true;
+            }
+        }
+        // Ctrl+PageUp/PageDown, and ⌘⇧[ / ⌘⇧] on macOS, also switch panes.
+        if self.mods.control_key()
+            && matches!(logical, Key::Named(NamedKey::PageUp | NamedKey::PageDown))
+        {
+            return true;
+        }
+        #[cfg(target_os = "macos")]
+        if self.mods.super_key() {
+            if let Key::Character(s) = logical {
+                return matches!(s.as_str(), "[" | "{" | "]" | "}");
+            }
+        }
+        false
+    }
+
     /// The key-press path, split out from the winit event so the e2e harness
     /// can drive the real handler instead of synthesising OS input (which
     /// proved unreliable — a missed compositor focus sent keystrokes to
@@ -1280,7 +1455,6 @@ impl GuiApp {
         // Tab navigation + new-pane shortcuts, on Alt (Linux) / Cmd (macOS).
         if crate::keys::cmd_held(self.mods) {
             let n = self.panes.len();
-            let side = self.settings.gui_tabs() == "side";
             let prev = |me: &mut Self| {
                 if n > 0 {
                     me.focus((me.active + n - 1) % n);
@@ -1296,11 +1470,13 @@ impl GuiApp {
                 }
             };
             match logical {
-                // Arrow nav: horizontal for top tabs, vertical for side.
-                Key::Named(NamedKey::ArrowLeft) if !side => return prev(self),
-                Key::Named(NamedKey::ArrowRight) if !side => return next(self),
-                Key::Named(NamedKey::ArrowUp) if side => return prev(self),
-                Key::Named(NamedKey::ArrowDown) if side => return next(self),
+                // Arrow nav on both axes. It used to follow the tab
+                // orientation, so Alt+↑/↓ did nothing with top tabs and
+                // Alt+←/→ did nothing with side tabs — a shortcut that
+                // silently depends on an unrelated setting is worse than one
+                // extra binding. Left/Up = previous, Right/Down = next.
+                Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowUp) => return prev(self),
+                Key::Named(NamedKey::ArrowRight | NamedKey::ArrowDown) => return next(self),
                 // Alt+N opens the new-agent picker (harness + model, the
                 // default); Alt+Shift+N opens a shell pane directly.
                 Key::Character(s) if s.eq_ignore_ascii_case("n") => {
@@ -1864,6 +2040,36 @@ impl GuiApp {
                 }
             }
         }
+        // e2e only: re-assert the pinned "working" status right before the UI
+        // reads it, so a state poll landing mid-step can't undo it.
+        if let Some(id) = self.e2e_force_working {
+            if let Some(st) = self.state.as_mut() {
+                if let Some(ps) = st.panes.iter_mut().find(|ps| ps.id == id) {
+                    ps.status = "working".into();
+                }
+            }
+        }
+        // Land ready to type: in a structured agent pane, the composer takes
+        // the caret whenever nothing else has claimed it. Doing this per frame
+        // rather than at the switch covers every way a pane becomes active —
+        // tab switch, Alt+N, opening one from the Observatory, a pane the
+        // server opened for us — including the case where the pane's kind only
+        // arrives with the next T_STATE. An open overlay owns focus while it
+        // is up, and gets it back the frame it closes.
+        if self.screen == crate::ui::Screen::Focused
+            && self.ui_state.overlay == crate::ui::Overlay::None
+        {
+            if let Some(p) = self.panes.get(self.active) {
+                if p.is_agent() {
+                    let id = egui::Id::new(("composer", p.id));
+                    self.egui_ctx.memory_mut(|m| {
+                        if m.focused().is_none() {
+                            m.request_focus(id);
+                        }
+                    });
+                }
+            }
+        }
         let mut actions: Vec<crate::ui::UiAction> = Vec::new();
         // Owned copies so `data` doesn't hold a borrow on `self.settings`
         // while `build` also takes `&mut self.settings`.
@@ -2100,6 +2306,11 @@ impl GuiApp {
                 crate::ui::UiAction::CyclePermMode(id) => {
                     self.cycle_perm_mode(id);
                 }
+                crate::ui::UiAction::Interrupt(id) => {
+                    self.send(T_AGENT_INTERRUPT, id, &[]);
+                    self.e2e_interrupts += 1;
+                    self.request_redraw();
+                }
                 crate::ui::UiAction::ResumeHere(id, session) => {
                     // Resume in place: the pane keeps its id, name and slot.
                     self.send(T_AGENT_RESUME, id, session.as_bytes());
@@ -2294,6 +2505,23 @@ impl ApplicationHandler<UserEvent> for GuiApp {
         _id: winit::window::WindowId,
         event: WindowEvent,
     ) {
+        // Window-level chords are handled before egui sees them at all.
+        // egui_winit reports *every* key as consumed while a text field holds
+        // focus, so without this the pane-navigation shortcuts died the moment
+        // you started typing in the composer — precisely when you want to
+        // switch panes. Taking the event early (rather than forcing
+        // `consumed = false` afterwards) also stops egui acting on it twice,
+        // e.g. Alt+← moving the text cursor on its way through.
+        if let WindowEvent::KeyboardInput { event: ref ev, .. } = event {
+            if ev.state == ElementState::Pressed && self.is_global_chord(&ev.logical_key) {
+                let ev = ev.clone();
+                self.on_key(ev);
+                if self.want_quit {
+                    event_loop.exit();
+                }
+                return;
+            }
+        }
         // Feed the event to egui first (ADR 0006). When egui consumes it,
         // the keystroke/click belongs to a widget, not to a pane's pty.
         let win = self.renderer.as_ref().map(|r| r.window.clone());

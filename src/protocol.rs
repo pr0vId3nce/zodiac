@@ -135,6 +135,13 @@ pub const T_AGENT_RESUME: u8 = 37;
 /// restarting or losing its conversation.
 pub const T_AGENT_MODE: u8 = 38;
 
+/// Interrupt a structured agent pane's current turn (no payload). Esc is the
+/// interrupt key in Claude Code's own TUI; a headless pane has no pty to send
+/// it to, so it goes over the control protocol instead. Verified against the
+/// CLI: the request answers success, the partial reply is flushed, and the
+/// transcript gains a "[Request interrupted by user]" turn.
+pub const T_AGENT_INTERRUPT: u8 = 39;
+
 /// The permission modes zodiac cycles through, in Shift+Tab order.
 pub const PERM_MODES: [&str; 4] = ["manual", "auto", "plan", "bypassPermissions"];
 

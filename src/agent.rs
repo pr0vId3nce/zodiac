@@ -262,6 +262,23 @@ impl AgentRuntime {
         self.write_line(&line)
     }
 
+    /// Interrupt the turn in flight (claude control protocol). Verified
+    /// against the CLI: it answers `control_response` success, flushes the
+    /// partial assistant message, and appends a "[Request interrupted by
+    /// user]" user turn — the same thing Esc does in Claude Code's own TUI.
+    pub fn send_interrupt(&mut self) -> bool {
+        if self.kind != AgentKind::Claude {
+            return false;
+        }
+        let line = serde_json::json!({
+            "type": "control_request",
+            "request_id": format!("zodiac-int-{}", self.generation),
+            "request": {"subtype": "interrupt"},
+        })
+        .to_string();
+        self.write_line(&line)
+    }
+
     /// Answer a pending permission request (claude control protocol).
     pub fn send_perm_response(
         &mut self,

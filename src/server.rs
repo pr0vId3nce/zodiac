@@ -673,6 +673,11 @@ impl Server {
                     }
                 }
             }
+            T_AGENT_INTERRUPT => {
+                if let Some(rt) = self.pane_mut(f.id).and_then(|p| p.agent_rt_mut()) {
+                    rt.send_interrupt();
+                }
+            }
             T_AGENT_RESUME => {
                 if let Ok(session) = String::from_utf8(f.data.clone()) {
                     let session = session.trim().to_string();

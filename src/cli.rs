@@ -15,6 +15,7 @@ pub const COMMANDS: &[&str] = &[
     "focus",
     "new",
     "perm",
+    "interrupt",
     "close",
     "wait",
     "autoresume",
@@ -127,6 +128,19 @@ pub fn run(mut args: Vec<String>) -> Result<()> {
                 "message": if msg.is_empty() { None } else { Some(msg) },
             });
             write_frame(&mut sock, T_PERM_RESP, id, payload.to_string().as_bytes())?;
+        }
+        "interrupt" => {
+            // `zodiac interrupt <pane>` — stop the turn in flight. Esc does
+            // this in a pty pane; a structured agent pane has no pty, so it
+            // goes over the harness control protocol.
+            let id = resolve(&mut sock, &args, 0)?;
+            let st = query(&mut sock)?;
+            let is_agent = st.panes.iter().any(|p| p.id == id && p.kind == "agent");
+            if is_agent {
+                write_frame(&mut sock, T_AGENT_INTERRUPT, id, &[])?;
+            } else {
+                write_frame(&mut sock, T_INPUT, id, b"\x1b")?;
+            }
         }
         "rename" => {
             let id = resolve(&mut sock, &args, 0)?;

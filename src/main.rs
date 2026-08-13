@@ -128,6 +128,7 @@ commands (against a running server; -s <session>, --json where noted):
   zodiac prompt <pane> <text>          submit text + Enter (agent prompt)
   zodiac perm <pane> allow|deny        answer an agent pane's pending
                                      tool-permission request
+  zodiac interrupt <pane>              stop the turn in flight (Esc)
   zodiac rename <pane> <name>          rename a pane
   zodiac focus <pane>                  focus a pane
   zodiac new [--agent claude|pi]       open a new pane (with --agent: a

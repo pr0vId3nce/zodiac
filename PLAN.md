@@ -43,6 +43,9 @@ A check that cannot fail is worse than no check.
 | 9 | Finish sound on completion | **implemented** | `finish sound fires once on working->done` |
 | 10 | Kitty graphics in terminal mode | **already implemented** | see below |
 | 11 | Shift+Tab permission modes | **implemented** | `shift+tab cycles…`, `the harness confirms…` |
+| 12 | Alt+arrows die while typing | **fixed** | `alt+arrows switch panes while the composer holds focus` |
+| 13 | A switched-to pane isn't ready to type in | **fixed** | `switching to an agent pane focuses its composer`, `…drops the text caret` |
+| 14 | Esc left the pane instead of interrupting | **fixed** | `Esc does not leave the focused pane`, `Esc interrupts a working agent pane` |
 
 ### 5 — the idle CPU burn, finally explained
 
@@ -94,6 +97,35 @@ egui treats it as reverse focus traversal and the composer usually holds focus.
 
 Pi has no equivalent control request, so the chip and the shortcut are claude
 -only rather than silently doing nothing.
+
+### 12–14 — keyboard ownership
+
+Three symptoms with one theme: keys going to the wrong owner.
+
+**Alt+arrows died while typing.** `egui_winit` reports *every* key as consumed
+while a text field holds focus, not just the ones egui uses — so pane
+navigation stopped working the moment you touched the composer, which is
+exactly when you want it. `window_event` now asks `is_global_chord` first and
+routes those chords straight to the key handler, before egui sees them (taking
+the event early also stops egui acting on it on the way through). While there,
+both arrow axes now switch panes regardless of tab orientation: a shortcut that
+silently depends on an unrelated setting is worse than an extra binding.
+
+**A switched-to pane wasn't ready to type in.** The composer now takes the
+caret whenever an agent pane is focused and nothing else has claimed it —
+done per frame rather than at the switch, so it covers panes whose kind only
+arrives with the next `T_STATE`. Switching to a pty pane drops the caret
+instead, so keys reach the terminal.
+
+**Esc left the pane.** Esc is Claude Code's interrupt key, so one press both
+stopped the turn and threw you out of the pane you were watching. Esc no
+longer navigates (Alt+Z does) and now *interrupts* a working agent pane —
+`T_AGENT_INTERRUPT` → the harness control protocol, since a structured pane
+has no pty to receive the byte. Verified against the CLI first, then end to
+end: a working pane went idle on the frame and its session transcript gained
+the "[Request interrupted by user]" turn. Also wired into the TUI's agent
+composer (Esc still clears the draft when idle) and exposed as
+`zodiac interrupt <pane>`.
 
 ### 10 — kitty graphics
 

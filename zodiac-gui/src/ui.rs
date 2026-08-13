@@ -220,6 +220,8 @@ pub enum UiAction {
     ResumeHere(u64, String),
     /// Advance this agent pane to the next permission mode (shift+tab).
     CyclePermMode(u64),
+    /// Interrupt the turn this agent pane is running (Esc).
+    Interrupt(u64),
 }
 
 /// Immutable view of the app state the UI reads for one frame.
@@ -1009,10 +1011,10 @@ fn palette(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<Ui
 /// Terminal mode's real grid/kitty compositing lands in task #26b; for now
 /// it shows the rendered-screen tail from `T_STATE`.
 fn focused(root: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<UiAction>) {
-    // Esc closes only when the composer isn't focused (so it can clear text).
-    if root.input(|i| i.key_pressed(egui::Key::Escape)) && root.memory(|m| m.focused().is_none()) {
-        actions.push(UiAction::Back);
-    }
+    // Esc deliberately does NOT return to the Observatory. Esc is Claude
+    // Code's interrupt key, so in a pane running claude — terminal or
+    // structured — stealing it meant one keystroke both cancelled the turn
+    // and threw you out of the pane you were watching. Alt+Z is the way back.
     egui::Panel::left("sidebar")
         .exact_size(268.0)
         .resizable(false)
@@ -1232,6 +1234,20 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
         // question popup; otherwise the composer sits there. Transcript fills
         // the space above either way.
         let has_perm = !p.agent.perms.is_empty();
+        // Esc interrupts the turn in flight, as it does in Claude Code's own
+        // TUI. A headless pane has no pty to receive the keystroke, so it goes
+        // over the control protocol (T_AGENT_INTERRUPT). Only while the agent
+        // is actually working: sending it to an idle session would inject a
+        // stray "[Request interrupted by user]" turn. A pending permission or
+        // an open overlay owns Esc first (deny / close), so both are excluded.
+        let working = d.ps(p).is_some_and(|s| s.status == "working");
+        if working
+            && !has_perm
+            && st.overlay == Overlay::None
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape))
+        {
+            actions.push(UiAction::Interrupt(p.id));
+        }
         // PageUp/PageDown scroll the transcript. Consume them here — before
         // the composer's text field renders — so they drive the scroll view
         // rather than moving the composer cursor. ~90% of a viewport per press.
@@ -2933,13 +2949,11 @@ fn composer_bar(
                         if !resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Slash)) {
                             resp.request_focus();
                         }
-                        // Esc while composing blurs the field, so the next Esc
-                        // (now nothing focused) returns to the Observatory —
-                        // otherwise Esc did nothing while the composer held
-                        // focus (the Back handler is gated on no focus).
-                        if resp.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Escape)) {
-                            resp.surrender_focus();
-                        }
+                        // Esc used to blur the composer so a second Esc could
+                        // return to the Observatory. Esc no longer navigates,
+                        // and blurring on the interrupt key was its own small
+                        // trap: you hit Esc to stop the agent and the field you
+                        // were typing in went dead. Keep the focus.
                         if send_enter {
                             submit = true;
                             resp.request_focus();

@@ -471,6 +471,14 @@ impl GuiApp {
         self.panes.iter().rposition(|p| p.is_agent())
     }
 
+    /// Index of a pty pane. Picking by *kind* rather than by index 0 because
+    /// `T_PANE_OPENED` moves `active` to each new pane as the server reports
+    /// it, so a step that assumed "pane 0 is the shell" could be looking at an
+    /// agent pane by the time it asserted.
+    fn e2e_pty(&self) -> Option<usize> {
+        self.panes.iter().position(|p| !p.is_agent())
+    }
+
     /// Push a UI-level key press for the next frame.
     fn e2e_key(&mut self, key: egui::Key) {
         self.e2e_events.push(egui::Event::Key {
@@ -552,7 +560,10 @@ impl GuiApp {
 
             // --- terminal mouse mapping --------------------------------
             5 => {
-                self.active = 0; // the shell pane
+                let Some(i) = self.e2e_pty() else {
+                    return self.e2e_after(50);
+                };
+                self.active = i; // the shell pane
                 self.screen = Screen::Focused;
                 self.request_redraw();
                 self.e2e_after(800);
@@ -708,7 +719,7 @@ impl GuiApp {
 
             // --- an idle pane must not repaint continuously -------------
             16 => {
-                self.active = 0; // idle shell pane
+                self.active = self.e2e_pty().unwrap_or(0); // idle shell pane
                 self.screen = Screen::Focused;
                 self.request_redraw();
                 self.frames_mark = self.frames;
@@ -924,7 +935,7 @@ impl GuiApp {
                 let Some(i) = self.e2e_agent() else {
                     return self.e2e_after(50);
                 };
-                self.focus(0); // a pty pane: focus must be dropped
+                self.focus(self.e2e_pty().unwrap_or(0)); // focus must be dropped
                 self.screen = Screen::Focused;
                 self.request_redraw();
                 self.e2e_pane_before = (i, self.panes[i].id);
@@ -1055,7 +1066,8 @@ impl GuiApp {
                     drawn,
                     format!("topbar={:?}", self.ui_state.probe.topbar),
                 );
-                self.focus(0); // the shell pane: it has a measurable grid
+                // The shell pane: it has a measurable grid.
+                self.focus(self.e2e_pty().unwrap_or(0));
                 self.screen = Screen::Focused;
                 self.request_redraw();
                 self.e2e_after(800);
@@ -1126,13 +1138,13 @@ impl GuiApp {
                 let (s, r) = self.e2e_chrome_saved.clone();
                 self.settings.gui_sidebar = s;
                 self.settings.gui_rail = r;
-                self.settings.save();
                 self.e2e_after(300);
             }
 
             // --- alt+r renames the pane, as the TUI does -----------------
             46 => {
-                self.focus(0);
+                self.e2e_pane_before = (0, self.panes[self.e2e_pty().unwrap_or(0)].id);
+                self.focus(self.e2e_pty().unwrap_or(0));
                 self.screen = Screen::Focused;
                 self.mods = ModifiersState::ALT;
                 self.on_key_logical(&Key::Character("r".into()));
@@ -1141,14 +1153,15 @@ impl GuiApp {
                 self.e2e_after(600);
             }
             47 => {
+                let idx = self.e2e_pty().unwrap_or(0);
                 let opened = self.ui_state.overlay == Overlay::Rename;
-                let prefilled = self.ui_state.rename_buf == self.panes[0].name;
+                let prefilled = self.ui_state.rename_buf == self.panes[idx].name;
                 self.check(
                     "alt+r opens the rename dialog on the current name",
                     opened && prefilled,
                     format!(
                         "overlay={:?} buf={:?} name={:?}",
-                        self.ui_state.overlay, self.ui_state.rename_buf, self.panes[0].name
+                        self.ui_state.overlay, self.ui_state.rename_buf, self.panes[idx].name
                     ),
                 );
                 self.ui_state.rename_buf = "e2e-renamed".into();
@@ -1163,7 +1176,7 @@ impl GuiApp {
             49 => {
                 // The server is the authority: assert the name it reports
                 // back, not the local echo.
-                let id = self.panes[0].id;
+                let id = self.e2e_pane_before.1;
                 let server = self
                     .state
                     .as_ref()
@@ -1174,8 +1187,93 @@ impl GuiApp {
                     "the rename reaches the server",
                     server == "e2e-renamed" && self.ui_state.overlay == Overlay::None,
                     format!(
-                        "server reported {server:?}, local {:?}, overlay {:?}",
-                        self.panes[0].name, self.ui_state.overlay
+                        "server reported {server:?}, overlay {:?}",
+                        self.ui_state.overlay
+                    ),
+                );
+                self.e2e_after(300);
+            }
+
+            // --- the rail's new panels -----------------------------------
+            50 => {
+                let Some(i) = self.e2e_agent() else {
+                    return self.e2e_after(50);
+                };
+                self.active = i;
+                self.screen = Screen::Focused;
+                // Feed real stream shapes: two turns of usage and three file
+                // edits, one of them a repeat.
+                for line in [
+                    serde_json::json!({"type": "assistant", "message": {"content": [],
+                        "usage": {"input_tokens": 12, "cache_read_input_tokens": 1000,
+                                  "cache_creation_input_tokens": 0, "output_tokens": 40}}}),
+                    serde_json::json!({"type": "assistant", "message": {"content": [
+                        {"type": "tool_use", "id": "a", "name": "Edit",
+                         "input": {"file_path": "/tmp/one.rs", "old_string": "x",
+                                   "new_string": "y"}}],
+                        "usage": {"input_tokens": 8, "cache_read_input_tokens": 40000,
+                                  "cache_creation_input_tokens": 0, "output_tokens": 20}}}),
+                    serde_json::json!({"type": "assistant", "message": {"content": [
+                        {"type": "tool_use", "id": "b", "name": "Write",
+                         "input": {"file_path": "/tmp/two.rs", "content": "z"}}]}}),
+                    serde_json::json!({"type": "assistant", "message": {"content": [
+                        {"type": "tool_use", "id": "c", "name": "Read",
+                         "input": {"file_path": "/tmp/never-written.rs"}}]}}),
+                ] {
+                    self.panes[i].agent.apply_line(&line);
+                }
+                self.request_redraw();
+                self.e2e_after(700);
+            }
+            51 => {
+                let i = self.e2e_agent().unwrap_or(0);
+                let u = self.panes[i].agent.usage;
+                // Totals accumulate; context is the newest turn's occupancy.
+                let ok = u.output == 60 && u.cache_read == 41000 && u.context == 40008;
+                self.check(
+                    "the context meter folds the harness's own usage",
+                    ok,
+                    format!(
+                        "in={} out={} cached={} context={} ({:?}% of 200k)",
+                        u.input,
+                        u.output,
+                        u.cache_read,
+                        u.context,
+                        u.context_frac(200_000).map(|f| (f * 100.0).round())
+                    ),
+                );
+                let files: Vec<_> = self.panes[i]
+                    .agent
+                    .files
+                    .iter()
+                    .map(|f| (f.path.clone(), f.edits))
+                    .collect();
+                // Newest first, and a Read must not appear: the panel answers
+                // "what did it change", not "what did it look at".
+                let want = [
+                    ("/tmp/two.rs".to_string(), 1),
+                    ("/tmp/one.rs".to_string(), 1),
+                ];
+                self.check(
+                    "the files panel lists what was changed, newest first",
+                    files == want,
+                    format!("{files:?}"),
+                );
+                // …and both panels actually laid out, not merely folded: a
+                // gauge with a visible fill, and one row per changed file.
+                let pr = self.ui_state.probe;
+                let drew = pr.ctx_fill.is_some_and(|r| r.width() > 1.0) && pr.file_rows == 2;
+                self.check(
+                    "both rail panels draw what they folded",
+                    drew,
+                    format!(
+                        "ctx_fill={:?} file_rows={} rail={:?} active={} is_agent={} screen={:?}",
+                        pr.ctx_fill,
+                        pr.file_rows,
+                        pr.rail.is_some(),
+                        self.active,
+                        self.panes.get(self.active).is_some_and(|p| p.is_agent()),
+                        self.screen
                     ),
                 );
                 self.e2e_after(300);
@@ -1193,7 +1291,21 @@ impl GuiApp {
                 out.push_str(&format!("{}/{total} passed\n", total - failed));
                 self.e2e_failed = failed > 0 || total == 0;
                 self.exit_msg = Some(out);
-                self.send(T_DETACH, 0, &[]);
+                // Take the scratch session down with us, snapshot included.
+                // Detaching left it running, so every run piled its panes onto
+                // the last one's — and killing the server alone wasn't enough,
+                // because the next one restores from `snapshot.json`. 43 panes
+                // had accumulated by the time this was noticed.
+                self.send(T_SHUTDOWN, 0, &[]);
+                // `state.json` is the one that actually accumulates: the
+                // server restores its pane list from it at startup, so the
+                // scratch session came back with every pane every previous run
+                // had ever made (46, and one more each time).
+                let dir = zodiac::protocol::state_dir(&self.session);
+                for f in ["state.json", "snapshot.json", "snapshot.prev.json"] {
+                    let _ = std::fs::remove_file(dir.join(f));
+                }
+                let _ = std::fs::remove_dir_all(dir.join("scrollback"));
                 event_loop.exit();
             }
         }
@@ -1572,7 +1684,12 @@ impl GuiApp {
             &mut self.settings.gui_rail
         };
         *field = if field == "hide" { "show" } else { "hide" }.to_string();
-        self.settings.save();
+        // Never persist under the harness: the e2e drives this toggle, and a
+        // run that died before restoring left the *user's* panels collapsed —
+        // and poisoned the next run, which then "restored" the wrong value.
+        if !self.e2e {
+            self.settings.save();
+        }
         self.request_redraw();
     }
 

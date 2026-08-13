@@ -81,8 +81,44 @@ The rail's output-rate histogram is gone. An agent idles for a long stretch and
 then works for one, so the chart only ever showed a flat line or a spike —
 motion where information was supposed to be. The small card sparkline on the
 Observatory stays; at that size it reads as "this one has been busy", which is
-true. **What replaces it in the rail is an open question** — see the
-conversation; the rail currently carries the session facts and the PLAN panel.
+true.
+
+| # | Item | Status | Covered by |
+|---|------|--------|-----------|
+| 7 | Rail: CONTEXT meter | **done** | `the context meter folds the harness's own usage`, `both rail panels draw what they folded` |
+| 8 | Rail: FILES touched | **done** | `the files panel lists what was changed, newest first` |
+
+**CONTEXT** answers the question nothing else in zodiac answers: how full is
+the window, and therefore when should this session compact. It folds `usage`
+off the message envelope — totals accumulate, but `context` is a *snapshot* of
+the newest turn, since that is what occupancy means (summing it across turns
+would be nonsense). The window size is read from the model id (200k, or 1M when
+it carries the `[1m]` marker). Cost shows only when the harness reports a
+non-zero one: subscription plans report zero, and a confident `$0.00` is worse
+than no number.
+
+**FILES** lists what the agent *changed* — Edit/MultiEdit/Write/NotebookEdit —
+newest first, repeat edits counted, click to copy the path. Read is
+deliberately excluded: the panel answers "what did it change", not "what did it
+look at".
+
+### Harness hygiene fixed along the way
+
+Two of my own bugs, both found by the checks rather than by eye:
+
+- The e2e **persisted the panel toggles to the user's real `config.json`**. A
+  run that died before restoring left the user's panels collapsed *and*
+  poisoned the next run, which then "restored" the wrong value. It no longer
+  saves under `ZODIAC_GUI_E2E`.
+- Each run **inherited every pane the previous runs had made** — 46 of them.
+  Killing the server wasn't enough: the next one rebuilds its pane list from
+  `state.json`. Cleanup now happens *before* connecting (the server rewrites
+  that file as it shuts down, so cleaning at teardown raced the write).
+
+Steps that meant "the shell pane" now pick it by **kind**, not by index 0:
+`T_PANE_OPENED` moves `active` to each new pane as the server reports it, so
+index-based picks were quietly racing and produced three different flaky
+failures before the cause was clear.
 
 ## Standing items (unchanged)
 

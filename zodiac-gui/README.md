@@ -41,7 +41,13 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
   permission
   raises a **modal question popup** navigable by mouse, number keys, ↑/↓ (or
   j/k), and Enter (Esc denies) → `T_PERM_RESP`. When the agent is running a plan
-  (`TodoWrite`), the right rail shows a **PLAN** panel with a progress bar and
+  The right rail carries **CONTEXT** (a gauge of how full the model's window
+  is, warming through accent to red as it fills, plus in/out/cached tokens and
+  the session cost when the harness reports one) and **FILES** (what the agent
+  has actually changed this session, newest first, repeat edits counted; click
+  a row to copy the path). Both fold from the harness's own reports. When the
+  agent is running a plan
+  (`TodoWrite`), the rail also shows a **PLAN** panel with a progress bar and
   the checklist (done struck-through, the in-progress step highlighted).
   Switching to an agent pane puts the caret in its composer, so it is ready to
   type in; switching to a pty pane drops the caret so the keys reach the

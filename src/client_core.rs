@@ -56,6 +56,54 @@ pub struct ToolCall {
     pub is_error: bool,
 }
 
+/// A file this session has changed, and how many times. Folded from the
+/// file-writing tools as their calls stream past, so the GUI can answer "what
+/// has this agent actually touched?" without walking the transcript.
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct FileEdit {
+    pub path: String,
+    pub edits: usize,
+}
+
+/// Token accounting for an agent pane, folded from the harness's own usage
+/// reports. `context` is what matters day to day: how full the model's window
+/// is, and therefore how close the session is to needing a compact.
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct Usage {
+    pub input: u64,
+    pub output: u64,
+    pub cache_read: u64,
+    pub cache_write: u64,
+    /// Tokens resident in the context as of the newest assistant turn —
+    /// prompt + cache read + cache written, the way Claude Code counts it.
+    pub context: u64,
+    /// Session cost, when the harness reports one. Subscription plans report
+    /// zero, so the GUI shows this only when it is non-zero rather than
+    /// printing a confident $0.00.
+    pub cost_usd: f64,
+    pub turns: u64,
+}
+
+impl Usage {
+    /// Fraction of the context window in use (0.0–1.0+), given the window
+    /// size. Returns None when nothing has been reported yet.
+    pub fn context_frac(&self, limit: u64) -> Option<f32> {
+        (self.context > 0 && limit > 0).then(|| self.context as f32 / limit as f32)
+    }
+}
+
+/// The model's context window in tokens. Claude's default is 200k; the 1M
+/// window is opt-in and marked in the model id, which is the only signal the
+/// stream gives us.
+pub fn context_limit(model: Option<&str>) -> u64 {
+    let m = model.unwrap_or_default();
+    if m.contains("[1m]") || m.contains("1m") {
+        1_000_000
+    } else {
+        200_000
+    }
+}
+
 /// A richer transcript item for the GUI. The TUI keeps reading the flat
 /// `AgentUi::log`; the GUI reads `items`, which preserves what `log`
 /// collapses: thinking prose, and each tool's real command + result. Both
@@ -84,6 +132,61 @@ impl TodoItem {
     }
     pub fn active(&self) -> bool {
         self.status == "in_progress"
+    }
+}
+
+/// The tools that change a file, and the input key naming it. Read-only tools
+/// are deliberately absent: the panel answers "what did it *change*".
+const WRITE_TOOLS: &[(&str, &str)] = &[
+    ("Edit", "file_path"),
+    ("MultiEdit", "file_path"),
+    ("Write", "file_path"),
+    ("NotebookEdit", "notebook_path"),
+];
+
+impl AgentUi {
+    /// Record a file-changing tool call. Most recently touched sorts first,
+    /// and repeat edits to one file bump its count rather than adding a row.
+    fn note_file_edit(&mut self, tool: &str, input: &serde_json::Value) {
+        let Some((_, key)) = WRITE_TOOLS.iter().find(|(t, _)| *t == tool) else {
+            return;
+        };
+        let Some(path) = input.get(*key).and_then(|p| p.as_str()) else {
+            return;
+        };
+        if let Some(i) = self.files.iter().position(|f| f.path == path) {
+            let mut f = self.files.remove(i);
+            f.edits += 1;
+            self.files.insert(0, f);
+        } else {
+            self.files.insert(
+                0,
+                FileEdit {
+                    path: path.to_string(),
+                    edits: 1,
+                },
+            );
+        }
+    }
+
+    /// Fold a `usage` object from an assistant message. The totals accumulate;
+    /// `context` is a snapshot of the newest turn, since that *is* the window
+    /// occupancy — summing it across turns would be meaningless.
+    fn note_usage(&mut self, u: &serde_json::Value) {
+        let n = |k: &str| u.get(k).and_then(|v| v.as_u64()).unwrap_or(0);
+        let (inp, out) = (n("input_tokens"), n("output_tokens"));
+        let (read, write) = (
+            n("cache_read_input_tokens"),
+            n("cache_creation_input_tokens"),
+        );
+        self.usage.input += inp;
+        self.usage.output += out;
+        self.usage.cache_read += read;
+        self.usage.cache_write += write;
+        let ctx = inp + read + write;
+        if ctx > 0 {
+            self.usage.context = ctx;
+        }
     }
 }
 
@@ -141,6 +244,10 @@ pub struct AgentUi {
     /// Wrapped-line offset from the bottom; 0 = follow the tail.
     pub scroll: usize,
     pub perms: Vec<PermRequest>,
+    /// Files changed this session, most recently touched first.
+    pub files: Vec<FileEdit>,
+    /// Rolling token/cost accounting (see [`Usage`]).
+    pub usage: Usage,
     pub input: String,
     pub cursor: usize, // char index into `input`
 }
@@ -175,6 +282,16 @@ impl AgentUi {
             .filter(|m| !m.is_empty())
         {
             self.perm_mode = Some(m.to_string());
+        }
+        // Token accounting rides on the message envelope wherever it appears
+        // (assistant messages carry it per turn; `message_delta` stream events
+        // carry the final output count), so fold it once here.
+        if let Some(u) = v
+            .get("message")
+            .and_then(|m| m.get("usage"))
+            .or_else(|| v.get("usage"))
+        {
+            self.note_usage(u);
         }
         match v.get("type").and_then(|t| t.as_str()) {
             Some("zodiac_user") => {
@@ -218,6 +335,7 @@ impl AgentUi {
                             if name == "TodoWrite" {
                                 self.todos = parse_todos(&input);
                             }
+                            self.note_file_edit(&name, &input);
                             self.log.push((ARole::Tool, format!("{name}({arg})")));
                             self.items.push(ChatItem::Tool(ToolCall {
                                 id: s(b, "id").unwrap_or_default(),
@@ -290,6 +408,13 @@ impl AgentUi {
                 }
             }
             Some("result") => {
+                // The turn summary is where cost and the turn count live.
+                if let Some(c) = v.get("total_cost_usd").and_then(|c| c.as_f64()) {
+                    self.usage.cost_usd = c.max(self.usage.cost_usd);
+                }
+                if let Some(t) = v.get("num_turns").and_then(|t| t.as_u64()) {
+                    self.usage.turns = self.usage.turns.max(t);
+                }
                 if v.get("is_error").and_then(|e| e.as_bool()) == Some(true) {
                     let msg = s(v, "result").unwrap_or_else(|| "turn failed".into());
                     self.log.push((ARole::Error, msg.clone()));
@@ -1052,6 +1177,62 @@ mod apply_line_tests {
             ui.apply_line(l);
         }
         ui
+    }
+
+    #[test]
+    fn write_tools_build_the_touched_file_list() {
+        let call = |name: &str, path: &str| {
+            json!({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "t", "name": name,
+                 "input": {"file_path": path, "old_string": "a", "new_string": "b"}},
+            ]}})
+        };
+        let ui = fold(&[
+            call("Edit", "/src/a.rs"),
+            call("Write", "/src/b.rs"),
+            call("Edit", "/src/a.rs"),
+            // Reading a file is not touching it.
+            json!({"type": "assistant", "message": {"content": [
+                {"type": "tool_use", "id": "t", "name": "Read",
+                 "input": {"file_path": "/src/c.rs"}},
+            ]}}),
+        ]);
+        // Most recently touched first; a repeat edit bumps the count in place.
+        assert_eq!(
+            ui.files,
+            vec![
+                FileEdit {
+                    path: "/src/a.rs".into(),
+                    edits: 2
+                },
+                FileEdit {
+                    path: "/src/b.rs".into(),
+                    edits: 1
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn usage_totals_accumulate_but_context_is_the_latest_turn() {
+        let turn = |inp: u64, read: u64, out: u64| {
+            json!({"type": "assistant", "message": {"content": [], "usage": {
+                "input_tokens": inp, "cache_read_input_tokens": read,
+                "cache_creation_input_tokens": 0, "output_tokens": out}}})
+        };
+        let ui = fold(&[turn(10, 1000, 5), turn(2, 4000, 7)]);
+        assert_eq!(ui.usage.output, 12); // summed
+        assert_eq!(ui.usage.cache_read, 5000); // summed
+                                               // Context is occupancy, not a running total: the newest turn wins.
+        assert_eq!(ui.usage.context, 4002);
+        assert_eq!(ui.usage.context_frac(200_000), Some(4002.0 / 200_000.0));
+    }
+
+    #[test]
+    fn the_1m_window_is_read_from_the_model_id() {
+        assert_eq!(context_limit(Some("claude-opus-5")), 200_000);
+        assert_eq!(context_limit(Some("claude-sonnet-5[1m]")), 1_000_000);
+        assert_eq!(context_limit(None), 200_000);
     }
 
     #[test]

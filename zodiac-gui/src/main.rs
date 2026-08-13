@@ -42,6 +42,19 @@ fn server_binary() -> std::path::PathBuf {
         .unwrap_or_else(|| std::path::PathBuf::from("zodiac"))
 }
 
+/// Shut down any server still holding the harness's scratch session and wipe
+/// its on-disk state, so the run starts with no panes. Only ever called for
+/// `ZODIAC_GUI_E2E`, and only against the session named on the command line.
+fn e2e_reset(session: &str) {
+    if let Ok(mut s) =
+        std::os::unix::net::UnixStream::connect(zodiac::protocol::socket_path(session))
+    {
+        let _ = zodiac::protocol::write_frame(&mut s, zodiac::protocol::T_SHUTDOWN, 0, &[]);
+        std::thread::sleep(std::time::Duration::from_millis(700));
+    }
+    let _ = std::fs::remove_dir_all(zodiac::protocol::state_dir(session));
+}
+
 fn main() -> anyhow::Result<()> {
     let arg = std::env::args().nth(1);
     if matches!(arg.as_deref(), Some("-h") | Some("--help")) {
@@ -55,6 +68,14 @@ fn main() -> anyhow::Result<()> {
         return Ok(());
     }
     let session = arg.unwrap_or_else(|| "main".into());
+
+    // The e2e starts from an empty session. Cleaning up *before* connecting is
+    // the only reliable place: the server rewrites `state.json` as it shuts
+    // down, so deleting it at teardown raced the write and every run inherited
+    // the last one's panes.
+    if std::env::var("ZODIAC_GUI_E2E").is_ok() {
+        e2e_reset(&session);
+    }
 
     // Font first: the attach payload carries the cell size in px so the
     // server's PTYs can report pixel dimensions to inner apps.

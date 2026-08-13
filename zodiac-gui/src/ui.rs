@@ -149,6 +149,10 @@ pub struct Probe {
     pub topbar: Option<egui::Rect>,
     pub sidebar: Option<egui::Rect>,
     pub rail: Option<egui::Rect>,
+    /// The context gauge's filled portion, and how many file rows drew — so
+    /// the harness can tell "the data folded" from "the user can see it".
+    pub ctx_fill: Option<egui::Rect>,
+    pub file_rows: usize,
 }
 
 impl Probe {
@@ -162,6 +166,8 @@ impl Probe {
             topbar: None,
             sidebar: None,
             rail: None,
+            ctx_fill: None,
+            file_rows: 0,
         }
     }
 }
@@ -1082,7 +1088,7 @@ fn focused(root: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
                     .fill(theme::bg_panel())
                     .inner_margin(Margin::same(14)),
             )
-            .show(root, |ui| activity_rail(ui, d));
+            .show(root, |ui| activity_rail(ui, d, actions));
         probe_set(|p| p.rail = Some(r.response.rect));
     }
     egui::CentralPanel::default()
@@ -3870,10 +3876,14 @@ fn seg(ui: &mut egui::Ui, label: &str, on: bool) -> bool {
 
 /// The right activity rail: session facts (the output histogram needs
 /// server-side rate buckets — deferred).
-fn activity_rail(ui: &mut egui::Ui, d: &UiData) {
+fn activity_rail(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
     let Some(p) = d.panes.get(d.active) else {
         return;
     };
+    if p.is_agent() {
+        context_panel(ui, p);
+        files_panel(ui, p, actions);
+    }
     let ps = d.ps(p);
     // The output-rate histogram used to head this rail. It was removed: an
     // agent is idle for a long stretch and then busy for one, so the chart
@@ -3934,6 +3944,156 @@ fn activity_rail(ui: &mut egui::Ui, d: &UiData) {
             );
         });
     }
+}
+
+/// Compact token counts: 1_234 -> "1.2k", 45_000 -> "45k".
+fn tok(n: u64) -> String {
+    match n {
+        0..=999 => n.to_string(),
+        1_000..=9_999 => format!("{:.1}k", n as f32 / 1000.0),
+        10_000..=999_999 => format!("{}k", n / 1000),
+        _ => format!("{:.1}M", n as f32 / 1_000_000.0),
+    }
+}
+
+/// CONTEXT: how full the model's window is, plus the session's token totals.
+/// This is the number that decides when to compact, and it is not visible
+/// anywhere else in zodiac.
+fn context_panel(ui: &mut egui::Ui, p: &CPane) {
+    let u = p.agent.usage;
+    let limit = zodiac::client_core::context_limit(p.agent.model.as_deref());
+    let Some(frac) = u.context_frac(limit) else {
+        return; // nothing reported yet — an empty gauge would be a lie
+    };
+    ui.label(
+        RichText::new("CONTEXT")
+            .color(theme::TEXT_GHOST)
+            .size(11.0)
+            .strong(),
+    );
+    ui.add_space(8.0);
+    // The bar warms as the window fills: the point is to be noticed late.
+    let pct = frac.clamp(0.0, 1.0);
+    let col = match pct {
+        x if x >= 0.9 => theme::STATUS_RAIL[0],
+        x if x >= 0.7 => theme::accent(),
+        _ => theme::STATUS_RAIL[2],
+    };
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 8.0), Sense::hover());
+    ui.painter()
+        .rect_filled(rect, CornerRadius::same(4), theme::bg_selected());
+    let mut filled = rect;
+    filled.set_width(rect.width() * pct);
+    ui.painter().rect_filled(filled, CornerRadius::same(4), col);
+    probe_set(|p| p.ctx_fill = Some(filled));
+    ui.add_space(6.0);
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(format!("{} / {}", tok(u.context), tok(limit)))
+                .color(theme::TEXT_DIM)
+                .size(12.0)
+                .monospace(),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(
+                RichText::new(format!("{:.0}%", pct * 100.0))
+                    .color(col)
+                    .size(12.0)
+                    .monospace(),
+            );
+        });
+    });
+    ui.add_space(4.0);
+    let cached = if u.cache_read > 0 {
+        format!(" · {} cached", tok(u.cache_read))
+    } else {
+        String::new()
+    };
+    ui.label(
+        RichText::new(format!(
+            "{} in · {} out{cached}",
+            tok(u.input),
+            tok(u.output)
+        ))
+        .color(theme::TEXT_GHOST)
+        .size(11.0),
+    );
+    // Subscription plans report no cost, so a $0.00 would be noise, not data.
+    if u.cost_usd > 0.0 {
+        ui.label(
+            RichText::new(format!("${:.2} this session", u.cost_usd))
+                .color(theme::TEXT_GHOST)
+                .size(11.0),
+        );
+    }
+    ui.add_space(16.0);
+}
+
+/// FILES: what this agent has actually changed, newest first. Clicking a row
+/// copies the path — after tabbing back into a pane this is the first thing
+/// you want, and finding it otherwise means scrolling the transcript.
+fn files_panel(ui: &mut egui::Ui, p: &CPane, actions: &mut Vec<UiAction>) {
+    if p.agent.files.is_empty() {
+        return;
+    }
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new("FILES")
+                .color(theme::TEXT_GHOST)
+                .size(11.0)
+                .strong(),
+        );
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            ui.label(
+                RichText::new(p.agent.files.len().to_string())
+                    .color(theme::TEXT_GHOST)
+                    .size(11.0),
+            );
+        });
+    });
+    ui.add_space(8.0);
+    egui::ScrollArea::vertical()
+        .id_salt("rail_files")
+        .max_height(190.0)
+        .show(ui, |ui| {
+            for f in p.agent.files.iter().take(40) {
+                let name = f.path.rsplit('/').next().unwrap_or(&f.path);
+                let r = Frame::NONE
+                    .corner_radius(CornerRadius::same(6))
+                    .inner_margin(Margin::symmetric(6, 3))
+                    .show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        ui.horizontal(|ui| {
+                            ui.add(
+                                Label::new(RichText::new(name).color(theme::TEXT_BODY).size(12.0))
+                                    .truncate(),
+                            );
+                            if f.edits > 1 {
+                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                    ui.label(
+                                        RichText::new(format!("×{}", f.edits))
+                                            .color(theme::TEXT_GHOST)
+                                            .size(11.0),
+                                    );
+                                });
+                            }
+                        });
+                    });
+                let resp = r.response.interact(Sense::click());
+                if resp.hovered() {
+                    ui.painter().rect_filled(
+                        r.response.rect,
+                        CornerRadius::same(6),
+                        theme::bg_selected(),
+                    );
+                }
+                if resp.on_hover_text(&f.path).clicked() {
+                    actions.push(UiAction::CopyText(f.path.clone()));
+                }
+                probe_set(|p| p.file_rows += 1);
+            }
+        });
+    ui.add_space(16.0);
 }
 
 /// The PLAN block: a header with a done/total count, a progress bar, and the

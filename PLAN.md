@@ -134,6 +134,18 @@ panels announce themselves before any data`.
 | 9 | Alt+N asks Terminal or Chat | **done** | `alt+n asks Terminal or Chat first`, `choosing Terminal opens a shell pane`, `choosing Chat asks which harness/model…`, `esc walks back…` |
 | 10 | Terminal background is true black | **done** | visual (`palette::DEFAULT_BG` = `[0,0,0]`) |
 | 11 | Seams through block-drawn art | **done** | `block_tests` (5 unit tests) + visual |
+| 12 | OLED themes ground on true black | **done** | `oled_themes_ground_on_true_black` + visual |
+
+**The OLED themes** (`oled-orange`, `oled-green`) now paint *every* background
+surface `#000` — window, chrome (top bar, sidebar) and panel (the rail) — where
+before only the window was black and the rest were near-blacks. On an OLED
+those pixels are lit, and against a black window they read as a grey wash
+rather than as structure. Cards and the raised/selected states keep their faint
+lift, so an interactive surface is still distinguishable from the ground.
+
+Black-on-black would have erased the panel edges, so the focused view now draws
+**hairline separators** at the sidebar, rail and top-bar boundaries (all
+themes). Structure is drawn rather than implied by a lighter fill.
 
 **The seams.** Two causes, both fixed. Cell rects were computed as a fractional
 `x + width`, so adjacent background quads didn't quite meet — the old `+ 0.5`

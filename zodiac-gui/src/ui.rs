@@ -1091,7 +1091,16 @@ fn focused(root: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
                     .inner_margin(Margin::same(10)),
             )
             .show(root, |ui| sidebar(ui, d, actions));
-        probe_set(|p| p.sidebar = Some(r.response.rect));
+        // A hairline where the panel meets the pane. The OLED themes paint
+        // chrome and ground the same true black, so the edge has to be drawn
+        // rather than implied by a lighter fill.
+        let rect = r.response.rect;
+        root.painter().vline(
+            rect.max.x,
+            rect.y_range(),
+            Stroke::new(1.0, theme::LINE_BORDER),
+        );
+        probe_set(|p| p.sidebar = Some(rect));
     }
     if !d.hide_rail {
         let r = egui::Panel::right("rail")
@@ -1103,7 +1112,13 @@ fn focused(root: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
                     .inner_margin(Margin::same(14)),
             )
             .show(root, |ui| activity_rail(ui, d, actions));
-        probe_set(|p| p.rail = Some(r.response.rect));
+        let rect = r.response.rect;
+        root.painter().vline(
+            rect.min.x,
+            rect.y_range(),
+            Stroke::new(1.0, theme::LINE_BORDER),
+        );
+        probe_set(|p| p.rail = Some(rect));
     }
     egui::CentralPanel::default()
         .frame(
@@ -4634,7 +4649,15 @@ fn title_bar(root: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Ve
                 });
             });
         });
-    probe_set(|p| p.topbar = Some(r.response.rect));
+    let rect = r.response.rect;
+    // Same reason as the flanking panels: on the OLED themes the bar and the
+    // page below it are both true black, so its lower edge is drawn.
+    root.painter().hline(
+        rect.x_range(),
+        rect.max.y,
+        Stroke::new(1.0, theme::LINE_BORDER),
+    );
+    probe_set(|p| p.topbar = Some(rect));
 }
 
 /// A borderless window-control glyph button (minimize / close).

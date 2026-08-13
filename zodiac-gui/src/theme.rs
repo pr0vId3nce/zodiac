@@ -112,13 +112,20 @@ const NIGHT: Palette = Palette {
 };
 
 /// True-black grounds shared by the OLED themes (accent filled in per theme).
+///
+/// Every *background* surface is `#000` — window, chrome (top bar, sidebar)
+/// and panel (the rail) alike. Near-blacks defeat the point: on an OLED those
+/// pixels are lit, and against a black window they read as a grey wash rather
+/// than as structure. Structure comes from the hairline separators the focused
+/// view draws instead. Cards and the raised/selected states keep a faint lift
+/// so an interactive surface is still distinguishable from the ground.
 const fn oled(accent: Color32, accent_hover: Color32) -> Palette {
     Palette {
         bg_window: Color32::BLACK,
-        bg_chrome: Color32::from_rgb(0x0a, 0x0a, 0x0c),
-        bg_panel: Color32::from_rgb(0x06, 0x06, 0x08),
+        bg_chrome: Color32::BLACK,
+        bg_panel: Color32::BLACK,
         bg_card: Color32::from_rgb(0x0d, 0x0d, 0x10),
-        bg_card_idle: Color32::from_rgb(0x07, 0x07, 0x09),
+        bg_card_idle: Color32::BLACK,
         bg_card_alert: Color32::from_rgb(0x14, 0x0a, 0x0a),
         bg_raised: Color32::from_rgb(0x12, 0x12, 0x16),
         bg_selected: Color32::from_rgb(0x1c, 0x1c, 0x22),
@@ -249,4 +256,36 @@ pub fn set_fonts(ctx: &egui::Context, ttf: Vec<u8>, fallbacks: Vec<(String, Vec<
         }
     }
     ctx.set_fonts(defs);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn oled_themes_ground_on_true_black() {
+        // The whole point of an OLED theme is unlit pixels; a near-black
+        // background is both lit and, against a black window, a grey wash.
+        for name in ["oled-orange", "oled-green"] {
+            let p = palette_for(name);
+            for (what, c) in [
+                ("window", p.bg_window),
+                ("chrome", p.bg_chrome),
+                ("panel", p.bg_panel),
+                ("idle card", p.bg_card_idle),
+            ] {
+                assert_eq!(c, Color32::BLACK, "{name}: {what} must be true black");
+            }
+            // …but the themes still differ from each other, and from night.
+            assert_ne!(p.accent, palette_for("night").accent);
+        }
+        assert_ne!(
+            palette_for("oled-orange").accent,
+            palette_for("oled-green").accent
+        );
+        // The default theme is unaffected: its chrome still lifts off the
+        // window, which is where its structure comes from.
+        let night = palette_for("night");
+        assert_ne!(night.bg_chrome, night.bg_window);
+    }
 }

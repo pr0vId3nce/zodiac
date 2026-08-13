@@ -1130,6 +1130,57 @@ impl GuiApp {
                 self.e2e_after(300);
             }
 
+            // --- alt+r renames the pane, as the TUI does -----------------
+            46 => {
+                self.focus(0);
+                self.screen = Screen::Focused;
+                self.mods = ModifiersState::ALT;
+                self.on_key_logical(&Key::Character("r".into()));
+                self.mods = ModifiersState::empty();
+                self.request_redraw();
+                self.e2e_after(600);
+            }
+            47 => {
+                let opened = self.ui_state.overlay == Overlay::Rename;
+                let prefilled = self.ui_state.rename_buf == self.panes[0].name;
+                self.check(
+                    "alt+r opens the rename dialog on the current name",
+                    opened && prefilled,
+                    format!(
+                        "overlay={:?} buf={:?} name={:?}",
+                        self.ui_state.overlay, self.ui_state.rename_buf, self.panes[0].name
+                    ),
+                );
+                self.ui_state.rename_buf = "e2e-renamed".into();
+                self.e2e_key(egui::Key::Enter);
+                self.request_redraw();
+                self.e2e_after(1200);
+            }
+            48 => {
+                self.send(T_QUERY, 0, &[]); // don't race the state poll
+                self.e2e_after(1200);
+            }
+            49 => {
+                // The server is the authority: assert the name it reports
+                // back, not the local echo.
+                let id = self.panes[0].id;
+                let server = self
+                    .state
+                    .as_ref()
+                    .and_then(|st| st.panes.iter().find(|ps| ps.id == id))
+                    .map(|ps| ps.name.clone())
+                    .unwrap_or_default();
+                self.check(
+                    "the rename reaches the server",
+                    server == "e2e-renamed" && self.ui_state.overlay == Overlay::None,
+                    format!(
+                        "server reported {server:?}, local {:?}, overlay {:?}",
+                        self.panes[0].name, self.ui_state.overlay
+                    ),
+                );
+                self.e2e_after(300);
+            }
+
             // --- report -------------------------------------------------
             _ => {
                 let total = self.e2e_results.len();
@@ -1546,6 +1597,7 @@ impl GuiApp {
             );
             let chars = matches!(logical, Key::Character(s)
                 if s.eq_ignore_ascii_case("n")
+                    || s.eq_ignore_ascii_case("r")
                     || s.eq_ignore_ascii_case("w")
                     || s.eq_ignore_ascii_case("z")
                     || s.chars().next().is_some_and(|c| c.is_ascii_digit()));
@@ -1617,6 +1669,20 @@ impl GuiApp {
                     } else {
                         self.open_agent_picker();
                     }
+                    return;
+                }
+                // Alt+R renames the active pane (Alt+Shift+R raises the last
+                // session). Both live here rather than in the egui frame so
+                // the chord still lands while the composer holds focus.
+                Key::Character(s) if s.eq_ignore_ascii_case("r") => {
+                    if self.mods.shift_key() {
+                        self.ui_state.overlay = crate::ui::Overlay::Raise;
+                    } else if let Some(p) = self.panes.get(self.active) {
+                        self.ui_state.rename_pane = Some(p.id);
+                        self.ui_state.rename_buf = p.name.clone();
+                        self.ui_state.overlay = crate::ui::Overlay::Rename;
+                    }
+                    self.request_redraw();
                     return;
                 }
                 // Alt+W closes the active pane (kills its process).
@@ -2450,6 +2516,17 @@ impl GuiApp {
                 }
                 crate::ui::UiAction::CyclePermMode(id) => {
                     self.cycle_perm_mode(id);
+                }
+                crate::ui::UiAction::Rename(id, name) => {
+                    // Empty payload = un-pin: the server resumes auto-naming
+                    // and answers with T_PANE_RENAMED either way.
+                    self.send(T_RENAME, id, name.as_bytes());
+                    if !name.is_empty() {
+                        if let Some(p) = self.panes.iter_mut().find(|p| p.id == id) {
+                            p.name = name;
+                        }
+                    }
+                    self.request_redraw();
                 }
                 crate::ui::UiAction::Interrupt(id) => {
                     self.send(T_AGENT_INTERRUPT, id, &[]);

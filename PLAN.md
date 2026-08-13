@@ -66,6 +66,24 @@ Two consequences worth knowing:
   ⌘, settings, Alt+O oracle, and **Alt+P pair-phone, which is new** — that one
   had no shortcut at all and would otherwise have become unreachable.
 
+## Follow-on (same round)
+
+| # | Item | Status | Covered by |
+|---|------|--------|-----------|
+| 5 | Alt+R renames a pane (TUI parity) | **done** | `alt+r opens the rename dialog on the current name`, `the rename reaches the server` |
+| 6 | Output-rate chart removed from the rail | **done** | — |
+
+The rename mirrors the TUI exactly, including **empty name = un-pin** (the
+server resumes auto-naming). Alt+Shift+R (raise) moved into the same handler,
+since one key can't be claimed in two places once Alt+R is a global chord.
+
+The rail's output-rate histogram is gone. An agent idles for a long stretch and
+then works for one, so the chart only ever showed a flat line or a spike —
+motion where information was supposed to be. The small card sparkline on the
+Observatory stays; at that size it reads as "this one has been busy", which is
+true. **What replaces it in the rail is an open question** — see the
+conversation; the rail currently carries the session facts and the PLAN panel.
+
 ## Standing items (unchanged)
 
 - **pi slash commands** — the picker is harness-aware (`slash::commands_for`),

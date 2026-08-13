@@ -41,7 +41,7 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
   permission
   raises a **modal question popup** navigable by mouse, number keys, ↑/↓ (or
   j/k), and Enter (Esc denies) → `T_PERM_RESP`. When the agent is running a plan
-  (`TodoWrite`), the activity rail shows a **PLAN** panel with a progress bar and
+  (`TodoWrite`), the right rail shows a **PLAN** panel with a progress bar and
   the checklist (done struck-through, the in-progress step highlighted).
   Switching to an agent pane puts the caret in its composer, so it is ready to
   type in; switching to a pty pane drops the caret so the keys reach the
@@ -61,6 +61,9 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
   Includes independent per-view **font sizes** (Terminal / GUI / Agent chat).
 - **Alt+O** — the Oracle panel (gradient orb; presentational for now).
 - **Alt+P** — the pair-phone QR.
+- **Alt+R** — rename the active pane (as the TUI does): the field starts on the
+  current name, Enter commits, and an **empty name un-pins** it so the server
+  goes back to auto-naming. **Alt+Shift+R** — raise the last session.
 - **Alt+N** — new agent (structured) pane; **Alt+Shift+N** — new shell pane.
   **Alt+←/→**, **Alt+↑/↓** and **Alt+1–9** switch panes (both arrow axes work
   whatever the tab orientation); **Alt+W** closes the active pane; **Alt+Z**

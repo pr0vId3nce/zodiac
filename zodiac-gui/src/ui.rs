@@ -56,6 +56,8 @@ pub enum Overlay {
     NewAgent,
     /// Session picker for `/resume` in a structured claude pane.
     Resume,
+    /// Rename the active pane (Alt+R), as the TUI does.
+    Rename,
 }
 
 /// One selectable model for a harness in the new-agent picker.
@@ -108,6 +110,9 @@ pub struct UiState {
     pub resume_model: Option<String>,
     /// The pane `/resume` was invoked from — it resumes in place.
     pub resume_pane: Option<u64>,
+    /// Rename dialog (Alt+R): the pane being renamed and the edited name.
+    pub rename_pane: Option<u64>,
+    pub rename_buf: String,
     /// Measured transcript item heights per pane, used to cull off-screen
     /// turns. Rebuilt lazily as items render; cleared on a width change.
     pub item_heights: std::collections::HashMap<u64, Vec<f32>>,
@@ -242,6 +247,8 @@ pub enum UiAction {
     CyclePermMode(u64),
     /// Interrupt the turn this agent pane is running (Esc).
     Interrupt(u64),
+    /// Rename a pane. An empty name un-pins it (the server auto-names again).
+    Rename(u64, String),
 }
 
 /// Immutable view of the app state the UI reads for one frame.
@@ -381,9 +388,6 @@ pub fn build(
     if ui.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::P)) {
         st.overlay = Overlay::Pairing;
     }
-    if ui.input(|i| i.modifiers.alt && i.modifiers.shift && i.key_pressed(egui::Key::R)) {
-        st.overlay = Overlay::Raise;
-    }
     if d.screen != Screen::Focused {
         st.term_grid = None;
         st.term_rect = None;
@@ -408,6 +412,7 @@ pub fn build(
         Overlay::Raise => raise_dialog(ui, d, st, actions),
         Overlay::NewAgent => new_agent_dialog(ui, st, actions),
         Overlay::Resume => resume_dialog(ui, st, actions),
+        Overlay::Rename => rename_dialog(ui, st, actions),
         Overlay::None => {}
     }
     // A 1px edge border to define the borderless window (decorations are off).
@@ -2661,6 +2666,75 @@ fn turn_tool_box(
     });
 }
 
+/// Rename the active pane (Alt+R), matching the TUI: the field starts on the
+/// current name, Enter commits, and **an empty name un-pins** — the server
+/// goes back to auto-naming the pane and answers with `T_PANE_RENAMED`.
+fn rename_dialog(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<UiAction>) {
+    let screen = ui
+        .ctx()
+        .input(|i| i.raw.screen_rect)
+        .unwrap_or_else(|| ui.max_rect());
+    ui.painter().rect_filled(
+        screen,
+        CornerRadius::ZERO,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 150),
+    );
+    if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Escape)) {
+        st.overlay = Overlay::None;
+        return;
+    }
+    // Take Enter before the field renders. Relying on the TextEdit's
+    // `lost_focus()` meant the commit depended on egui's focus bookkeeping
+    // landing first, and the dialog silently did nothing when it didn't.
+    let commit = ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::Enter));
+    egui::Area::new(egui::Id::new("rename"))
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            Frame::NONE
+                .fill(theme::bg_card())
+                .stroke(Stroke::new(1.0, theme::LINE_BORDER_STRONG))
+                .corner_radius(CornerRadius::same(14))
+                .inner_margin(Margin::same(20))
+                .show(ui, |ui| {
+                    ui.set_width(420.0);
+                    ui.label(
+                        RichText::new("Rename pane")
+                            .color(theme::TEXT_PRIMARY)
+                            .size(17.0)
+                            .strong(),
+                    );
+                    ui.add_space(10.0);
+                    let id = egui::Id::new("rename_field");
+                    let edit = ui.add(
+                        egui::TextEdit::singleline(&mut st.rename_buf)
+                            .id(id)
+                            .desired_width(f32::INFINITY)
+                            .hint_text("(empty restores auto-naming)")
+                            .font(egui::FontId::proportional(14.0))
+                            .text_color(theme::TEXT_BODY),
+                    );
+                    if !ui.memory(|m| m.has_focus(id)) {
+                        edit.request_focus();
+                    }
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("enter rename · esc cancel")
+                            .color(theme::TEXT_GHOST)
+                            .size(11.0),
+                    );
+                });
+        });
+    if commit {
+        if let Some(pane) = st.rename_pane {
+            // 40 chars, as the TUI caps it.
+            let name: String = st.rename_buf.trim().chars().take(40).collect();
+            actions.push(UiAction::Rename(pane, name));
+        }
+        st.overlay = Overlay::None;
+    }
+}
+
 /// `/resume`: pick an earlier Claude Code session for this directory. The CLI
 /// can't run its own picker over a pipe ("/resume isn't available in this
 /// environment"), so zodiac lists the sessions and resumes the chosen one by
@@ -3801,26 +3875,11 @@ fn activity_rail(ui: &mut egui::Ui, d: &UiData) {
         return;
     };
     let ps = d.ps(p);
-    // Activity: output-rate histogram (last ~10 min of buckets).
-    ui.label(
-        RichText::new("ACTIVITY")
-            .color(theme::TEXT_GHOST)
-            .size(11.0)
-            .strong(),
-    );
-    ui.add_space(8.0);
-    let vals = rate_vals(p);
-    if vals.iter().any(|v| *v > 0) {
-        sparkline(ui, &vals, theme::STATUS_RAIL[2], 44.0, 6.0, 2.0);
-        ui.label(
-            RichText::new("output rate · last 10m")
-                .color(theme::TEXT_GHOST)
-                .size(11.0),
-        );
-    } else {
-        ui.label(RichText::new("idle").color(theme::TEXT_GHOST).size(12.0));
-    }
-    ui.add_space(16.0);
+    // The output-rate histogram used to head this rail. It was removed: an
+    // agent is idle for a long stretch and then busy for one, so the chart
+    // only ever showed a flat line or a spike — motion where information was
+    // supposed to be. (The small card sparkline on the Observatory stays; at
+    // that size it reads as "this one has been busy", which is true.)
     ui.label(
         RichText::new("SESSION")
             .color(theme::TEXT_GHOST)

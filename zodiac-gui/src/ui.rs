@@ -139,6 +139,26 @@ pub struct Probe {
     pub user_bubble: Option<egui::Rect>,
     /// How many slash-command rows the picker offered (0 = closed).
     pub slash_rows: usize,
+    /// The chrome that can be collapsed, when it was drawn at all: the top
+    /// bar, the pane sidebar and the activity rail.
+    pub topbar: Option<egui::Rect>,
+    pub sidebar: Option<egui::Rect>,
+    pub rail: Option<egui::Rect>,
+}
+
+impl Probe {
+    /// An empty probe. `const` so the frame-local can be built in a const
+    /// block; `Default` isn't usable there.
+    pub const fn empty() -> Self {
+        Self {
+            transcript: None,
+            user_bubble: None,
+            slash_rows: 0,
+            topbar: None,
+            sidebar: None,
+            rail: None,
+        }
+    }
 }
 
 /// Where a terminal's grid is actually drawn, in egui points: its top-left,
@@ -247,6 +267,10 @@ pub struct UiData<'a> {
     /// Structured-transcript font scale relative to the GUI zoom (agent size ÷
     /// gui size), so the agent transcript sizes independently of the chrome.
     pub agent_scale: f32,
+    /// Focused view: the pane sidebar / activity rail are collapsed
+    /// (Ctrl+← / Ctrl+→). Persisted in settings.
+    pub hide_sidebar: bool,
+    pub hide_rail: bool,
 }
 
 impl UiData<'_> {
@@ -351,6 +375,12 @@ pub fn build(
     if ui.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::O)) {
         st.overlay = Overlay::Oracle;
     }
+    // Pair-phone had no shortcut: its only route was the top-bar button, which
+    // the focused view no longer draws. Everything else up there already had
+    // one (⌘K palette, ⌘, settings, Alt+O oracle).
+    if ui.input(|i| i.modifiers.alt && i.key_pressed(egui::Key::P)) {
+        st.overlay = Overlay::Pairing;
+    }
     if ui.input(|i| i.modifiers.alt && i.modifiers.shift && i.key_pressed(egui::Key::R)) {
         st.overlay = Overlay::Raise;
     }
@@ -358,7 +388,14 @@ pub fn build(
         st.term_grid = None;
         st.term_rect = None;
     }
-    title_bar(ui, d, st, actions);
+    // The top bar (wordmark, session chip, chrome buttons, host vitals) is
+    // Observatory chrome: it belongs to the overview, not to a pane you are
+    // working in, where it only steals 52px from the terminal. The window
+    // controls live there too, so on the focused screen the window is moved
+    // and closed by the WM — Alt+Z brings the bar back with the Observatory.
+    if d.screen == Screen::Observatory {
+        title_bar(ui, d, st, actions);
+    }
     match d.screen {
         Screen::Observatory => observatory(ui, d, actions),
         Screen::Focused => focused(ui, d, st, actions),
@@ -1015,24 +1052,34 @@ fn focused(root: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
     // Code's interrupt key, so in a pane running claude — terminal or
     // structured — stealing it meant one keystroke both cancelled the turn
     // and threw you out of the pane you were watching. Alt+Z is the way back.
-    egui::Panel::left("sidebar")
-        .exact_size(268.0)
-        .resizable(false)
-        .frame(
-            Frame::NONE
-                .fill(theme::bg_chrome())
-                .inner_margin(Margin::same(10)),
-        )
-        .show(root, |ui| sidebar(ui, d, actions));
-    egui::Panel::right("rail")
-        .exact_size(288.0)
-        .resizable(false)
-        .frame(
-            Frame::NONE
-                .fill(theme::bg_panel())
-                .inner_margin(Margin::same(14)),
-        )
-        .show(root, |ui| activity_rail(ui, d));
+    // Both flanking panels collapse (Ctrl+← / Ctrl+→), giving the pane the
+    // full width. Not drawing them at all — rather than drawing them zero
+    // width — is what lets the central panel, and with it the pty's measured
+    // grid, actually reclaim the space.
+    if !d.hide_sidebar {
+        let r = egui::Panel::left("sidebar")
+            .exact_size(268.0)
+            .resizable(false)
+            .frame(
+                Frame::NONE
+                    .fill(theme::bg_chrome())
+                    .inner_margin(Margin::same(10)),
+            )
+            .show(root, |ui| sidebar(ui, d, actions));
+        probe_set(|p| p.sidebar = Some(r.response.rect));
+    }
+    if !d.hide_rail {
+        let r = egui::Panel::right("rail")
+            .exact_size(288.0)
+            .resizable(false)
+            .frame(
+                Frame::NONE
+                    .fill(theme::bg_panel())
+                    .inner_margin(Margin::same(14)),
+            )
+            .show(root, |ui| activity_rail(ui, d));
+        probe_set(|p| p.rail = Some(r.response.rect));
+    }
     egui::CentralPanel::default()
         .frame(
             Frame::NONE
@@ -1338,11 +1385,7 @@ fn spinner_frame(t: f64) -> char {
 
 thread_local! {
     /// Frame-local probe, drained into `UiState` at the end of the frame.
-    static PROBE: std::cell::Cell<Probe> = const { std::cell::Cell::new(Probe {
-        transcript: None,
-        user_bubble: None,
-        slash_rows: 0,
-    }) };
+    static PROBE: std::cell::Cell<Probe> = const { std::cell::Cell::new(Probe::empty()) };
 
     /// The agent-pane font scale (structured-transcript size ÷ GUI zoom), set
     /// only for the duration of [`transcript_view`]. 1.0 everywhere else, so
@@ -1547,21 +1590,22 @@ fn st_probe_bubble(rect: egui::Rect) {
     });
 }
 
-fn st_probe_slash(rows: usize) {
+/// Record something in this frame's probe.
+fn probe_set(f: impl FnOnce(&mut Probe)) {
     PROBE.with(|c| {
         let mut p = c.get();
-        p.slash_rows = rows;
+        f(&mut p);
         c.set(p);
     });
 }
 
+fn st_probe_slash(rows: usize) {
+    probe_set(|p| p.slash_rows = rows);
+}
+
 /// Take and reset the frame-local probe.
 pub fn take_probe() -> Probe {
-    PROBE.replace(Probe {
-        transcript: None,
-        user_bubble: None,
-        slash_rows: 0,
-    })
+    PROBE.replace(Probe::empty())
 }
 
 /// Scale a transcript font size by the current agent-pane factor.
@@ -4123,7 +4167,7 @@ fn toggle_row(ui: &mut egui::Ui, label: &str, field: &mut bool, actions: &mut Ve
 /// The 52px title bar: amber mark, "zodiac", session chip, chrome buttons,
 /// host vitals.
 fn title_bar(root: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<UiAction>) {
-    egui::Panel::top("titlebar")
+    let r = egui::Panel::top("titlebar")
         .exact_size(52.0)
         .frame(
             Frame::NONE
@@ -4189,6 +4233,7 @@ fn title_bar(root: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Ve
                 });
             });
         });
+    probe_set(|p| p.topbar = Some(r.response.rect));
 }
 
 /// A borderless window-control glyph button (minimize / close).

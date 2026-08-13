@@ -49,10 +49,18 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
   Claude Code's interrupt key, and while an agent pane is working it stops the
   turn — over the control protocol for structured panes, as the keystroke for
   pty panes.
+- **Chrome that gets out of the way** — the top bar (wordmark, session chip,
+  chrome buttons, host vitals) is Observatory chrome: the focused view doesn't
+  draw it, so a pane keeps those 52px. **Ctrl+←** collapses the pane sidebar
+  and **Ctrl+→** the activity rail; both persist, and the pty is re-measured so
+  the terminal actually grows into the reclaimed width. With the bar hidden the
+  window is moved and closed by the WM (Alt+Z brings it back with the
+  Observatory), and every button it carried has a key: ⌘K, ⌘, , Alt+O, Alt+P.
 - **⌘K / Ctrl+K** — command palette (fuzzy pane jump; ↑/↓, Enter, Esc).
 - **⌘, / Ctrl+,** — settings (grouped; edits real `config.json` keys, persists).
   Includes independent per-view **font sizes** (Terminal / GUI / Agent chat).
 - **Alt+O** — the Oracle panel (gradient orb; presentational for now).
+- **Alt+P** — the pair-phone QR.
 - **Alt+N** — new agent (structured) pane; **Alt+Shift+N** — new shell pane.
   **Alt+←/→**, **Alt+↑/↓** and **Alt+1–9** switch panes (both arrow axes work
   whatever the tab orientation); **Alt+W** closes the active pane; **Alt+Z**

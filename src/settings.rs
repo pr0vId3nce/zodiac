@@ -116,6 +116,15 @@ pub struct Settings {
     /// the TUI's sidebar). Ignored by the TUI/server.
     #[serde(default)]
     pub gui_tabs: String,
+    /// GUI focused-view chrome: "hide" collapses the pane sidebar (Ctrl+←);
+    /// anything else shows it. Persisted so a collapsed panel stays collapsed
+    /// across restarts. GUI-only.
+    #[serde(default)]
+    pub gui_sidebar: String,
+    /// GUI focused-view chrome: "hide" collapses the activity rail (Ctrl+→).
+    /// GUI-only.
+    #[serde(default)]
+    pub gui_rail: String,
     /// GUI backdrop preset: "oled" (#000, default), "charcoal", "midnight",
     /// "slate". GUI-only.
     #[serde(default)]
@@ -300,6 +309,16 @@ impl Settings {
             "side" => "side",
             _ => "top",
         }
+    }
+
+    /// Is the focused view's pane sidebar collapsed? (Ctrl+← toggles it.)
+    pub fn gui_sidebar_hidden(&self) -> bool {
+        self.gui_sidebar == "hide"
+    }
+
+    /// Is the focused view's activity rail collapsed? (Ctrl+→ toggles it.)
+    pub fn gui_rail_hidden(&self) -> bool {
+        self.gui_rail == "hide"
     }
 
     /// GUI backdrop preset name (default "oled"). The GUI maps it to RGB.

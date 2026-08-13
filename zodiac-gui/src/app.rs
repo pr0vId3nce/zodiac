@@ -140,6 +140,12 @@ pub struct GuiApp {
     e2e_stream_ticks: usize,
     /// Interrupt frames sent (the e2e asserts Esc reaches the wire).
     e2e_interrupts: usize,
+    /// e2e: terminal columns before a chrome toggle, whether Ctrl+←/→ were
+    /// claimed as global chords, and the user's real panel settings to put
+    /// back (the toggles persist to config.json).
+    e2e_cols: u16,
+    e2e_chord_ok: bool,
+    e2e_chrome_saved: (String, String),
     /// e2e: hold this pane at "working" across state polls, so the Esc gate
     /// is exercised without prompting a real agent (which would spend tokens
     /// and make the check race the server's next `T_STATE`).
@@ -206,6 +212,9 @@ impl GuiApp {
             e2e_pane_before: (0, 0),
             e2e_stream_ticks: 0,
             e2e_interrupts: 0,
+            e2e_cols: 0,
+            e2e_chord_ok: false,
+            e2e_chrome_saved: (String::new(), String::new()),
             e2e_force_working: None,
         }
     }
@@ -1025,6 +1034,102 @@ impl GuiApp {
                 self.e2e_after(300);
             }
 
+            // --- chrome that gets out of the way -------------------------
+            40 => {
+                // The toggles persist to the real config.json, so remember
+                // what the user had and put it back at the end of the run.
+                self.e2e_chrome_saved = (
+                    self.settings.gui_sidebar.clone(),
+                    self.settings.gui_rail.clone(),
+                );
+                self.settings.gui_sidebar = "show".into();
+                self.settings.gui_rail = "show".into();
+                self.screen = Screen::Observatory;
+                self.request_redraw();
+                self.e2e_after(600);
+            }
+            41 => {
+                let drawn = self.ui_state.probe.topbar.is_some();
+                self.check(
+                    "the top bar is drawn on the Observatory",
+                    drawn,
+                    format!("topbar={:?}", self.ui_state.probe.topbar),
+                );
+                self.focus(0); // the shell pane: it has a measurable grid
+                self.screen = Screen::Focused;
+                self.request_redraw();
+                self.e2e_after(800);
+            }
+            42 => {
+                let p = self.ui_state.probe;
+                self.check(
+                    "the top bar is hidden in the focused view",
+                    p.topbar.is_none() && p.sidebar.is_some() && p.rail.is_some(),
+                    format!(
+                        "topbar={:?} sidebar={} rail={}",
+                        p.topbar,
+                        p.sidebar.is_some(),
+                        p.rail.is_some()
+                    ),
+                );
+                // Baseline width, then collapse the sidebar through the real
+                // key path (Ctrl+← must also be claimed as a global chord, or
+                // it would never arrive while a composer had focus).
+                self.e2e_cols = self.ui_state.term_grid.map(|g| g.1).unwrap_or(0);
+                self.mods = ModifiersState::CONTROL;
+                let claimed = self.is_global_chord(&Key::Named(NamedKey::ArrowLeft))
+                    && self.is_global_chord(&Key::Named(NamedKey::ArrowRight));
+                self.e2e_chord_ok = claimed;
+                self.on_key_logical(&Key::Named(NamedKey::ArrowLeft));
+                self.mods = ModifiersState::empty();
+                self.request_redraw();
+                self.e2e_after(900);
+            }
+            43 => {
+                let cols = self.ui_state.term_grid.map(|g| g.1).unwrap_or(0);
+                let was = self.e2e_cols;
+                self.check(
+                    "ctrl+left collapses the sidebar and the pty reclaims it",
+                    self.ui_state.probe.sidebar.is_none() && cols > was && self.e2e_chord_ok,
+                    format!("cols {was} -> {cols}, chord_claimed={}", self.e2e_chord_ok),
+                );
+                self.e2e_cols = cols;
+                self.mods = ModifiersState::CONTROL;
+                self.on_key_logical(&Key::Named(NamedKey::ArrowRight));
+                self.mods = ModifiersState::empty();
+                self.request_redraw();
+                self.e2e_after(900);
+            }
+            44 => {
+                let cols = self.ui_state.term_grid.map(|g| g.1).unwrap_or(0);
+                let was = self.e2e_cols;
+                self.check(
+                    "ctrl+right collapses the activity rail too",
+                    self.ui_state.probe.rail.is_none() && cols > was,
+                    format!("cols {was} -> {cols}"),
+                );
+                // Both again: the toggles must restore, not just hide.
+                self.mods = ModifiersState::CONTROL;
+                self.on_key_logical(&Key::Named(NamedKey::ArrowLeft));
+                self.on_key_logical(&Key::Named(NamedKey::ArrowRight));
+                self.mods = ModifiersState::empty();
+                self.request_redraw();
+                self.e2e_after(900);
+            }
+            45 => {
+                let p = self.ui_state.probe;
+                self.check(
+                    "the toggles restore both panels",
+                    p.sidebar.is_some() && p.rail.is_some(),
+                    format!("sidebar={} rail={}", p.sidebar.is_some(), p.rail.is_some()),
+                );
+                let (s, r) = self.e2e_chrome_saved.clone();
+                self.settings.gui_sidebar = s;
+                self.settings.gui_rail = r;
+                self.settings.save();
+                self.e2e_after(300);
+            }
+
             // --- report -------------------------------------------------
             _ => {
                 let total = self.e2e_results.len();
@@ -1404,6 +1509,22 @@ impl GuiApp {
         self.on_key_logical(&ev.logical_key);
     }
 
+    /// Collapse or restore one of the focused view's flanking panels — the
+    /// pane sidebar (`left`) or the activity rail. Persisted, so a panel you
+    /// closed stays closed next launch. The pty is re-measured from the wider
+    /// central panel on the next frame, so the terminal actually grows into
+    /// the space rather than being letterboxed in it.
+    fn toggle_chrome(&mut self, left: bool) {
+        let field = if left {
+            &mut self.settings.gui_sidebar
+        } else {
+            &mut self.settings.gui_rail
+        };
+        *field = if field == "hide" { "show" } else { "hide" }.to_string();
+        self.settings.save();
+        self.request_redraw();
+    }
+
     /// Chords that belong to the window rather than to whatever widget has
     /// focus: pane navigation, new/close pane, and the jump to the
     /// Observatory. `window_event` routes these straight to `on_key_logical`
@@ -1432,9 +1553,20 @@ impl GuiApp {
                 return true;
             }
         }
-        // Ctrl+PageUp/PageDown, and ⌘⇧[ / ⌘⇧] on macOS, also switch panes.
+        // Ctrl+PageUp/PageDown switch panes; Ctrl+←/→ collapse the sidebar and
+        // the activity rail. The latter must be global for the same reason as
+        // the Alt chords, and additionally so a terminal pane doesn't receive
+        // the keystroke as well as toggling the panel.
         if self.mods.control_key()
-            && matches!(logical, Key::Named(NamedKey::PageUp | NamedKey::PageDown))
+            && matches!(
+                logical,
+                Key::Named(
+                    NamedKey::PageUp
+                        | NamedKey::PageDown
+                        | NamedKey::ArrowLeft
+                        | NamedKey::ArrowRight
+                )
+            )
         {
             return true;
         }
@@ -1541,9 +1673,18 @@ impl GuiApp {
                 }
             }
         }
-        // Pane-switch shortcuts (documented in README): Ctrl+PageUp/Down.
+        // Chrome shortcuts: Ctrl+←/→ collapse the sidebar / activity rail,
+        // giving the pane the full width. Pane-switch: Ctrl+PageUp/Down.
         if self.mods.control_key() {
             match *logical {
+                Key::Named(NamedKey::ArrowLeft) => {
+                    self.toggle_chrome(true);
+                    return;
+                }
+                Key::Named(NamedKey::ArrowRight) => {
+                    self.toggle_chrome(false);
+                    return;
+                }
                 Key::Named(NamedKey::PageUp) => {
                     let n = self.panes.len();
                     if n > 0 {
@@ -2091,6 +2232,8 @@ impl GuiApp {
         let gui_font = self.settings.gui_font();
         let term_scale = self.settings.term_font() / gui_font;
         let agent_scale = self.settings.agent_font() / gui_font;
+        let hide_sidebar = self.settings.gui_sidebar_hidden();
+        let hide_rail = self.settings.gui_rail_hidden();
         self.egui_ctx.set_zoom_factor(gui_font);
         let full = self.egui_ctx.run_ui(raw, |ui| {
             let active_id = self.panes.get(self.active).map(|p| p.id);
@@ -2111,6 +2254,8 @@ impl GuiApp {
                 home_view: home_view.as_str(),
                 term_scale,
                 agent_scale,
+                hide_sidebar,
+                hide_rail,
             };
             crate::ui::build(
                 ui,

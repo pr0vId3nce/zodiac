@@ -83,11 +83,18 @@ pub struct HarnessInfo {
 #[derive(Default)]
 pub struct AgentPicker {
     pub harnesses: Vec<HarnessInfo>,
-    /// 0 = choosing a harness, 1 = choosing a model.
+    /// Which question is on screen: [`STEP_KIND`], [`STEP_HARNESS`] or
+    /// [`STEP_MODEL`].
     pub step: usize,
+    pub k_sel: usize,
     pub h_sel: usize,
     pub m_sel: usize,
 }
+
+/// Terminal or Chat — the first thing Alt+N asks.
+pub const STEP_KIND: usize = 0;
+pub const STEP_HARNESS: usize = 1;
+pub const STEP_MODEL: usize = 2;
 
 /// Mutable UI state egui edits in place across frames (buffers + overlays).
 #[derive(Default)]
@@ -3342,6 +3349,84 @@ pub(crate) fn term_selection_text(p: &CPane, sel: Option<TermSel>) -> Option<Str
     }
 }
 
+/// How a block-element character fills its cell: either a set of sub-areas in
+/// unit coordinates (x0, y0, x1, y1 as fractions of the cell), or a shaded
+/// wash for the ░▒▓ family.
+#[derive(Clone, Debug, PartialEq)]
+enum BlockFill {
+    Rects(Vec<[f32; 4]>),
+    Shade(f32),
+}
+
+/// Map a Unicode block element (U+2580–U+259F) to the area it covers.
+///
+/// Drawing these from the font is what puts seams through block-built art: the
+/// glyphs are laid out to the *font's* em box, so at our cell size they land a
+/// fraction of a pixel short and the row below shows through. Painting the
+/// geometry ourselves on the snapped cell grid makes neighbours meet exactly.
+fn block_fill(c: char) -> Option<BlockFill> {
+    // Quadrant bits: 1 = upper-left, 2 = upper-right, 4 = lower-left,
+    // 8 = lower-right.
+    let quads = |m: u8| {
+        let mut v = Vec::new();
+        if m & 1 != 0 {
+            v.push([0.0, 0.0, 0.5, 0.5]);
+        }
+        if m & 2 != 0 {
+            v.push([0.5, 0.0, 1.0, 0.5]);
+        }
+        if m & 4 != 0 {
+            v.push([0.0, 0.5, 0.5, 1.0]);
+        }
+        if m & 8 != 0 {
+            v.push([0.5, 0.5, 1.0, 1.0]);
+        }
+        BlockFill::Rects(v)
+    };
+    let one = |r: [f32; 4]| BlockFill::Rects(vec![r]);
+    Some(match c {
+        '█' => one([0.0, 0.0, 1.0, 1.0]),
+        '▀' => one([0.0, 0.0, 1.0, 0.5]),
+        '▄' => one([0.0, 0.5, 1.0, 1.0]),
+        '▐' => one([0.5, 0.0, 1.0, 1.0]),
+        '▔' => one([0.0, 0.0, 1.0, 0.125]),
+        '▕' => one([0.875, 0.0, 1.0, 1.0]),
+        // U+2581..U+2587: lower 1/8 through 7/8.
+        '▁'..='▇' => {
+            let eighths = (c as u32 - 0x2580) as f32 / 8.0;
+            one([0.0, 1.0 - eighths, 1.0, 1.0])
+        }
+        // U+2589..U+258F: left 7/8 through 1/8 (U+258C ▌ is the half).
+        '▉'..='▏' => {
+            let eighths = (0x2590 - c as u32) as f32 / 8.0;
+            one([0.0, 0.0, eighths, 1.0])
+        }
+        '░' => BlockFill::Shade(0.25),
+        '▒' => BlockFill::Shade(0.5),
+        '▓' => BlockFill::Shade(0.75),
+        '▖' => quads(4),
+        '▗' => quads(8),
+        '▘' => quads(1),
+        '▙' => quads(1 | 4 | 8),
+        '▚' => quads(1 | 8),
+        '▛' => quads(1 | 2 | 4),
+        '▜' => quads(1 | 2 | 8),
+        '▝' => quads(2),
+        '▞' => quads(2 | 4),
+        '▟' => quads(2 | 4 | 8),
+        _ => return None,
+    })
+}
+
+/// Resolve unit-square coordinates against a cell rect.
+fn sub_rect(cell: Rect, f: [f32; 4]) -> Rect {
+    let (w, h) = (cell.width(), cell.height());
+    Rect::from_min_max(
+        egui::pos2(cell.min.x + f[0] * w, cell.min.y + f[1] * h),
+        egui::pos2(cell.min.x + f[2] * w, cell.min.y + f[3] * h),
+    )
+}
+
 fn terminal_view(ui: &mut egui::Ui, st: &mut UiState, p: &CPane, scale: f32) {
     use crate::palette::{cell_colors, CellStyle};
     // The pty owns the keyboard here: drop any widget focus egui may still be
@@ -3436,6 +3521,24 @@ fn terminal_view(ui: &mut egui::Ui, st: &mut UiState, p: &CPane, scale: f32) {
                         }
                     }
                     let painter = ui.painter_at(rect);
+                    // Cell edges, snapped to physical pixels and *shared*
+                    // between neighbours: cell N's right edge is cell N+1's
+                    // left edge, exactly. Painting each cell at a fractional
+                    // x + width left hairline gaps between background quads
+                    // (the old `+ 0.5` fudge overlapped them instead, which
+                    // double-blended edges rather than fixing them). Those
+                    // gaps are the lines running through block-drawn art.
+                    let ppp = ui.ctx().pixels_per_point();
+                    let snap = |v: f32| (v * ppp).round() / ppp;
+                    let xs: Vec<f32> = (0..=cols).map(|c| snap(o.x + c as f32 * cw)).collect();
+                    let ys: Vec<f32> = (0..=rows).map(|r| snap(o.y + r as f32 * ch)).collect();
+                    let cell_rect = |row: usize, col: usize, wide: bool| {
+                        let c1 = (col + if wide { 2 } else { 1 }).min(cols as usize);
+                        Rect::from_min_max(
+                            egui::pos2(xs[col], ys[row]),
+                            egui::pos2(xs[c1], ys[row + 1]),
+                        )
+                    };
                     for row in 0..rows {
                         for col in 0..cols {
                             let Some(cell) = screen.cell(row, col) else {
@@ -3452,45 +3555,65 @@ fn terminal_view(ui: &mut egui::Ui, st: &mut UiState, p: &CPane, scale: f32) {
                                 inverse: cell.inverse(),
                             };
                             let (fg, bg) = cell_colors(&style);
-                            let x = o.x + col as f32 * cw;
-                            let y = o.y + row as f32 * ch;
+                            let cr = cell_rect(row as usize, col as usize, cell.is_wide());
+                            let (x, y) = (cr.min.x, cr.min.y);
                             if let Some(bg) = bg {
-                                painter.rect_filled(
-                                    Rect::from_min_size(
-                                        egui::pos2(x, y),
-                                        egui::vec2(cw + 0.5, ch + 0.5),
-                                    ),
-                                    CornerRadius::ZERO,
-                                    c32(bg),
-                                );
+                                painter.rect_filled(cr, CornerRadius::ZERO, c32(bg));
                             }
                             if st.term_sel.is_some_and(|s| {
                                 s.pane == p.id && s.contains(row as usize, col as usize)
                             }) {
                                 painter.rect_filled(
-                                    Rect::from_min_size(
-                                        egui::pos2(x, y),
-                                        egui::vec2(cw + 0.5, ch + 0.5),
-                                    ),
+                                    cr,
                                     CornerRadius::ZERO,
                                     fade(theme::accent(), 0.30),
                                 );
                             }
                             let contents = cell.contents();
                             if !contents.is_empty() && contents != " " {
-                                painter.text(
-                                    egui::pos2(x, y),
-                                    egui::Align2::LEFT_TOP,
-                                    contents,
-                                    font.clone(),
-                                    c32(fg),
-                                );
+                                // Block elements are painted as rectangles on
+                                // the snapped cell grid rather than drawn from
+                                // the font: a font's block glyphs are sized to
+                                // its own metrics, not to our cell, so they
+                                // leave a sliver between rows wherever art is
+                                // built out of them (the Claude Code mascot).
+                                let one = contents
+                                    .chars()
+                                    .next()
+                                    .filter(|_| contents.chars().nth(1).is_none());
+                                match one.and_then(block_fill) {
+                                    Some(BlockFill::Rects(parts)) => {
+                                        for f in parts {
+                                            painter.rect_filled(
+                                                sub_rect(cr, f),
+                                                CornerRadius::ZERO,
+                                                c32(fg),
+                                            );
+                                        }
+                                    }
+                                    Some(BlockFill::Shade(a)) => {
+                                        painter.rect_filled(
+                                            cr,
+                                            CornerRadius::ZERO,
+                                            fade(c32(fg), a),
+                                        );
+                                    }
+                                    None => {
+                                        painter.text(
+                                            egui::pos2(x, y),
+                                            egui::Align2::LEFT_TOP,
+                                            contents,
+                                            font.clone(),
+                                            c32(fg),
+                                        );
+                                    }
+                                }
                             }
                             if cell.underline() {
                                 painter.rect_filled(
-                                    Rect::from_min_size(
-                                        egui::pos2(x, y + ch - 1.5),
-                                        egui::vec2(cw, 1.0),
+                                    Rect::from_min_max(
+                                        egui::pos2(x, snap(cr.max.y - 1.5)),
+                                        egui::pos2(cr.max.x, snap(cr.max.y - 0.5)),
                                     ),
                                     CornerRadius::ZERO,
                                     c32(fg),
@@ -3503,10 +3626,7 @@ fn terminal_view(ui: &mut egui::Ui, st: &mut UiState, p: &CPane, scale: f32) {
                         let (r, c) = screen.cursor_position();
                         if r < rows && c < cols {
                             painter.rect_filled(
-                                Rect::from_min_size(
-                                    egui::pos2(o.x + c as f32 * cw, o.y + r as f32 * ch),
-                                    egui::vec2(cw, ch),
-                                ),
+                                cell_rect(r as usize, c as usize, false),
                                 CornerRadius::ZERO,
                                 Color32::from_rgba_unmultiplied(230, 230, 230, 90),
                             );
@@ -3593,10 +3713,25 @@ fn agent_activate(
     i: usize,
 ) {
     let n_h = st.agent_picker.harnesses.len();
+    // Terminal or Chat. Terminal never depends on a harness being installed,
+    // so this is answered before anything looks at the harness list.
+    if step == STEP_KIND {
+        st.agent_picker.k_sel = i;
+        if i == 0 {
+            actions.push(UiAction::NewShell);
+            st.overlay = Overlay::None;
+        } else {
+            // One harness → skip straight to its models.
+            st.agent_picker.step = if n_h > 1 { STEP_HARNESS } else { STEP_MODEL };
+            st.agent_picker.h_sel = 0;
+            st.agent_picker.m_sel = 0;
+        }
+        return;
+    }
     if n_h == 0 {
         return;
     }
-    if step == 0 {
+    if step == STEP_HARNESS {
         let i = i.min(n_h - 1);
         st.agent_picker.h_sel = i;
         let h = &st.agent_picker.harnesses[i];
@@ -3610,7 +3745,7 @@ fn agent_activate(
             });
             st.overlay = Overlay::None;
         } else {
-            st.agent_picker.step = 1;
+            st.agent_picker.step = STEP_MODEL;
             st.agent_picker.m_sel = 0;
         }
     } else {
@@ -3639,7 +3774,9 @@ fn new_agent_dialog(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<UiAct
         CornerRadius::ZERO,
         Color32::from_rgba_unmultiplied(0, 0, 0, 150),
     );
-    if st.agent_picker.harnesses.is_empty() {
+    // "No harnesses" only blocks the *chat* branch — a terminal pane needs
+    // nothing installed, so the kind question is always answerable.
+    if st.agent_picker.harnesses.is_empty() && st.agent_picker.step != STEP_KIND {
         if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
             st.overlay = Overlay::None;
         }
@@ -3675,10 +3812,21 @@ fn new_agent_dialog(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<UiAct
 
     let step = st.agent_picker.step;
     let n_h = st.agent_picker.harnesses.len();
-    let h_sel = st.agent_picker.h_sel.min(n_h - 1);
-    let (title, rows): (String, Vec<(String, String)>) = if step == 0 {
+    let h_sel = st.agent_picker.h_sel.min(n_h.saturating_sub(1));
+    let (title, rows): (String, Vec<(String, String)>) = if step == STEP_KIND {
         (
-            "New agent · choose a harness".to_string(),
+            "New pane".to_string(),
+            vec![
+                ("Terminal".into(), "a shell — run anything".into()),
+                (
+                    "Chat".into(),
+                    "a structured agent pane, with a composer".into(),
+                ),
+            ],
+        )
+    } else if step == STEP_HARNESS {
+        (
+            "Chat · choose a harness".to_string(),
             st.agent_picker
                 .harnesses
                 .iter()
@@ -3723,10 +3871,10 @@ fn new_agent_dialog(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<UiAct
                 num = Some(n);
             }
         }
-        let cur = if step == 0 {
-            &mut st.agent_picker.h_sel
-        } else {
-            &mut st.agent_picker.m_sel
+        let cur = match step {
+            STEP_KIND => &mut st.agent_picker.k_sel,
+            STEP_HARNESS => &mut st.agent_picker.h_sel,
+            _ => &mut st.agent_picker.m_sel,
         };
         if count > 0 {
             if down {
@@ -3745,11 +3893,15 @@ fn new_agent_dialog(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<UiAct
         }
     });
     if back {
-        if step == 1 && n_h > 1 {
-            st.agent_picker.step = 0;
-        } else {
-            st.overlay = Overlay::None;
-        }
+        // Esc walks back a step, closing only from the first question.
+        st.agent_picker.step = match step {
+            STEP_MODEL if n_h > 1 => STEP_HARNESS,
+            STEP_MODEL | STEP_HARNESS => STEP_KIND,
+            _ => {
+                st.overlay = Overlay::None;
+                STEP_KIND
+            }
+        };
         return;
     }
     if let Some(i) = activate {
@@ -3757,10 +3909,10 @@ fn new_agent_dialog(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<UiAct
         return;
     }
 
-    let sel = if step == 0 {
-        st.agent_picker.h_sel
-    } else {
-        st.agent_picker.m_sel
+    let sel = match step {
+        STEP_KIND => st.agent_picker.k_sel,
+        STEP_HARNESS => st.agent_picker.h_sel,
+        _ => st.agent_picker.m_sel,
     }
     .min(count.saturating_sub(1));
     let mut clicked: Option<usize> = None;
@@ -5162,6 +5314,87 @@ mod inline_link_tests {
         );
         // "www." with no host is not a link.
         assert!(urls("the www. prefix").is_empty());
+    }
+}
+
+#[cfg(test)]
+mod block_tests {
+    use super::*;
+
+    #[test]
+    fn halves_and_full_cover_their_share() {
+        assert_eq!(
+            block_fill('█'),
+            Some(BlockFill::Rects(vec![[0.0, 0.0, 1.0, 1.0]]))
+        );
+        assert_eq!(
+            block_fill('▀'),
+            Some(BlockFill::Rects(vec![[0.0, 0.0, 1.0, 0.5]]))
+        );
+        assert_eq!(
+            block_fill('▄'),
+            Some(BlockFill::Rects(vec![[0.0, 0.5, 1.0, 1.0]]))
+        );
+        // The half-block pair must tile the cell exactly, or block art shows a
+        // seam along every row boundary — the bug this exists to fix.
+        let (Some(BlockFill::Rects(top)), Some(BlockFill::Rects(bot))) =
+            (block_fill('▀'), block_fill('▄'))
+        else {
+            panic!("halves must be rects")
+        };
+        assert_eq!(
+            top[0][3], bot[0][1],
+            "upper half must end where the lower begins"
+        );
+    }
+
+    #[test]
+    fn eighths_run_the_right_way() {
+        // U+2581 is the *thinnest* lower block, U+2587 the thickest.
+        let low = |c: char| match block_fill(c) {
+            Some(BlockFill::Rects(v)) => v[0],
+            other => panic!("{c:?} -> {other:?}"),
+        };
+        assert_eq!(low('▁'), [0.0, 0.875, 1.0, 1.0]);
+        assert_eq!(low('▇'), [0.0, 0.125, 1.0, 1.0]);
+        // U+2589 is the *widest* left block, U+258F the thinnest, and U+258C
+        // (in the middle of that range) is exactly the left half.
+        assert_eq!(low('▉'), [0.0, 0.0, 0.875, 1.0]);
+        assert_eq!(low('▌'), [0.0, 0.0, 0.5, 1.0]);
+        assert_eq!(low('▏'), [0.0, 0.0, 0.125, 1.0]);
+    }
+
+    #[test]
+    fn quadrants_pick_the_right_corners() {
+        let ul = [0.0, 0.0, 0.5, 0.5];
+        let ur = [0.5, 0.0, 1.0, 0.5];
+        let ll = [0.0, 0.5, 0.5, 1.0];
+        let lr = [0.5, 0.5, 1.0, 1.0];
+        assert_eq!(block_fill('▘'), Some(BlockFill::Rects(vec![ul])));
+        assert_eq!(block_fill('▝'), Some(BlockFill::Rects(vec![ur])));
+        assert_eq!(block_fill('▖'), Some(BlockFill::Rects(vec![ll])));
+        assert_eq!(block_fill('▗'), Some(BlockFill::Rects(vec![lr])));
+        assert_eq!(block_fill('▚'), Some(BlockFill::Rects(vec![ul, lr])));
+        assert_eq!(block_fill('▞'), Some(BlockFill::Rects(vec![ur, ll])));
+        assert_eq!(block_fill('▟'), Some(BlockFill::Rects(vec![ur, ll, lr])));
+    }
+
+    #[test]
+    fn shades_and_non_blocks() {
+        assert_eq!(block_fill('░'), Some(BlockFill::Shade(0.25)));
+        assert_eq!(block_fill('▓'), Some(BlockFill::Shade(0.75)));
+        // Ordinary text and box-drawing keep going through the font.
+        assert_eq!(block_fill('A'), None);
+        assert_eq!(block_fill('─'), None);
+        assert_eq!(block_fill(' '), None);
+    }
+
+    #[test]
+    fn sub_rect_resolves_against_the_cell() {
+        let cell = Rect::from_min_max(egui::pos2(10.0, 20.0), egui::pos2(20.0, 40.0));
+        let lower = sub_rect(cell, [0.0, 0.5, 1.0, 1.0]);
+        assert_eq!(lower.min, egui::pos2(10.0, 30.0));
+        assert_eq!(lower.max, egui::pos2(20.0, 40.0));
     }
 }
 

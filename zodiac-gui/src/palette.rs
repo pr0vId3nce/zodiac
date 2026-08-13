@@ -5,7 +5,11 @@
 /// Default foreground/background of the GUI theme (matches the dark
 /// clear color the S3 prototype settled on).
 pub const DEFAULT_FG: [u8; 3] = [220, 220, 210];
-pub const DEFAULT_BG: [u8; 3] = [13, 13, 18];
+/// True black: a terminal's default background is the OLED-black the rest of
+/// the GUI defaults to, not a near-black that greys it out. Cells carrying the
+/// default background paint no quad at all, so this is both the backdrop the
+/// terminal frame fills with and what inverse video resolves against.
+pub const DEFAULT_BG: [u8; 3] = [0, 0, 0];
 /// Chrome accents. (The chrome background is now a setting — see
 /// `BG_PRESETS` / `set_tab_bg`.)
 pub const ACCENT: [u8; 3] = [130, 170, 255];

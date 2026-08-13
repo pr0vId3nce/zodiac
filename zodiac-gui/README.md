@@ -40,7 +40,7 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
   sends, **Shift+Enter** newline; **Send** → `T_AGENT_INPUT`). A pending
   permission
   raises a **modal question popup** navigable by mouse, number keys, ↑/↓ (or
-  j/k), and Enter (Esc denies) → `T_PERM_RESP`. When the agent is running a plan
+  j/k), and Enter (Esc denies) → `T_PERM_RESP`.
   The right rail carries **CONTEXT** (a gauge of how full the model's window
   is, warming through accent to red as it fills, plus in/out/cached tokens and
   the session cost when the harness reports one) and **FILES** (what the agent
@@ -70,8 +70,11 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
 - **Alt+R** — rename the active pane (as the TUI does): the field starts on the
   current name, Enter commits, and an **empty name un-pins** it so the server
   goes back to auto-naming. **Alt+Shift+R** — raise the last session.
-- **Alt+N** — new agent (structured) pane; **Alt+Shift+N** — new shell pane.
-  **Alt+←/→**, **Alt+↑/↓** and **Alt+1–9** switch panes (both arrow axes work
+- **Alt+N** — new pane. It asks **Terminal** (a shell) or **Chat** (a
+  structured agent pane), then, for Chat, which harness and model. The shell
+  used to hide behind Alt+Shift+N, a distinction you had to know to discover.
+  Terminal never depends on a harness being installed.
+- **Alt+←/→**, **Alt+↑/↓** and **Alt+1–9** switch panes (both arrow axes work
   whatever the tab orientation); **Alt+W** closes the active pane; **Alt+Z**
   returns to the Observatory. These are window-level chords: they are handled
   before egui sees them, so they keep working while you type in the composer
@@ -105,6 +108,12 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
   same wgpu surface. Window events feed egui first (`egui_winit`), so a
   focused widget's keys don't leak to a pane's pty. The `WaitUntil` timer is
   driven by egui's `repaint_delay`.
+- **Terminal cells**: cell edges are snapped to physical pixels and *shared*
+  between neighbours, so background quads tile with no hairline gaps, and the
+  Unicode block elements (U+2580–U+259F) are painted as rectangles on that grid
+  instead of drawn from the font — a font sizes its block glyphs to its own em
+  box, which leaves a sliver between rows wherever art is built from them (the
+  Claude Code mascot). The default background is true black.
 - **Terminal mode** (the legacy ADR-0004 path): the pane's vt100 screen —
   per-cell bg quads, glyphs, underline, block cursor — reusing
   `palette::cell_colors` for the xterm-256 + SGR fold. The instanced-rect +

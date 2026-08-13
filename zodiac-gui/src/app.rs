@@ -146,6 +146,8 @@ pub struct GuiApp {
     e2e_cols: u16,
     e2e_chord_ok: bool,
     e2e_chrome_saved: (String, String),
+    /// e2e: pane count before an action that may add one.
+    e2e_panes_before: usize,
     /// e2e: hold this pane at "working" across state polls, so the Esc gate
     /// is exercised without prompting a real agent (which would spend tokens
     /// and make the check race the server's next `T_STATE`).
@@ -217,6 +219,7 @@ impl GuiApp {
             e2e_cols: 0,
             e2e_chord_ok: false,
             e2e_chrome_saved: (String::new(), String::new()),
+            e2e_panes_before: 0,
             e2e_force_working: None,
             dump_next: std::env::var("ZODIAC_GUI_DUMP_AGENT")
                 .is_ok()
@@ -388,10 +391,10 @@ impl GuiApp {
     /// only one harness).
     fn open_agent_picker(&mut self) {
         let harnesses = crate::agents::harnesses();
-        let step = if harnesses.len() > 1 { 0 } else { 1 };
         self.ui_state.agent_picker = crate::ui::AgentPicker {
             harnesses,
-            step,
+            step: crate::ui::STEP_KIND,
+            k_sel: 0,
             h_sel: 0,
             m_sel: 0,
         };
@@ -483,7 +486,14 @@ impl GuiApp {
     fn dump_agents(&mut self, _event_loop: &ActiveEventLoop) {
         // Show the pane too, so the rail can be inspected on screen while the
         // dump says what it was given. Exit is left to EXIT_AFTER_MS.
-        if let Some(i) = self.panes.iter().position(|p| p.is_agent()) {
+        // Prefer an agent pane; otherwise just open the first pane, so this
+        // also serves as "show me a terminal" when inspecting the grid.
+        let i = self
+            .panes
+            .iter()
+            .position(|p| p.is_agent())
+            .or(if self.panes.is_empty() { None } else { Some(0) });
+        if let Some(i) = i {
             self.active = i;
             self.screen = crate::ui::Screen::Focused;
             self.request_redraw();
@@ -1360,6 +1370,83 @@ impl GuiApp {
                 self.e2e_after(300);
             }
 
+            // --- alt+n asks Terminal or Chat -----------------------------
+            53 => {
+                self.e2e_panes_before = self.panes.len();
+                self.mods = ModifiersState::ALT;
+                self.on_key_logical(&Key::Character("n".into()));
+                self.mods = ModifiersState::empty();
+                self.request_redraw();
+                self.e2e_after(600);
+            }
+            54 => {
+                let st = &self.ui_state;
+                self.check(
+                    "alt+n asks Terminal or Chat first",
+                    st.overlay == Overlay::NewAgent && st.agent_picker.step == crate::ui::STEP_KIND,
+                    format!("overlay={:?} step={}", st.overlay, st.agent_picker.step),
+                );
+                // Choose Terminal (row 1) and expect a pty pane, not an agent.
+                self.e2e_key(egui::Key::Num1);
+                self.request_redraw();
+                self.e2e_after(2500);
+            }
+            55 => {
+                let added = self.panes.len().saturating_sub(self.e2e_panes_before);
+                let newest_is_pty = self.panes.last().is_some_and(|p| !p.is_agent());
+                self.check(
+                    "choosing Terminal opens a shell pane",
+                    added == 1 && newest_is_pty && self.ui_state.overlay == Overlay::None,
+                    format!(
+                        "added={added} newest_is_agent={:?} overlay={:?}",
+                        self.panes.last().map(|p| p.is_agent()),
+                        self.ui_state.overlay
+                    ),
+                );
+                // Reopen and take the Chat branch: it must move on to a
+                // harness/model question rather than spawning anything yet.
+                self.e2e_panes_before = self.panes.len();
+                self.mods = ModifiersState::ALT;
+                self.on_key_logical(&Key::Character("n".into()));
+                self.mods = ModifiersState::empty();
+                self.request_redraw();
+                self.e2e_after(600);
+            }
+            56 => {
+                self.e2e_key(egui::Key::Num2); // Chat
+                self.request_redraw();
+                self.e2e_after(700);
+            }
+            57 => {
+                let st = &self.ui_state;
+                let asked_more =
+                    st.overlay == Overlay::NewAgent && st.agent_picker.step != crate::ui::STEP_KIND;
+                self.check(
+                    "choosing Chat asks which harness/model, spawning nothing yet",
+                    asked_more && self.panes.len() == self.e2e_panes_before,
+                    format!(
+                        "step={} panes {}->{}",
+                        st.agent_picker.step,
+                        self.e2e_panes_before,
+                        self.panes.len()
+                    ),
+                );
+                // Esc must walk back to the kind question, not close outright.
+                self.e2e_key(egui::Key::Escape);
+                self.request_redraw();
+                self.e2e_after(600);
+            }
+            58 => {
+                let st = &self.ui_state;
+                self.check(
+                    "esc walks back to the Terminal/Chat question",
+                    st.overlay == Overlay::NewAgent && st.agent_picker.step == crate::ui::STEP_KIND,
+                    format!("overlay={:?} step={}", st.overlay, st.agent_picker.step),
+                );
+                self.ui_state.overlay = Overlay::None;
+                self.e2e_after(300);
+            }
+
             // --- report -------------------------------------------------
             _ => {
                 let total = self.e2e_results.len();
@@ -1859,14 +1946,11 @@ impl GuiApp {
                 // extra binding. Left/Up = previous, Right/Down = next.
                 Key::Named(NamedKey::ArrowLeft | NamedKey::ArrowUp) => return prev(self),
                 Key::Named(NamedKey::ArrowRight | NamedKey::ArrowDown) => return next(self),
-                // Alt+N opens the new-agent picker (harness + model, the
-                // default); Alt+Shift+N opens a shell pane directly.
+                // Alt+N asks what kind of pane: Terminal or Chat. It used to
+                // hide the shell behind Alt+Shift+N, which is a distinction
+                // you had to already know to discover.
                 Key::Character(s) if s.eq_ignore_ascii_case("n") => {
-                    if self.mods.shift_key() {
-                        self.send(T_NEW_PANE, 0, &[]);
-                    } else {
-                        self.open_agent_picker();
-                    }
+                    self.open_agent_picker();
                     return;
                 }
                 // Alt+R renames the active pane (Alt+Shift+R raises the last

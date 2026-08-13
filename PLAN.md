@@ -127,6 +127,33 @@ when they had no data, which is indistinguishable from a missing feature. They
 now say "no turn reported yet" / "nothing changed yet". Covered by `the rail
 panels announce themselves before any data`.
 
+### Terminal fidelity + the new-pane question
+
+| # | Item | Status | Covered by |
+|---|------|--------|-----------|
+| 9 | Alt+N asks Terminal or Chat | **done** | `alt+n asks Terminal or Chat first`, `choosing Terminal opens a shell pane`, `choosing Chat asks which harness/model…`, `esc walks back…` |
+| 10 | Terminal background is true black | **done** | visual (`palette::DEFAULT_BG` = `[0,0,0]`) |
+| 11 | Seams through block-drawn art | **done** | `block_tests` (5 unit tests) + visual |
+
+**The seams.** Two causes, both fixed. Cell rects were computed as a fractional
+`x + width`, so adjacent background quads didn't quite meet — the old `+ 0.5`
+fudge overlapped them instead, which double-blends edges rather than closing
+gaps. Edges are now snapped to physical pixels and *shared*: cell N's right edge
+is cell N+1's left edge, exactly. And the Unicode block elements
+(U+2580–U+259F) are painted as rectangles on that grid instead of drawn from
+the font — a font sizes its block glyphs to its own em box, so at our cell size
+they land a fraction short and the row below shows through. That is what put
+lines through the Claude Code mascot, which is built from `▐▛███▜▌`.
+
+Verified by running the real Claude Code TUI in a pane and looking: the mascot
+is one solid shape. The geometry itself is unit-tested (halves tile exactly,
+eighths run the right way, quadrants pick the right corners) since it is pure
+math and a screenshot can't be re-run in CI.
+
+**Alt+N** now asks Terminal or Chat, then harness/model for Chat. Esc walks
+back a step rather than closing outright, and the Terminal branch works with no
+harness installed — the "no harnesses found" message now only blocks Chat.
+
 ### Harness hygiene fixed along the way
 
 Two of my own bugs, both found by the checks rather than by eye:

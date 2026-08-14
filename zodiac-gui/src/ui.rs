@@ -1440,7 +1440,9 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
                 }
             });
         egui::CentralPanel::default()
-            .frame(Frame::NONE.fill(theme::bg_window()))
+            // The transcript's own ground, so "Agent chat" transparency is
+            // independent of the chrome's.
+            .frame(Frame::NONE.fill(theme::bg_chat()))
             .show(ui, |ui| {
                 transcript_view(
                     ui,
@@ -3651,18 +3653,30 @@ fn terminal_view(ui: &mut egui::Ui, st: &mut UiState, p: &CPane, scale: f32) {
     // The pty owns the keyboard here: drop any widget focus egui may still be
     // holding (a Tab press is focus traversal to egui, and a focused widget
     // would keep swallowing keys that belong to the terminal).
-    ui.memory_mut(|m| {
-        if let Some(id) = m.focused() {
-            m.surrender_focus(id);
-        }
-    });
+    //
+    // Unless a dialog is up. The terminal is still painted underneath one, and
+    // taking focus away every frame fought the rename field for it: the field
+    // asked for focus, this took it back before the field next rendered, so
+    // the TextEdit never saw a keystroke and the caret flickered between them.
+    // A dialog owns the keyboard while it is open; the pty gets it back the
+    // frame the dialog closes.
+    if st.overlay == Overlay::None {
+        ui.memory_mut(|m| {
+            if let Some(id) = m.focused() {
+                m.surrender_focus(id);
+            }
+        });
+    }
     let c32 = |c: [u8; 3]| Color32::from_rgb(c[0], c[1], c[2]);
     let font = egui::FontId::monospace(13.0 * scale);
     let (cw, ch) = ui.fonts_mut(|f| (f.glyph_width(&font, 'M'), f.row_height(&font)));
     let screen = p.parser.screen();
     let (rows, cols) = screen.size();
     egui::Frame::NONE
-        .fill(c32(crate::palette::DEFAULT_BG))
+        // The grid's default background carries the terminal opacity; cells
+        // the app gave an explicit color stay solid (kitty does the same),
+        // so highlighted text doesn't lose contrast when you turn it down.
+        .fill(theme::fade_term(c32(crate::palette::DEFAULT_BG)))
         .inner_margin(Margin::same(12))
         .show(ui, |ui| {
             ui.set_width(ui.available_width());
@@ -4752,6 +4766,36 @@ fn settings_dialog(
                             choice_row(ui, "Terminal", &mut s.term_font, "100%", sizes, actions);
                             choice_row(ui, "GUI", &mut s.gui_font, "100%", sizes, actions);
                             choice_row(ui, "Agent chat", &mut s.agent_font, "100%", sizes, actions);
+                            ui.add_space(14.0);
+                            // Transparency, per ground and independent: the
+                            // terminal grid, the agent transcript, and the
+                            // chrome around them. 100% is opaque.
+                            group_label(ui, "OPACITY");
+                            let alphas = &[
+                                ("100%", "100%"),
+                                ("95%", "95%"),
+                                ("90%", "90%"),
+                                ("80%", "80%"),
+                                ("70%", "70%"),
+                                ("60%", "60%"),
+                            ];
+                            choice_row(
+                                ui,
+                                "Terminal",
+                                &mut s.term_opacity,
+                                "100%",
+                                alphas,
+                                actions,
+                            );
+                            choice_row(
+                                ui,
+                                "Agent chat",
+                                &mut s.chat_opacity,
+                                "100%",
+                                alphas,
+                                actions,
+                            );
+                            choice_row(ui, "GUI", &mut s.gui_opacity, "100%", alphas, actions);
                             ui.add_space(14.0);
                             group_label(ui, "BEHAVIOR");
                             toggle_row(ui, "Connection watchdog", &mut s.connection_watch, actions);

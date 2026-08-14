@@ -72,12 +72,18 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
   Observatory), and every button it carried has a key: ⌘K, ⌘, , Alt+O, Alt+P.
 - **⌘K / Ctrl+K** — command palette (fuzzy pane jump; ↑/↓, Enter, Esc).
 - **⌘, / Ctrl+,** — settings (grouped; edits real `config.json` keys, persists).
-  Includes independent per-view **font sizes** (Terminal / GUI / Agent chat).
+  Includes independent per-view **font sizes** and **opacity** (Terminal / GUI
+  / Agent chat) — see *Transparency* below.
 - **Alt+O** — the Oracle panel (gradient orb; presentational for now).
 - **Alt+P** — the pair-phone QR.
 - **Alt+R** — rename the active pane (as the TUI does): the field starts on the
-  current name, Enter commits, and an **empty name un-pins** it so the server
-  goes back to auto-naming. **Alt+Shift+R** — raise the last session.
+  current name and Enter commits. A pane is auto-named — after what's running
+  in it, or its cwd — only until you rename it once; from then on the name is
+  yours and the server never touches it again. **Clearing the field to
+  nothing** is the one way back: that un-pins the pane and auto-naming resumes
+  immediately. The dialog owns the keyboard while it's open, including over a
+  terminal pane (whose view otherwise takes egui's focus away every frame for
+  the pty). **Alt+Shift+R** — raise the last session.
 - **Alt+N** — new pane. It asks **Terminal** (a shell) or **Chat** (a
   structured agent pane), then, for Chat, which harness and model. The shell
   used to hide behind Alt+Shift+N, a distinction you had to know to discover.
@@ -132,6 +138,19 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
   textured-quad + glyphon machinery in `render.rs` is retained for this and
   for kitty-graphics compositing; kitty placements are decoded to egui
   textures and blitted over the grid (placeholder tiling is the follow-on).
+- **Transparency**: three independent opacities — `term_opacity`,
+  `chat_opacity`, `gui_opacity` (percent strings, 100% = opaque, floor 20%).
+  Each applies to one *ground*: the terminal grid's default background, the
+  agent transcript's, and the chrome around them (top bar, sidebar, rail,
+  header, Observatory). Cards, raised surfaces and dialogs never fade — they
+  are what you read. Cells the app gave an explicit background stay solid too,
+  as they do in kitty, so highlighted text keeps its contrast. Mechanically:
+  when any of the three is below 100% the window is created transparent, the
+  surface is configured `PreMultiplied` (egui's colors *are* premultiplied)
+  and the frame is cleared to nothing, so the grounds egui paints supply both
+  color and alpha; an all-opaque configuration keeps the opaque clear it
+  always had. A surface offering no alpha mode (X11 with no compositor)
+  simply stays opaque.
 - **Design tokens** (`theme.rs`): the handoff's ground/chrome/text/accent
   palette folded into egui `Visuals`, with the five status colors carried
   verbatim from `src/theme.rs` (thinking → violet, idle text override).

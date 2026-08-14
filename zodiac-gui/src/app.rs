@@ -163,7 +163,13 @@ pub struct GuiApp {
     /// settings to put back (the toggles persist to config.json).
     e2e_cols: u16,
     e2e_rows: u16,
+    /// e2e: how many times a step has re-asked the server for state rather
+    /// than asserting on a snapshot older than the action it is checking.
+    e2e_retry: u8,
     e2e_chord_ok: bool,
+    /// e2e: the user's real opacity settings, to put back after the
+    /// transparency steps (they are applied in memory, never saved).
+    e2e_opacity_saved: (String, String, String),
     e2e_chrome_saved: (String, String, String),
     /// e2e: pane count before an action that may add one.
     e2e_panes_before: usize,
@@ -246,6 +252,8 @@ impl GuiApp {
             e2e_interrupts: 0,
             e2e_cols: 0,
             e2e_rows: 0,
+            e2e_retry: 0,
+            e2e_opacity_saved: (String::new(), String::new(), String::new()),
             e2e_chord_ok: false,
             e2e_chrome_saved: (String::new(), String::new(), String::new()),
             e2e_panes_before: 0,
@@ -685,6 +693,14 @@ impl GuiApp {
     /// agent pane by the time it asserted.
     fn e2e_pty(&self) -> Option<usize> {
         self.panes.iter().position(|p| !p.is_agent())
+    }
+
+    /// Push typed text for the next frame — what a focused `TextEdit` consumes.
+    /// Typing is the only way to prove a field is really editable: writing the
+    /// buffer directly would pass even when the field never sees a keystroke,
+    /// which is exactly how the rename dialog was broken over a terminal pane.
+    fn e2e_text(&mut self, s: &str) {
+        self.e2e_events.push(egui::Event::Text(s.to_string()));
     }
 
     /// Push a UI-level key press for the next frame.
@@ -1400,14 +1416,28 @@ impl GuiApp {
                         self.ui_state.overlay, self.ui_state.rename_buf, self.panes[idx].name
                     ),
                 );
-                self.ui_state.rename_buf = "e2e-renamed".into();
-                self.e2e_key(egui::Key::Enter);
+                // Type into it for real. The dialog is up over a *terminal*
+                // pane, whose view used to surrender any egui focus every
+                // frame — so the field was re-focused and un-focused in turn,
+                // the caret flickered, and not one keystroke landed.
+                self.ui_state.rename_buf.clear();
+                self.e2e_text("e2e-typed");
                 self.request_redraw();
-                self.e2e_after(1200);
+                self.e2e_after(600);
             }
             48 => {
-                self.send(T_QUERY, 0, &[]); // don't race the state poll
-                self.e2e_after(1200);
+                let typed = self.ui_state.rename_buf.clone();
+                self.check(
+                    "typing reaches the rename field over a terminal pane",
+                    typed == "e2e-typed",
+                    format!(
+                        "buf={typed:?} focus={:?}",
+                        self.egui_ctx.memory(|m| m.focused())
+                    ),
+                );
+                self.e2e_key(egui::Key::Enter);
+                self.request_redraw();
+                self.e2e_after(700);
             }
             49 => {
                 // The server is the authority: assert the name it reports
@@ -1419,12 +1449,27 @@ impl GuiApp {
                     .and_then(|st| st.panes.iter().find(|ps| ps.id == id))
                     .map(|ps| ps.name.clone())
                     .unwrap_or_default();
+                // The server answers state only when asked (QUERY_INTERVAL),
+                // so a snapshot older than the rename means "not yet", not
+                // "didn't work". Ask again rather than assert on stale data.
+                if server != "e2e-typed" && self.e2e_retry < 8 {
+                    self.e2e_retry += 1;
+                    self.send(T_QUERY, 0, &[]);
+                    self.e2e_step = 49;
+                    return self.e2e_after(300);
+                }
+                let local = self
+                    .panes
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.name.clone())
+                    .unwrap_or_default();
                 self.check(
-                    "the rename reaches the server",
-                    server == "e2e-renamed" && self.ui_state.overlay == Overlay::None,
+                    "the typed rename reaches the server",
+                    server == "e2e-typed" && self.ui_state.overlay == Overlay::None,
                     format!(
-                        "server reported {server:?}, overlay {:?}",
-                        self.ui_state.overlay
+                        "server reported {server:?}, local {local:?}, buf {:?}, overlay {:?}",
+                        self.ui_state.rename_buf, self.ui_state.overlay
                     ),
                 );
                 self.e2e_after(300);
@@ -1783,6 +1828,55 @@ impl GuiApp {
                 self.e2e_after(300);
             }
 
+            // --- transparency, per ground -------------------------------
+            68 => {
+                // In memory only: like the chrome toggles, this must not
+                // persist into the user's config.json.
+                self.e2e_opacity_saved = (
+                    self.settings.term_opacity.clone(),
+                    self.settings.chat_opacity.clone(),
+                    self.settings.gui_opacity.clone(),
+                );
+                self.settings.chat_opacity = "80%".into();
+                self.apply_settings();
+                self.request_redraw();
+                self.e2e_after(600);
+            }
+            69 => {
+                let chat = crate::theme::bg_chat().a();
+                let chrome = crate::theme::bg_chrome().a();
+                let term = crate::theme::fade_term(egui::Color32::from_rgb(9, 9, 9)).a();
+                let clears = self.renderer.as_ref().is_some_and(|r| r.is_transparent());
+                let capable = self
+                    .renderer
+                    .as_ref()
+                    .is_some_and(|r| r.can_be_transparent());
+                self.check(
+                    "one ground goes translucent without dragging the others with it",
+                    chat == 204 && chrome == 255 && term == 255 && (clears || !capable),
+                    format!("chat={chat} chrome={chrome} term={term} clear_transparent={clears} capable={capable}"),
+                );
+                let (t, c, g) = self.e2e_opacity_saved.clone();
+                self.settings.term_opacity = t;
+                self.settings.chat_opacity = c;
+                self.settings.gui_opacity = g;
+                self.apply_settings();
+                self.request_redraw();
+                self.e2e_after(600);
+            }
+            70 => {
+                let clears = self.renderer.as_ref().is_some_and(|r| r.is_transparent());
+                self.check(
+                    "back to opaque restores the opaque clear",
+                    crate::theme::bg_chat().a() == 255 && !clears,
+                    format!(
+                        "chat={} clear_transparent={clears}",
+                        crate::theme::bg_chat().a()
+                    ),
+                );
+                self.e2e_after(300);
+            }
+
             // --- report -------------------------------------------------
             _ => {
                 let total = self.e2e_results.len();
@@ -2135,12 +2229,14 @@ impl GuiApp {
             glow_color: crate::palette::named_color(&s.shimmer_color, [255, 255, 255]),
             glow_period: crate::palette::glow_period_ms(&s.shimmer_speed),
         };
+        let transparent = s.any_transparency();
         if let Some(r) = self.renderer.as_mut() {
             r.set_tab_side(side);
             r.set_bg(bg);
             r.set_tab_bg(tab_bg);
             r.set_user_scale(scale);
             r.set_tab_style(style);
+            r.set_transparent(transparent && r.can_be_transparent());
         }
         // Grid dimensions may have changed under the new chrome/scale.
         self.sent_grid = (0, 0);
@@ -2929,6 +3025,14 @@ impl GuiApp {
         let hide_sidebar = self.settings.gui_sidebar_hidden();
         let hide_rail = self.settings.gui_rail_hidden();
         let hide_header = self.settings.gui_header_hidden();
+        // The three grounds' opacities, pushed to the theme every frame: the
+        // tokens are read from a thread-local, so this is how a settings edit
+        // reaches the fills without threading a parameter through every widget.
+        crate::theme::set_opacity(crate::theme::Opacity {
+            gui: self.settings.gui_opacity(),
+            chat: self.settings.chat_opacity(),
+            term: self.settings.term_opacity(),
+        });
         // Snapshot the worker's findings for pty panes running claude. Small
         // (a usage struct + a path list per pane) and read, never parsed, here.
         let term_agents = self.term_agent_snapshot();
@@ -3064,6 +3168,10 @@ impl GuiApp {
                     self.settings.save();
                     // Apply theme live so the Theme row takes effect at once.
                     crate::theme::apply(&self.egui_ctx, &self.settings.theme);
+                    // …and the renderer-side settings (backdrop, scale, tab
+                    // style, and whether the window clears transparent), so
+                    // an opacity row is visible the moment it is clicked.
+                    self.apply_settings();
                 }
                 crate::ui::UiAction::Raise => self.send(T_RESTORE, 0, &[]),
                 crate::ui::UiAction::CopyText(s) => {
@@ -3269,7 +3377,13 @@ impl ApplicationHandler<UserEvent> for GuiApp {
         }
         let attrs = winit::window::Window::default_attributes()
             .with_title(format!("zodiac — {}", self.session))
-            .with_inner_size(winit::dpi::LogicalSize::new(1100.0, 720.0));
+            .with_inner_size(winit::dpi::LogicalSize::new(1100.0, 720.0))
+            // Ask for an alpha-capable window whenever a transparency setting
+            // is on. It has to be decided at creation (X11 picks a visual
+            // here), so it follows the saved settings rather than the live
+            // ones — turning transparency on for the first time takes effect
+            // on the next launch under X11; Wayland honours it at once.
+            .with_transparent(self.settings.any_transparency());
         // Linux/Windows: no decorations at all — our own title bar owns
         // move/minimize/close.
         #[cfg(not(target_os = "macos"))]

@@ -16,6 +16,16 @@ fn parse_percent(s: &str) -> f32 {
         .unwrap_or(1.0)
 }
 
+/// A percent string as an opacity factor. Unset (or unparseable) is opaque —
+/// the setting has to be asked for — and the floor is 0.2 so no choice can
+/// dissolve a surface completely.
+fn parse_opacity(s: &str) -> f32 {
+    s.trim_end_matches('%')
+        .parse::<f32>()
+        .map(|p| (p / 100.0).clamp(0.2, 1.0))
+        .unwrap_or(1.0)
+}
+
 #[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct Settings {
     #[serde(default)]
@@ -130,6 +140,17 @@ pub struct Settings {
     /// GUI-only.
     #[serde(default)]
     pub gui_header: String,
+    /// Window transparency, per surface, as a percent string ("100%" = opaque,
+    /// the default). The three are independent: `term_opacity` is the terminal
+    /// grid's ground, `chat_opacity` the agent transcript's, and `gui_opacity`
+    /// the chrome around them (top bar, sidebar, rail, header, Observatory).
+    /// GUI-only — the TUI's transparency belongs to its terminal emulator.
+    #[serde(default)]
+    pub term_opacity: String,
+    #[serde(default)]
+    pub chat_opacity: String,
+    #[serde(default)]
+    pub gui_opacity: String,
     /// GUI backdrop preset: "oled" (#000, default), "charcoal", "midnight",
     /// "slate". GUI-only.
     #[serde(default)]
@@ -331,6 +352,25 @@ impl Settings {
         self.gui_header == "hide"
     }
 
+    /// Per-surface opacity as a 0..1 factor (percent string → factor, default
+    /// fully opaque). Clamped at 0.2 so no setting can make a surface
+    /// invisible — and with it the app unusable — from a single click.
+    pub fn term_opacity(&self) -> f32 {
+        parse_opacity(&self.term_opacity)
+    }
+    pub fn chat_opacity(&self) -> f32 {
+        parse_opacity(&self.chat_opacity)
+    }
+    pub fn gui_opacity(&self) -> f32 {
+        parse_opacity(&self.gui_opacity)
+    }
+
+    /// Is any surface translucent? The GUI only asks the compositor for an
+    /// alpha-capable window when something will actually use it.
+    pub fn any_transparency(&self) -> bool {
+        self.term_opacity() < 1.0 || self.chat_opacity() < 1.0 || self.gui_opacity() < 1.0
+    }
+
     /// GUI backdrop preset name (default "oled"). The GUI maps it to RGB.
     pub fn gui_bg(&self) -> &str {
         match self.gui_bg.as_str() {
@@ -467,6 +507,25 @@ mod tests {
         // Clamped to a sane range.
         assert_eq!(parse_percent("10%"), 0.5);
         assert_eq!(parse_percent("900%"), 3.0);
+    }
+
+    #[test]
+    fn opacity_defaults_to_opaque_and_cannot_dissolve_a_surface() {
+        let mut s = Settings::default();
+        // Unset is opaque — transparency has to be asked for, and nothing
+        // asks the compositor for an alpha surface until it is.
+        assert_eq!(s.term_opacity(), 1.0);
+        assert_eq!(s.chat_opacity(), 1.0);
+        assert_eq!(s.gui_opacity(), 1.0);
+        assert!(!s.any_transparency());
+        // The three are independent.
+        s.chat_opacity = "80%".into();
+        assert_eq!(s.chat_opacity(), 0.8);
+        assert_eq!(s.term_opacity(), 1.0);
+        assert!(s.any_transparency());
+        // Floor: no setting can make a surface invisible.
+        s.gui_opacity = "0%".into();
+        assert_eq!(s.gui_opacity(), 0.2);
     }
 
     #[test]

@@ -294,6 +294,10 @@ pub struct Renderer {
     /// Window backdrop (the render-pass clear color); default OLED black.
     /// Default-bg cells emit no quad, so this is the visible pane backdrop.
     bg: [u8; 3],
+    /// Clear the surface transparent, so translucent grounds show the desktop
+    /// (`set_transparent`), and the alpha mode to use when doing so.
+    transparent: bool,
+    alpha_capable: wgpu::CompositeAlphaMode,
     /// Tab-strip / status-bar chrome background (settings); default slate.
     tab_bg: [u8; 3],
     /// User font-scale multiplier (settings), on top of the OS scale factor.
@@ -338,6 +342,27 @@ impl Renderer {
             .get_default_config(&adapter, size.width.max(1), size.height.max(1))
             .ok_or_else(|| anyhow::anyhow!("surface has no default config"))?;
         config.present_mode = wgpu::PresentMode::AutoVsync;
+        // egui's colors are premultiplied and its blend state accumulates
+        // premultiplied alpha, so `PreMultiplied` is the mode that composites
+        // what we actually paint. `PostMultiplied` is the fallback; if the
+        // surface offers neither, transparency is simply unavailable and the
+        // window stays opaque. The surface is *configured* opaque here either
+        // way — `set_transparent` switches it when a setting asks.
+        let caps = surface.get_capabilities(&adapter);
+        let alpha_capable = if caps
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::PreMultiplied)
+        {
+            wgpu::CompositeAlphaMode::PreMultiplied
+        } else if caps
+            .alpha_modes
+            .contains(&wgpu::CompositeAlphaMode::PostMultiplied)
+        {
+            wgpu::CompositeAlphaMode::PostMultiplied
+        } else {
+            wgpu::CompositeAlphaMode::Opaque
+        };
+        config.alpha_mode = wgpu::CompositeAlphaMode::Opaque;
         surface.configure(&device, &config);
         let format = config.format;
 
@@ -567,6 +592,8 @@ impl Renderer {
             tab_side: false,
             ox: 0.0,
             bg: [0, 0, 0],
+            transparent: false,
+            alpha_capable,
             tab_bg: [20, 22, 28], // slate default
             user_scale: 1.0,
             tab_style: TabStyle::default(),
@@ -634,6 +661,11 @@ impl Renderer {
             self.egui_rend
                 .update_buffers(&self.device, &self.queue, &mut encoder, jobs, &screen);
         {
+            // With transparency on, clear to nothing at all and let egui's
+            // grounds supply both color and alpha; clearing to the backdrop
+            // instead would sit *behind* a translucent ground and cancel it
+            // out. Opaque configurations keep the themed clear.
+            let a = f64::from(u8::from(!self.transparent));
             let bg = rgba(self.bg, 1.0);
             let pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("egui"),
@@ -642,10 +674,10 @@ impl Renderer {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: bg[0] as f64,
-                            g: bg[1] as f64,
-                            b: bg[2] as f64,
-                            a: 1.0,
+                            r: bg[0] as f64 * a,
+                            g: bg[1] as f64 * a,
+                            b: bg[2] as f64 * a,
+                            a,
                         }),
                         store: wgpu::StoreOp::Store,
                     },
@@ -699,6 +731,37 @@ impl Renderer {
     /// Set the window backdrop (settings). Cheap — used as the clear color.
     pub fn set_bg(&mut self, bg: [u8; 3]) {
         self.bg = bg;
+    }
+
+    /// Whether the window is cleared transparent, letting a translucent ground
+    /// show the desktop through it. Off unless a transparency setting asks for
+    /// it: the grounds egui paints cover the window, but a gap between them
+    /// would show as a see-through seam, so an opaque configuration keeps the
+    /// opaque clear it always had.
+    pub fn set_transparent(&mut self, on: bool) {
+        if self.transparent == on {
+            return;
+        }
+        self.transparent = on;
+        // The compositor is only asked for an alpha-capable surface when
+        // transparency is wanted; some drivers pay for the alpha channel.
+        self.config.alpha_mode = if on {
+            self.alpha_capable
+        } else {
+            wgpu::CompositeAlphaMode::Opaque
+        };
+        self.surface.configure(&self.device, &self.config);
+    }
+
+    /// Does this surface support any alpha compositing at all? (X11 without a
+    /// compositor, for instance, does not.)
+    pub fn can_be_transparent(&self) -> bool {
+        self.alpha_capable != wgpu::CompositeAlphaMode::Opaque
+    }
+
+    /// Is the surface currently cleared transparent?
+    pub fn is_transparent(&self) -> bool {
+        self.transparent
     }
 
     /// Set the tab-strip / status-bar chrome background (settings).

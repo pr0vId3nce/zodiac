@@ -149,22 +149,74 @@ pub fn palette_for(name: &str) -> Palette {
     }
 }
 
+/// How opaque each of the three grounds is (1.0 = solid). The window itself is
+/// cleared transparent when any of them is, so what shows through a translucent
+/// ground is the desktop behind the window.
+#[derive(Clone, Copy)]
+pub struct Opacity {
+    pub gui: f32,
+    pub chat: f32,
+    pub term: f32,
+}
+
+const SOLID: Opacity = Opacity {
+    gui: 1.0,
+    chat: 1.0,
+    term: 1.0,
+};
+
 thread_local! {
     static CUR: std::cell::Cell<Palette> = const { std::cell::Cell::new(NIGHT) };
+    static ALPHA: std::cell::Cell<Opacity> = const { std::cell::Cell::new(SOLID) };
 }
 
 fn cur() -> Palette {
     CUR.with(|c| c.get())
 }
 
+/// Set the per-ground opacities (from settings). Cheap enough to call every
+/// frame, which is how a change in the settings dialog takes effect at once.
+pub fn set_opacity(o: Opacity) {
+    ALPHA.with(|c| c.set(o));
+}
+
+pub fn opacity() -> Opacity {
+    ALPHA.with(|c| c.get())
+}
+
+/// A ground color at `a` opacity. `Color32` is premultiplied, so this goes
+/// through `from_rgba_unmultiplied` rather than poking the alpha byte.
+fn fade(c: Color32, a: f32) -> Color32 {
+    if a >= 1.0 {
+        return c;
+    }
+    let [r, g, b, _] = c.to_srgba_unmultiplied();
+    Color32::from_rgba_unmultiplied(r, g, b, (a.clamp(0.0, 1.0) * 255.0).round() as u8)
+}
+
+/// The chrome grounds — window, top bar/sidebar/header, rail — all carry the
+/// GUI opacity. Cards, raised surfaces and dialogs stay solid: they are what
+/// you read, and a translucent stack of them turns into mush.
 pub fn bg_window() -> Color32 {
-    cur().bg_window
+    fade(cur().bg_window, opacity().gui)
 }
 pub fn bg_chrome() -> Color32 {
-    cur().bg_chrome
+    fade(cur().bg_chrome, opacity().gui)
 }
 pub fn bg_panel() -> Color32 {
-    cur().bg_panel
+    fade(cur().bg_panel, opacity().gui)
+}
+
+/// The agent transcript's ground, on its own opacity — a chat you want to see
+/// through is a different wish from chrome you want to see through.
+pub fn bg_chat() -> Color32 {
+    fade(cur().bg_window, opacity().chat)
+}
+
+/// A terminal ground color at the terminal opacity (the grid paints its own
+/// colors from `palette`, so it hands them here rather than reading a token).
+pub fn fade_term(c: Color32) -> Color32 {
+    fade(c, opacity().term)
 }
 pub fn bg_card() -> Color32 {
     cur().bg_card
@@ -287,5 +339,45 @@ mod tests {
         // window, which is where its structure comes from.
         let night = palette_for("night");
         assert_ne!(night.bg_chrome, night.bg_window);
+    }
+
+    #[test]
+    fn each_ground_carries_its_own_opacity() {
+        set_opacity(Opacity {
+            gui: 0.5,
+            chat: 0.8,
+            term: 1.0,
+        });
+        // The chrome grounds follow the GUI setting…
+        assert_eq!(bg_window().a(), 128);
+        assert_eq!(bg_chrome().a(), 128);
+        assert_eq!(bg_panel().a(), 128);
+        // …the transcript its own, independently…
+        assert_eq!(bg_chat().a(), 204);
+        // …and the terminal is left solid because its row says 100%.
+        assert_eq!(fade_term(Color32::from_rgb(9, 9, 9)).a(), 255);
+        // Cards and raised surfaces never fade: they are what you read.
+        assert_eq!(bg_card().a(), 255);
+        assert_eq!(bg_raised().a(), 255);
+        // A ground keeps its hue — alpha is premultiplied, so this is the
+        // check that `fade` went through `from_rgba_unmultiplied`.
+        set_opacity(Opacity {
+            gui: 0.5,
+            chat: 1.0,
+            term: 1.0,
+        });
+        let solid = palette_for("night").bg_chrome.to_array();
+        let half = bg_chrome().to_srgba_unmultiplied();
+        for i in 0..3 {
+            // ±1: premultiply-then-unpremultiply is lossy at 8 bits. What
+            // matters is that the color survives — a raw alpha poke would
+            // have darkened it toward black instead.
+            assert!(
+                half[i].abs_diff(solid[i]) <= 1,
+                "channel {i}: {half:?} vs {solid:?}"
+            );
+        }
+        set_opacity(SOLID);
+        assert_eq!(bg_window(), palette_for("night").bg_window);
     }
 }

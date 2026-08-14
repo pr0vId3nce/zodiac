@@ -102,6 +102,40 @@ newest first, repeat edits counted, click to copy the path. Read is
 deliberately excluded: the panel answers "what did it change", not "what did it
 look at".
 
+### CONTEXT + FILES for terminal panes
+
+| # | Item | Status | Covered by |
+|---|------|--------|-----------|
+| 13 | The rail's two panels work for pty panes too | **done** | `a terminal pane shows CONTEXT and FILES from the transcript` + `termagent` unit tests |
+
+A structured pane reports usage and tool calls over the stream. A pty pane
+running the Claude Code TUI reports nothing — it is just a terminal — but
+claude writes the same facts to its session transcript
+(`~/.claude/projects/<slug>/<session>.jsonl`), so `termagent` reads that.
+
+Two properties it holds to:
+
+- **Never on the UI thread.** A long session's transcript runs to several MB;
+  parsing one inside a frame would drop it. A worker thread does the work and
+  the UI reads a small snapshot.
+- **Append-only reads.** Each poll parses only the bytes appended since the
+  last one, and stops before a partial final line (the writer may be
+  mid-append) so nothing is folded twice. Unit-tested.
+
+One difference in the fold: a transcript's `assistant` entry is written *after*
+the message completes, so its usage is final and feeds the session totals
+directly — unlike the live stream, where the assistant event is mid-flight and
+the totals come from the turn-final event. Sub-agent (`isSidechain`) turns
+spend tokens but occupy their own window, so they count toward totals and not
+toward the gauge.
+
+**The known limit**, because it can't be designed away: claude records no pid
+and exports no session id, so a pane is matched to a transcript by directory
+and clock — prefer a session *born* after the pane started, then most recently
+written. Two claude TUIs started in the *same* directory cannot be told apart,
+and the newer writer wins. The CONTEXT header names the session it read on
+hover, so a wrong guess is visible rather than silent.
+
 ### Reported missing — three real bugs behind it
 
 "Context and files seem to be missing from the right sidebar." Investigated by

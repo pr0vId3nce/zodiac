@@ -148,6 +148,13 @@ pub struct GuiApp {
     e2e_chrome_saved: (String, String),
     /// e2e: pane count before an action that may add one.
     e2e_panes_before: usize,
+    /// e2e: pin this pane as a claude pty pane, and the scratch projects tree
+    /// to clean up afterwards.
+    e2e_force_claude: Option<u64>,
+    e2e_proj_root: Option<std::path::PathBuf>,
+    /// Reads context + touched files from claude's session transcript for
+    /// terminal panes (structured panes get theirs from the stream).
+    term_agents: crate::termagent::Watcher,
     /// e2e: hold this pane at "working" across state polls, so the Esc gate
     /// is exercised without prompting a real agent (which would spend tokens
     /// and make the check race the server's next `T_STATE`).
@@ -220,6 +227,9 @@ impl GuiApp {
             e2e_chord_ok: false,
             e2e_chrome_saved: (String::new(), String::new()),
             e2e_panes_before: 0,
+            e2e_force_claude: None,
+            e2e_proj_root: None,
+            term_agents: crate::termagent::Watcher::spawn(),
             e2e_force_working: None,
             dump_next: std::env::var("ZODIAC_GUI_DUMP_AGENT")
                 .is_ok()
@@ -402,6 +412,40 @@ impl GuiApp {
         self.request_redraw();
     }
 
+    /// Which pty panes should the transcript watcher follow, and what it found.
+    ///
+    /// A pane qualifies when the server says it's a local pty running claude:
+    /// a structured pane already has the numbers from its own stream, and a
+    /// pane over ssh runs on another machine, where this machine's
+    /// `~/.claude/projects` says nothing about it.
+    fn term_agent_snapshot(&self) -> std::collections::HashMap<u64, crate::termagent::PaneAgent> {
+        let mut want = Vec::new();
+        let mut out = std::collections::HashMap::new();
+        if let Some(state) = self.state.as_ref() {
+            for ps in &state.panes {
+                let pinned = self.e2e_force_claude == Some(ps.id);
+                let claude_tty = ps.kind != "agent"
+                    && (pinned || ps.agent.as_deref() == Some("claude"))
+                    && ps.ssh.is_none();
+                if !claude_tty {
+                    continue;
+                }
+                if let Some(cwd) = ps.cwd.clone() {
+                    want.push(crate::termagent::PaneReq {
+                        id: ps.id,
+                        cwd,
+                        uptime_ms: ps.uptime_ms,
+                    });
+                }
+                if let Some(found) = self.term_agents.get(ps.id) {
+                    out.insert(ps.id, found);
+                }
+            }
+        }
+        self.term_agents.update(want);
+        out
+    }
+
     /// Is a pane's terminal the thing on screen and taking keys? When true the
     /// pty owns the keyboard, not egui.
     fn in_terminal(&self) -> bool {
@@ -499,6 +543,25 @@ impl GuiApp {
             self.request_redraw();
         }
         let mut out = String::from("\n=== zodiac-gui agent dump ===\n");
+        // Terminal panes running claude: what the transcript watcher found.
+        for (id, t) in self.term_agent_snapshot() {
+            let u = t.usage;
+            let limit = zodiac::client_core::context_limit(None);
+            out.push_str(&format!(
+                "pty pane {id} session={:?}\n  usage: in={} out={} cache_r={} context={} \
+                 ({:?} of {limit})\n  files: {:?}\n",
+                t.session,
+                u.input,
+                u.output,
+                u.cache_read,
+                u.context,
+                u.context_frac(limit).map(|f| format!("{:.1}%", f * 100.0)),
+                t.files
+                    .iter()
+                    .map(|f| format!("{}×{}", f.path, f.edits))
+                    .collect::<Vec<_>>(),
+            ));
+        }
         for p in self.panes.iter().filter(|p| p.is_agent()) {
             let u = p.agent.usage;
             let limit = zodiac::client_core::context_limit(p.agent.model.as_deref());
@@ -1444,6 +1507,71 @@ impl GuiApp {
                     format!("overlay={:?} step={}", st.overlay, st.agent_picker.step),
                 );
                 self.ui_state.overlay = Overlay::None;
+                self.e2e_after(300);
+            }
+
+            // --- a terminal pane gets CONTEXT + FILES from the transcript --
+            59 => {
+                // A pty pane running claude reports nothing itself, so the
+                // rail reads claude's session transcript. Point the lookup at
+                // a scratch tree and write one, rather than depending on (or
+                // polluting) the real ~/.claude/projects.
+                let Some(i) = self.e2e_pty() else {
+                    return self.e2e_after(50);
+                };
+                let id = self.panes[i].id;
+                let cwd = self
+                    .state
+                    .as_ref()
+                    .and_then(|s| s.panes.iter().find(|ps| ps.id == id))
+                    .and_then(|ps| ps.cwd.clone())
+                    .unwrap_or_default();
+                let root =
+                    std::env::temp_dir().join(format!("zodiac-e2e-proj-{}", std::process::id()));
+                let dir = root.join(crate::termagent::project_slug(&cwd));
+                let _ = std::fs::create_dir_all(&dir);
+                let lines = [
+                    serde_json::json!({"type": "assistant", "message": {"content": [],
+                        "usage": {"input_tokens": 30, "cache_read_input_tokens": 2000,
+                                  "cache_creation_input_tokens": 0, "output_tokens": 11}}}),
+                    serde_json::json!({"type": "assistant", "message": {"content": [
+                        {"type": "tool_use", "id": "z", "name": "Write",
+                         "input": {"file_path": "/tmp/from-transcript.rs", "content": "x"}}],
+                        "usage": {"input_tokens": 40, "cache_read_input_tokens": 8000,
+                                  "cache_creation_input_tokens": 0, "output_tokens": 9}}}),
+                ]
+                .map(|v| v.to_string())
+                .join("\n");
+                let _ = std::fs::write(dir.join("e2e-session.jsonl"), format!("{lines}\n"));
+                std::env::set_var("ZODIAC_PROJECTS_DIR", &root);
+                self.e2e_proj_root = Some(root);
+                // The server won't call a plain shell "claude", so pin the
+                // agent the way a real claude pty pane would report it.
+                self.e2e_force_claude = Some(id);
+                self.active = i;
+                self.screen = Screen::Focused;
+                self.settings.gui_rail = "show".into();
+                self.request_redraw();
+                self.e2e_after(4000); // let the watcher poll
+            }
+            60 => {
+                let pr = self.ui_state.probe;
+                let ok = pr.ctx_header
+                    && pr.ctx_fill.is_some_and(|r| r.width() > 1.0)
+                    && pr.file_rows == 1;
+                self.check(
+                    "a terminal pane shows CONTEXT and FILES from the transcript",
+                    ok,
+                    format!(
+                        "ctx_header={} gauge={:?} file_rows={}",
+                        pr.ctx_header, pr.ctx_fill, pr.file_rows
+                    ),
+                );
+                self.e2e_force_claude = None;
+                std::env::remove_var("ZODIAC_PROJECTS_DIR");
+                if let Some(r) = self.e2e_proj_root.take() {
+                    let _ = std::fs::remove_dir_all(r);
+                }
                 self.e2e_after(300);
             }
 
@@ -2582,6 +2710,9 @@ impl GuiApp {
         let agent_scale = self.settings.agent_font() / gui_font;
         let hide_sidebar = self.settings.gui_sidebar_hidden();
         let hide_rail = self.settings.gui_rail_hidden();
+        // Snapshot the worker's findings for pty panes running claude. Small
+        // (a usage struct + a path list per pane) and read, never parsed, here.
+        let term_agents = self.term_agent_snapshot();
         self.egui_ctx.set_zoom_factor(gui_font);
         let full = self.egui_ctx.run_ui(raw, |ui| {
             let active_id = self.panes.get(self.active).map(|p| p.id);
@@ -2604,6 +2735,7 @@ impl GuiApp {
                 agent_scale,
                 hide_sidebar,
                 hide_rail,
+                term_agents: &term_agents,
             };
             crate::ui::build(
                 ui,

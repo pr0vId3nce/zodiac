@@ -24,6 +24,7 @@ mod palette;
 mod placeholder;
 mod render;
 mod slash;
+mod termagent;
 mod theme;
 mod ui;
 

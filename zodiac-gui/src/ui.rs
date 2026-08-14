@@ -298,6 +298,9 @@ pub struct UiData<'a> {
     /// (Ctrl+← / Ctrl+→). Persisted in settings.
     pub hide_sidebar: bool,
     pub hide_rail: bool,
+    /// Context + touched files read from the session transcript for pty panes
+    /// running claude, keyed by pane id (see `termagent`).
+    pub term_agents: &'a std::collections::HashMap<u64, crate::termagent::PaneAgent>,
 }
 
 impl UiData<'_> {
@@ -305,6 +308,11 @@ impl UiData<'_> {
     fn ps(&self, p: &CPane) -> Option<&PaneState> {
         self.state
             .and_then(|s| s.panes.iter().find(|sp| sp.id == p.id))
+    }
+
+    /// Transcript-derived usage/files for a terminal pane, if any.
+    fn term_agent(&self, id: u64) -> Option<&crate::termagent::PaneAgent> {
+        self.term_agents.get(&id)
     }
 
     /// Server status string (`idle` when unknown).
@@ -4054,9 +4062,22 @@ fn activity_rail(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
     let Some(p) = d.panes.get(d.active) else {
         return;
     };
-    if p.is_agent() {
-        context_panel(ui, p);
-        files_panel(ui, p, actions);
+    // Structured panes fold their own stream; terminal panes running claude
+    // get the same two facts read from the session transcript (`d.term_agent`).
+    let from_stream = p.is_agent();
+    let term = (!from_stream).then(|| d.term_agent(p.id)).flatten();
+    if from_stream || term.is_some() {
+        let usage = term.map(|t| t.usage).unwrap_or(p.agent.usage);
+        let files: &[zodiac::client_core::FileEdit] =
+            term.map(|t| t.files.as_slice()).unwrap_or(&p.agent.files);
+        let model = if from_stream {
+            p.agent.model.as_deref()
+        } else {
+            d.ps(p).and_then(|s| s.model.as_deref())
+        };
+        let source = term.and_then(|t| t.session.as_deref());
+        context_panel(ui, usage, model, source);
+        files_panel(ui, files, actions);
     }
     let ps = d.ps(p);
     // The output-rate histogram used to head this rail. It was removed: an
@@ -4133,15 +4154,25 @@ fn tok(n: u64) -> String {
 /// CONTEXT: how full the model's window is, plus the session's token totals.
 /// This is the number that decides when to compact, and it is not visible
 /// anywhere else in zodiac.
-fn context_panel(ui: &mut egui::Ui, p: &CPane) {
-    let u = p.agent.usage;
-    let limit = zodiac::client_core::context_limit(p.agent.model.as_deref());
-    ui.label(
+fn context_panel(
+    ui: &mut egui::Ui,
+    u: zodiac::client_core::Usage,
+    model: Option<&str>,
+    source: Option<&str>,
+) {
+    let limit = zodiac::client_core::context_limit(model);
+    let header = ui.label(
         RichText::new("CONTEXT")
             .color(theme::TEXT_GHOST)
             .size(11.0)
             .strong(),
     );
+    // Name the transcript a terminal pane's numbers came from. Two claude
+    // TUIs in one directory can't be told apart from the outside, so the
+    // reading has to be attributable rather than quietly authoritative.
+    if let Some(s) = source {
+        header.on_hover_text(format!("read from session {s}"));
+    }
     probe_set(|p| p.ctx_header = true);
     ui.add_space(8.0);
     // Say so when there's nothing yet. Drawing neither gauge nor header read
@@ -4215,9 +4246,13 @@ fn context_panel(ui: &mut egui::Ui, p: &CPane) {
 /// FILES: what this agent has actually changed, newest first. Clicking a row
 /// copies the path — after tabbing back into a pane this is the first thing
 /// you want, and finding it otherwise means scrolling the transcript.
-fn files_panel(ui: &mut egui::Ui, p: &CPane, actions: &mut Vec<UiAction>) {
+fn files_panel(
+    ui: &mut egui::Ui,
+    files: &[zodiac::client_core::FileEdit],
+    actions: &mut Vec<UiAction>,
+) {
     probe_set(|pr| pr.files_header = true);
-    if p.agent.files.is_empty() {
+    if files.is_empty() {
         ui.label(
             RichText::new("FILES")
                 .color(theme::TEXT_GHOST)
@@ -4242,7 +4277,7 @@ fn files_panel(ui: &mut egui::Ui, p: &CPane, actions: &mut Vec<UiAction>) {
         );
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             ui.label(
-                RichText::new(p.agent.files.len().to_string())
+                RichText::new(files.len().to_string())
                     .color(theme::TEXT_GHOST)
                     .size(11.0),
             );
@@ -4253,7 +4288,7 @@ fn files_panel(ui: &mut egui::Ui, p: &CPane, actions: &mut Vec<UiAction>) {
         .id_salt("rail_files")
         .max_height(190.0)
         .show(ui, |ui| {
-            for f in p.agent.files.iter().take(40) {
+            for f in files.iter().take(40) {
                 let name = f.path.rsplit('/').next().unwrap_or(&f.path);
                 let r = Frame::NONE
                     .corner_radius(CornerRadius::same(6))

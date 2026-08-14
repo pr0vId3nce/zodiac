@@ -161,52 +161,113 @@ const PATH_KEYS: &[&str] = &[
     "filename",
 ];
 
+/// Record a file-changing tool call into `files`. Most recently touched sorts
+/// first, and repeat edits to one file bump its count rather than adding a row.
+/// A free function because both the live stream and a transcript file fold into
+/// the same shape.
+pub fn push_file_edit(files: &mut Vec<FileEdit>, tool: &str, input: &serde_json::Value) {
+    let lower = tool.to_ascii_lowercase();
+    if !WRITE_TOOLS.contains(&lower.as_str()) {
+        return;
+    }
+    let Some(path) = PATH_KEYS
+        .iter()
+        .find_map(|k| input.get(*k).and_then(|p| p.as_str()))
+        .filter(|p| !p.is_empty())
+    else {
+        return;
+    };
+    if let Some(i) = files.iter().position(|f| f.path == path) {
+        let mut f = files.remove(i);
+        f.edits += 1;
+        files.insert(0, f);
+    } else {
+        files.insert(
+            0,
+            FileEdit {
+                path: path.to_string(),
+                edits: 1,
+            },
+        );
+    }
+}
+
+/// Usage + touched files folded from a Claude Code **transcript file**
+/// (`~/.claude/projects/<slug>/<session>.jsonl`), which is how a pane running
+/// the TUI under a pty reports what a structured pane reports over its stream.
+///
+/// The difference that matters: a transcript's `assistant` entry is written
+/// *after* the message completes, so its usage is final and feeds the session
+/// totals directly. (The live stream's assistant event is sent mid-flight, so
+/// there the totals come from the turn-final event instead.)
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct TranscriptFold {
+    pub usage: Usage,
+    pub files: Vec<FileEdit>,
+}
+
+impl TranscriptFold {
+    /// Fold one transcript line.
+    pub fn apply(&mut self, v: &serde_json::Value) {
+        if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            return;
+        }
+        let Some(msg) = v.get("message") else { return };
+        if let Some(u) = msg.get("usage") {
+            let (inp, out, read, write) = usage_fields(u);
+            self.usage.input += inp;
+            self.usage.output += out;
+            self.usage.cache_read += read;
+            self.usage.cache_write += write;
+            // Sub-agent turns spend tokens but occupy their own window, not
+            // this session's, so they must not move the occupancy gauge.
+            let sidechain = v.get("isSidechain").and_then(|s| s.as_bool()) == Some(true);
+            let ctx = inp + read + write;
+            if ctx > 0 && !sidechain {
+                self.usage.context = ctx;
+            }
+        }
+        for b in msg
+            .get("content")
+            .and_then(|c| c.as_array())
+            .into_iter()
+            .flatten()
+        {
+            if b.get("type").and_then(|t| t.as_str()) == Some("tool_use") {
+                let name = b.get("name").and_then(|n| n.as_str()).unwrap_or_default();
+                let input = b.get("input").cloned().unwrap_or(serde_json::Value::Null);
+                push_file_edit(&mut self.files, name, &input);
+            }
+        }
+    }
+}
+
+/// Read the token fields out of a usage object, tolerating both spellings.
+/// claude reports snake_case (`input_tokens`), pi's bridge camelCase
+/// (`input`, `cacheRead`).
+fn usage_fields(u: &serde_json::Value) -> (u64, u64, u64, u64) {
+    let n = |keys: &[&str]| {
+        keys.iter()
+            .find_map(|k| u.get(*k).and_then(|v| v.as_u64()))
+            .unwrap_or(0)
+    };
+    (
+        n(&["input_tokens", "input"]),
+        n(&["output_tokens", "output"]),
+        n(&["cache_read_input_tokens", "cacheRead"]),
+        n(&["cache_creation_input_tokens", "cacheWrite"]),
+    )
+}
+
 impl AgentUi {
-    /// Record a file-changing tool call. Most recently touched sorts first,
-    /// and repeat edits to one file bump its count rather than adding a row.
+    /// Record a file-changing tool call on this pane.
     pub(crate) fn note_file_edit(&mut self, tool: &str, input: &serde_json::Value) {
-        let lower = tool.to_ascii_lowercase();
-        if !WRITE_TOOLS.contains(&lower.as_str()) {
-            return;
-        }
-        let Some(path) = PATH_KEYS
-            .iter()
-            .find_map(|k| input.get(*k).and_then(|p| p.as_str()))
-            .filter(|p| !p.is_empty())
-        else {
-            return;
-        };
-        if let Some(i) = self.files.iter().position(|f| f.path == path) {
-            let mut f = self.files.remove(i);
-            f.edits += 1;
-            self.files.insert(0, f);
-        } else {
-            self.files.insert(
-                0,
-                FileEdit {
-                    path: path.to_string(),
-                    edits: 1,
-                },
-            );
-        }
+        push_file_edit(&mut self.files, tool, input);
     }
 
     /// Read the token fields out of a usage object, tolerating both spellings.
     fn usage_fields(u: &serde_json::Value) -> (u64, u64, u64, u64) {
-        // claude reports snake_case (`input_tokens`), pi's bridge camelCase
-        // (`input`, `cacheRead`). Accept both rather than silently folding
-        // zeroes for one of the two harnesses.
-        let n = |keys: &[&str]| {
-            keys.iter()
-                .find_map(|k| u.get(*k).and_then(|v| v.as_u64()))
-                .unwrap_or(0)
-        };
-        (
-            n(&["input_tokens", "input"]),
-            n(&["output_tokens", "output"]),
-            n(&["cache_read_input_tokens", "cacheRead"]),
-            n(&["cache_creation_input_tokens", "cacheWrite"]),
-        )
+        usage_fields(u)
     }
 
     /// Window occupancy as of this message: prompt + cache read + cache

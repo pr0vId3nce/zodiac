@@ -45,7 +45,11 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
   is, warming through accent to red as it fills, plus in/out/cached tokens and
   the session cost when the harness reports one) and **FILES** (what the agent
   has actually changed this session, newest first, repeat edits counted; click
-  a row to copy the path). Both fold from the harness's own reports. When the
+  a row to copy the path). Both fold from the harness's own reports — and for a
+  **pty pane running the Claude Code TUI**, which reports nothing itself, from
+  claude's session transcript instead (read incrementally on a worker thread).
+  That mapping is by directory and clock, so the CONTEXT header names the
+  session it read on hover. When the
   agent is running a plan
   (`TodoWrite`), the rail also shows a **PLAN** panel with a progress bar and
   the checklist (done struck-through, the in-progress step highlighted).

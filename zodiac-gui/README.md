@@ -77,7 +77,11 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
 - **Alt+N** — new pane. It asks **Terminal** (a shell) or **Chat** (a
   structured agent pane), then, for Chat, which harness and model. The shell
   used to hide behind Alt+Shift+N, a distinction you had to know to discover.
-  Terminal never depends on a harness being installed.
+  Terminal never depends on a harness being installed. If the directory
+  already has an agent running — including a claude TUI in a terminal pane —
+  the request is **held for confirmation** and names what is already there;
+  backing out is the default, so Enter cancels and starting anyway is a
+  deliberate second choice.
 - **Alt+←/→**, **Alt+↑/↓** and **Alt+1–9** switch panes (both arrow axes work
   whatever the tab orientation); **Alt+W** closes the active pane; **Alt+Z**
   returns to the Observatory. These are window-level chords: they are handled

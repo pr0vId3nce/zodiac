@@ -58,6 +58,9 @@ pub enum Overlay {
     Resume,
     /// Rename the active pane (Alt+R), as the TUI does.
     Rename,
+    /// "An agent is already running here" — confirm before starting a second
+    /// one in the same directory.
+    ConfirmAgent,
 }
 
 /// One selectable model for a harness in the new-agent picker.
@@ -76,6 +79,21 @@ pub struct HarnessInfo {
     /// Display label (e.g. "Claude").
     pub label: String,
     pub models: Vec<ModelChoice>,
+}
+
+/// A new-agent request held back because another agent is already working in
+/// the same directory. Two agents in one checkout overwrite each other's
+/// edits, so the request waits here until it is confirmed or dropped.
+#[derive(Clone, Default)]
+pub struct PendingAgent {
+    pub agent: String,
+    pub model: Option<String>,
+    pub session: Option<String>,
+    pub cwd: String,
+    /// The panes already there: (label, status).
+    pub existing: Vec<(String, String)>,
+    /// 0 = back out (the default), 1 = start anyway.
+    pub sel: usize,
 }
 
 /// New-agent picker state: the detected harnesses and where the user is in
@@ -120,6 +138,8 @@ pub struct UiState {
     /// Rename dialog (Alt+R): the pane being renamed and the edited name.
     pub rename_pane: Option<u64>,
     pub rename_buf: String,
+    /// A new-agent request awaiting confirmation (see [`PendingAgent`]).
+    pub pending_agent: PendingAgent,
     /// Measured transcript item heights per pane, used to cull off-screen
     /// turns. Rebuilt lazily as items render; cleared on a width change.
     pub item_heights: std::collections::HashMap<u64, Vec<f32>>,
@@ -269,6 +289,8 @@ pub enum UiAction {
     Interrupt(u64),
     /// Rename a pane. An empty name un-pins it (the server auto-names again).
     Rename(u64, String),
+    /// Go ahead with the held-back new-agent request (see `PendingAgent`).
+    ConfirmNewAgent,
 }
 
 /// Immutable view of the app state the UI reads for one frame.
@@ -441,6 +463,7 @@ pub fn build(
         Overlay::NewAgent => new_agent_dialog(ui, st, actions),
         Overlay::Resume => resume_dialog(ui, st, actions),
         Overlay::Rename => rename_dialog(ui, st, actions),
+        Overlay::ConfirmAgent => confirm_agent_dialog(ui, st, actions),
         Overlay::None => {}
     }
     // A 1px edge border to define the borderless window (decorations are off).
@@ -1377,6 +1400,7 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
                     };
                     // Disjoint field borrows so the picker's selection and the
                     // pane's draft can both be edited.
+                    let modal = st.overlay != Overlay::None;
                     let (composers, slash_sel) = (&mut st.composers, &mut st.slash_sel);
                     composer_bar(
                         ui,
@@ -1385,6 +1409,7 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
                         slash_sel,
                         actions,
                         &cmds,
+                        modal,
                     );
                 }
             });
@@ -2709,6 +2734,145 @@ fn turn_tool_box(
     });
 }
 
+/// "An agent is already running here": shown when a new agent would land in a
+/// directory that already has one. Two agents in one checkout overwrite each
+/// other's edits, and it is easy to do by accident from a pane you opened for
+/// something else.
+///
+/// **Backing out is the default.** You reach this dialog by pressing Enter in
+/// the picker, so Enter here has to be safe — it cancels. Starting anyway is a
+/// deliberate second choice (→/2, or the button).
+fn confirm_agent_dialog(ui: &mut egui::Ui, st: &mut UiState, actions: &mut Vec<UiAction>) {
+    let screen = ui
+        .ctx()
+        .input(|i| i.raw.screen_rect)
+        .unwrap_or_else(|| ui.max_rect());
+    ui.painter().rect_filled(
+        screen,
+        CornerRadius::ZERO,
+        Color32::from_rgba_unmultiplied(0, 0, 0, 170),
+    );
+    let mut decide: Option<bool> = None;
+    ui.input_mut(|i| {
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowRight)
+            || i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)
+        {
+            st.pending_agent.sel = 1;
+        }
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowLeft)
+            || i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)
+        {
+            st.pending_agent.sel = 0;
+        }
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::Num1) {
+            decide = Some(false);
+        }
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::Num2) {
+            decide = Some(true);
+        }
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::Escape) {
+            decide = Some(false);
+        }
+        if i.consume_key(egui::Modifiers::NONE, egui::Key::Enter) {
+            decide = Some(st.pending_agent.sel == 1);
+        }
+    });
+    egui::Area::new(egui::Id::new("confirm_agent"))
+        .anchor(egui::Align2::CENTER_CENTER, egui::vec2(0.0, 0.0))
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            Frame::NONE
+                .fill(theme::bg_card())
+                .stroke(Stroke::new(1.0, theme::STATUS_RAIL[0]))
+                .corner_radius(CornerRadius::same(14))
+                .inner_margin(Margin::same(20))
+                .show(ui, |ui| {
+                    ui.set_width(520.0);
+                    let n = st.pending_agent.existing.len();
+                    ui.label(
+                        RichText::new(if n == 1 {
+                            "An agent is already running here"
+                        } else {
+                            "Agents are already running here"
+                        })
+                        .color(theme::STATUS_TEXT[0])
+                        .size(17.0)
+                        .strong(),
+                    );
+                    ui.add_space(6.0);
+                    ui.add(
+                        Label::new(
+                            RichText::new(&st.pending_agent.cwd)
+                                .color(theme::TEXT_DIM)
+                                .size(12.0)
+                                .monospace(),
+                        )
+                        .truncate(),
+                    );
+                    ui.add_space(10.0);
+                    for (label, status) in &st.pending_agent.existing {
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                RichText::new(format!("• {label}"))
+                                    .color(theme::TEXT_BODY)
+                                    .size(13.0),
+                            );
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.label(RichText::new(status).color(theme::TEXT_GHOST).size(11.0));
+                            });
+                        });
+                    }
+                    ui.add_space(10.0);
+                    ui.label(
+                        RichText::new("Two agents in one directory overwrite each other's edits.")
+                            .color(theme::TEXT_DIM)
+                            .size(12.5),
+                    );
+                    ui.add_space(14.0);
+                    ui.horizontal(|ui| {
+                        if picker_row(
+                            ui,
+                            1,
+                            "Back out",
+                            "keep the one that's running",
+                            st.pending_agent.sel == 0,
+                        )
+                        .clicked()
+                        {
+                            decide = Some(false);
+                        }
+                    });
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if picker_row(
+                            ui,
+                            2,
+                            "Start anyway",
+                            "open a second agent here",
+                            st.pending_agent.sel == 1,
+                        )
+                        .clicked()
+                        {
+                            decide = Some(true);
+                        }
+                    });
+                    ui.add_space(8.0);
+                    ui.label(
+                        RichText::new("↑↓ choose · enter confirm · esc back out")
+                            .color(theme::TEXT_GHOST)
+                            .size(11.0),
+                    );
+                });
+        });
+    if let Some(go) = decide {
+        st.overlay = Overlay::None;
+        if go {
+            actions.push(UiAction::ConfirmNewAgent);
+        }
+        st.pending_agent = PendingAgent::default();
+    }
+}
+
 /// Rename the active pane (Alt+R), matching the TUI: the field starts on the
 /// current name, Enter commits, and **an empty name un-pins** — the server
 /// goes back to auto-naming the pane and answers with `T_PANE_RENAMED`.
@@ -3015,6 +3179,11 @@ fn composer_bar(
     slash_sel: &mut usize,
     actions: &mut Vec<UiAction>,
     cmds: &[crate::slash::SlashCmd],
+    // A modal is open over this pane: it owns the keyboard, so the composer
+    // must not consume Enter (or the slash picker's keys) underneath it. The
+    // composer keeps egui focus while a dialog without its own text field is
+    // up, and was swallowing the key meant for the dialog.
+    modal: bool,
 ) {
     Frame::NONE
         .inner_margin(Margin::symmetric(18, 14))
@@ -3031,7 +3200,7 @@ fn composer_bar(
             let matches = crate::slash::active_query(composer)
                 .map(|q| crate::slash::matching(cmds, q))
                 .unwrap_or_default();
-            let picking = composer_focused && !matches.is_empty();
+            let picking = composer_focused && !matches.is_empty() && !modal;
             st_probe_slash(if picking { matches.len() } else { 0 });
             if !picking {
                 *slash_sel = 0;
@@ -3072,7 +3241,8 @@ fn composer_bar(
                         // newline — Shift+Enter passes through to wrap the line.
                         // (If the slash picker took the Enter above, this sees
                         // nothing and the keystroke completes rather than sends.)
-                        let send_enter = composer_focused
+                        let send_enter = !modal
+                            && composer_focused
                             && ui.input_mut(|i| {
                                 i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
                             });

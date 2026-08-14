@@ -102,6 +102,29 @@ newest first, repeat edits counted, click to copy the path. Read is
 deliberately excluded: the panel answers "what did it change", not "what did it
 look at".
 
+### Guarding against a second agent in one directory
+
+| # | Item | Status | Covered by |
+|---|------|--------|-----------|
+| 14 | Warn before starting an agent where one runs | **done** | `a second agent…is held for confirmation`, `backing out starts nothing`, `enter takes the safe option…`, `start anyway does start it` |
+
+Starting a second agent in a directory that already has one is easy to do by
+accident and expensive to notice — they overwrite each other's edits. The
+request is now held and a dialog names what is already there (a claude TUI in a
+*terminal* pane counts: from the directory's point of view there is no
+difference).
+
+**Backing out is the default**, and that is the whole point of the design: you
+reach this dialog by pressing Enter in the picker, so Enter here has to be
+safe. It cancels. Starting anyway is a deliberate second choice (↓ then Enter,
+`2`, or the button). The e2e asserts both halves — that Enter starts nothing,
+and that "start anyway" does.
+
+**A real bug fell out of writing that test.** With a modal open, the composer
+underneath still held egui focus and swallowed Enter, so the dialog never saw
+it. Any modal without its own text field had the same problem. The composer now
+ignores Enter and the slash picker's keys while an overlay is up.
+
 ### CONTEXT + FILES for terminal panes
 
 | # | Item | Status | Covered by |

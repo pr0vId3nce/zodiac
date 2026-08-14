@@ -151,6 +151,8 @@ pub struct GuiApp {
     /// e2e: pin this pane as a claude pty pane, and the scratch projects tree
     /// to clean up afterwards.
     e2e_force_claude: Option<u64>,
+    /// e2e: UiActions to run on the next frame.
+    e2e_actions: Vec<crate::ui::UiAction>,
     e2e_proj_root: Option<std::path::PathBuf>,
     /// Reads context + touched files from claude's session transcript for
     /// terminal panes (structured panes get theirs from the stream).
@@ -228,6 +230,7 @@ impl GuiApp {
             e2e_chrome_saved: (String::new(), String::new()),
             e2e_panes_before: 0,
             e2e_force_claude: None,
+            e2e_actions: Vec::new(),
             e2e_proj_root: None,
             term_agents: crate::termagent::Watcher::spawn(),
             e2e_force_working: None,
@@ -410,6 +413,73 @@ impl GuiApp {
         };
         self.ui_state.overlay = crate::ui::Overlay::NewAgent;
         self.request_redraw();
+    }
+
+    /// The directory a new pane will start in: the active pane's, since that
+    /// is the one you were looking at when you asked for it.
+    fn new_pane_cwd(&self) -> Option<String> {
+        let id = self.panes.get(self.active).map(|p| p.id)?;
+        self.state
+            .as_ref()
+            .and_then(|st| st.panes.iter().find(|ps| ps.id == id))
+            .and_then(|ps| ps.cwd.clone())
+    }
+
+    /// Live agents already working in `cwd`, as (label, status).
+    ///
+    /// Counts a claude TUI running in a *terminal* pane too: it edits the same
+    /// files as a structured one, so from the directory's point of view there
+    /// is no difference.
+    fn agents_in(&self, cwd: &str) -> Vec<(String, String)> {
+        if cwd.is_empty() {
+            return Vec::new();
+        }
+        let Some(state) = self.state.as_ref() else {
+            return Vec::new();
+        };
+        state
+            .panes
+            .iter()
+            .filter(|ps| {
+                ps.cwd.as_deref() == Some(cwd)
+                    && (ps.kind == "agent" || ps.agent.is_some())
+                    && ps.ssh.is_none()
+            })
+            .map(|ps| {
+                let label = if ps.name.is_empty() {
+                    ps.agent.clone().unwrap_or_else(|| "agent".into())
+                } else {
+                    ps.name.clone()
+                };
+                let kind = if ps.kind == "agent" {
+                    "chat"
+                } else {
+                    "terminal"
+                };
+                (format!("{label} · {kind}"), ps.status.clone())
+            })
+            .collect()
+    }
+
+    /// Send the new-agent request (after any confirmation).
+    fn spawn_agent(
+        &mut self,
+        agent: &str,
+        model: Option<String>,
+        session: Option<String>,
+        cwd: &str,
+    ) {
+        let mut obj = serde_json::json!({ "kind": "agent", "agent": agent });
+        if let Some(m) = model {
+            obj["model"] = serde_json::Value::String(m);
+        }
+        if let Some(s) = session {
+            obj["session"] = serde_json::Value::String(s);
+        }
+        if !cwd.is_empty() {
+            obj["cwd"] = serde_json::Value::String(cwd.to_string());
+        }
+        self.send(T_NEW_PANE, 0, obj.to_string().as_bytes());
     }
 
     /// Which pty panes should the transcript watcher follow, and what it found.
@@ -1575,6 +1645,96 @@ impl GuiApp {
                 self.e2e_after(300);
             }
 
+            // --- a second agent in the same directory must be confirmed ---
+            61 => {
+                let Some(i) = self.e2e_agent() else {
+                    return self.e2e_after(50);
+                };
+                self.active = i; // its cwd already holds a running agent
+                self.screen = Screen::Focused;
+                self.e2e_panes_before = self.panes.len();
+                self.e2e_actions.push(crate::ui::UiAction::CreateAgent {
+                    agent: "claude".into(),
+                    model: None,
+                    session: None,
+                });
+                self.request_redraw();
+                self.e2e_after(1200);
+            }
+            62 => {
+                let held = self.panes.len() == self.e2e_panes_before;
+                let listed = self.ui_state.pending_agent.existing.len();
+                self.check(
+                    "a second agent in the same directory is held for confirmation",
+                    self.ui_state.overlay == Overlay::ConfirmAgent && held && listed > 0,
+                    format!(
+                        "overlay={:?} panes {}->{} existing={listed}",
+                        self.ui_state.overlay,
+                        self.e2e_panes_before,
+                        self.panes.len()
+                    ),
+                );
+                // Esc backs out.
+                self.e2e_key(egui::Key::Escape);
+                self.request_redraw();
+                self.e2e_after(1500);
+            }
+            63 => {
+                self.check(
+                    "backing out starts nothing",
+                    self.panes.len() == self.e2e_panes_before
+                        && self.ui_state.overlay == Overlay::None,
+                    format!(
+                        "panes {}->{} overlay={:?}",
+                        self.e2e_panes_before,
+                        self.panes.len(),
+                        self.ui_state.overlay
+                    ),
+                );
+                // Ask again, and this time take "start anyway" (row 2). Enter
+                // alone must not do it: the default is to back out.
+                self.e2e_actions.push(crate::ui::UiAction::CreateAgent {
+                    agent: "claude".into(),
+                    model: None,
+                    session: None,
+                });
+                self.request_redraw();
+                self.e2e_after(1200);
+            }
+            64 => {
+                self.e2e_key(egui::Key::Enter); // the default: back out
+                self.request_redraw();
+                self.e2e_after(1200);
+            }
+            65 => {
+                self.check(
+                    "enter takes the safe option, not the destructive one",
+                    self.panes.len() == self.e2e_panes_before
+                        && self.ui_state.overlay == Overlay::None,
+                    format!("panes {}->{}", self.e2e_panes_before, self.panes.len()),
+                );
+                self.e2e_actions.push(crate::ui::UiAction::CreateAgent {
+                    agent: "claude".into(),
+                    model: None,
+                    session: None,
+                });
+                self.request_redraw();
+                self.e2e_after(1200);
+            }
+            66 => {
+                self.e2e_key(egui::Key::Num2); // start anyway
+                self.request_redraw();
+                self.e2e_after(6000);
+            }
+            67 => {
+                self.check(
+                    "start anyway does start it",
+                    self.panes.len() > self.e2e_panes_before,
+                    format!("panes {}->{}", self.e2e_panes_before, self.panes.len()),
+                );
+                self.e2e_after(300);
+            }
+
             // --- report -------------------------------------------------
             _ => {
                 let total = self.e2e_results.len();
@@ -2688,6 +2848,9 @@ impl GuiApp {
             }
         }
         let mut actions: Vec<crate::ui::UiAction> = Vec::new();
+        // e2e: actions the harness wants run through the real handler, rather
+        // than reaching into the app's internals to fake their effects.
+        actions.append(&mut self.e2e_actions);
         // Owned copies so `data` doesn't hold a borrow on `self.settings`
         // while `build` also takes `&mut self.settings`.
         let numeral = if self.settings.card_numeral.is_empty() {
@@ -2909,24 +3072,30 @@ impl GuiApp {
                     model,
                     session,
                 } => {
-                    let mut obj = serde_json::json!({ "kind": "agent", "agent": agent });
-                    if let Some(m) = model {
-                        obj["model"] = serde_json::Value::String(m);
+                    // Starting a second agent in a directory that already has
+                    // one is easy to do by accident and expensive to notice:
+                    // they overwrite each other's edits. Hold the request and
+                    // ask first.
+                    let cwd = self.new_pane_cwd().unwrap_or_default();
+                    let existing = self.agents_in(&cwd);
+                    if !existing.is_empty() {
+                        self.ui_state.pending_agent = crate::ui::PendingAgent {
+                            agent,
+                            model,
+                            session,
+                            cwd,
+                            existing,
+                            sel: 0, // backing out is the default
+                        };
+                        self.ui_state.overlay = crate::ui::Overlay::ConfirmAgent;
+                        self.request_redraw();
+                        continue;
                     }
-                    if let Some(s) = session {
-                        obj["session"] = serde_json::Value::String(s);
-                    }
-                    // Resume in the active pane's directory, not the server's.
-                    let active = self.panes.get(self.active).map(|p| p.id);
-                    if let Some(cwd) = active.and_then(|id| {
-                        self.state
-                            .as_ref()
-                            .and_then(|st| st.panes.iter().find(|ps| ps.id == id))
-                            .and_then(|ps| ps.cwd.clone())
-                    }) {
-                        obj["cwd"] = serde_json::Value::String(cwd);
-                    }
-                    self.send(T_NEW_PANE, 0, obj.to_string().as_bytes());
+                    self.spawn_agent(&agent, model, session, &cwd);
+                }
+                crate::ui::UiAction::ConfirmNewAgent => {
+                    let p = std::mem::take(&mut self.ui_state.pending_agent);
+                    self.spawn_agent(&p.agent, p.model, p.session, &p.cwd);
                 }
                 crate::ui::UiAction::CyclePermMode(id) => {
                     self.cycle_perm_mode(id);

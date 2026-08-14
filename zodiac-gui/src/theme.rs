@@ -184,6 +184,14 @@ pub fn opacity() -> Opacity {
     ALPHA.with(|c| c.get())
 }
 
+/// Is any ground translucent? Layouts that stack one ground on another have
+/// to stop doing that when they are: two 80% layers make 96%, which reads as
+/// solid and makes the setting look broken.
+pub fn any_translucent() -> bool {
+    let o = opacity();
+    o.gui < 1.0 || o.chat < 1.0 || o.term < 1.0
+}
+
 /// A ground color at `a` opacity. `Color32` is premultiplied, so this goes
 /// through `from_rgba_unmultiplied` rather than poking the alpha byte.
 fn fade(c: Color32, a: f32) -> Color32 {

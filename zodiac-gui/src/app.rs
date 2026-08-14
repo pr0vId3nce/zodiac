@@ -1879,12 +1879,26 @@ impl GuiApp {
                     .renderer
                     .as_ref()
                     .is_some_and(|r| r.can_be_transparent());
+                // The pane's ground is painted *inside* the focused view's
+                // central panel, so that panel must stop painting one of its
+                // own: 80% over 80% is 96%, which is why the terminal and the
+                // transcript still looked solid when the chrome around them
+                // did not.
+                let stacked = self
+                    .ui_state
+                    .probe
+                    .body_ground
+                    .is_some_and(|c| c != egui::Color32::TRANSPARENT);
                 self.check(
                     "grounds go translucent independently, live",
                     // 0.8 and 0.7 of 255, rounded; the terminal was left at
                     // 100% and must not have moved.
-                    chat == 204 && chrome == 179 && term == 255 && (clears || !capable),
-                    format!("chat={chat} chrome={chrome} term={term} clear_transparent={clears} capable={capable}"),
+                    chat == 204
+                        && chrome == 179
+                        && term == 255
+                        && !stacked
+                        && (clears || !capable),
+                    format!("chat={chat} chrome={chrome} term={term} stacked={stacked} clear_transparent={clears} capable={capable}"),
                 );
                 self.settings.chat_opacity = "100%".into();
                 self.settings.gui_opacity = "100%".into();

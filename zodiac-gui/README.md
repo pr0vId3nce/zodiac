@@ -155,7 +155,11 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
   ignores every bit of alpha rendered under it — so changing an opacity row
   also calls `Window::set_transparent`, and the change lands on the spot
   rather than at the next launch. (X11 can only choose this at creation, so
-  there the first switch does need a relaunch.)
+  there the first switch does need a relaunch.) One layer per pixel, too: the
+  header, body and composer each paint their own ground *inside* the focused
+  view's central panel, so that panel paints none while anything is
+  translucent — 80% over 80% is 96%, which is how the terminal and the
+  transcript stayed solid while the chrome around them went see-through.
 - **Design tokens** (`theme.rs`): the handoff's ground/chrome/text/accent
   palette folded into egui `Visuals`, with the five status colors carried
   verbatim from `src/theme.rs` (thinking → violet, idle text override).

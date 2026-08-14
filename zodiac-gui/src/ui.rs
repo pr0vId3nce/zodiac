@@ -177,6 +177,10 @@ pub struct Probe {
     pub sidebar: Option<egui::Rect>,
     pub rail: Option<egui::Rect>,
     pub header: Option<egui::Rect>,
+    /// What the focused view's central panel filled with. The pane's own
+    /// ground is painted inside it, so this must be transparent while any
+    /// ground is — two translucent layers read as one opaque one.
+    pub body_ground: Option<Color32>,
     /// The context gauge's filled portion, and how many file rows drew — so
     /// the harness can tell "the data folded" from "the user can see it".
     pub ctx_fill: Option<egui::Rect>,
@@ -200,6 +204,7 @@ impl Probe {
             sidebar: None,
             rail: None,
             header: None,
+            body_ground: None,
             ctx_fill: None,
             file_rows: 0,
             ctx_header: false,
@@ -1156,12 +1161,21 @@ fn focused(root: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
         );
         probe_set(|p| p.rail = Some(rect));
     }
+    // Everything in the focused view — header, body, composer — paints its
+    // own ground *inside* this panel, so filling it too would put two
+    // translucent layers on top of each other: 80% over 80% is 96%, which
+    // reads as opaque. That is why the terminal and the transcript looked
+    // solid while the chrome around them (single layers, in their own side
+    // panels) went translucent as asked. With transparency on, this panel
+    // paints nothing and each region's own ground is the only layer.
+    let ground = if theme::any_translucent() {
+        Color32::TRANSPARENT
+    } else {
+        theme::bg_window()
+    };
+    probe_set(|p| p.body_ground = Some(ground));
     egui::CentralPanel::default()
-        .frame(
-            Frame::NONE
-                .fill(theme::bg_window())
-                .inner_margin(Margin::same(0)),
-        )
+        .frame(Frame::NONE.fill(ground).inner_margin(Margin::same(0)))
         .show(root, |ui| main_pane(ui, d, st, actions));
 }
 
@@ -1332,6 +1346,10 @@ fn pane_header(
 
 fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<UiAction>) {
     let Some(p) = d.panes.get(d.active) else {
+        // The one branch that draws no region of its own, so it paints the
+        // ground itself — the panel around it no longer does (see `focused`).
+        ui.painter()
+            .rect_filled(ui.max_rect(), CornerRadius::ZERO, theme::bg_window());
         ui.centered_and_justified(|ui| {
             ui.label(RichText::new("no pane").color(theme::TEXT_FAINT));
         });

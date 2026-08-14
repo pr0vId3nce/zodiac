@@ -172,10 +172,11 @@ pub struct Probe {
     /// How many slash-command rows the picker offered (0 = closed).
     pub slash_rows: usize,
     /// The chrome that can be collapsed, when it was drawn at all: the top
-    /// bar, the pane sidebar and the activity rail.
+    /// bar, the pane sidebar, the activity rail and the focused pane's header.
     pub topbar: Option<egui::Rect>,
     pub sidebar: Option<egui::Rect>,
     pub rail: Option<egui::Rect>,
+    pub header: Option<egui::Rect>,
     /// The context gauge's filled portion, and how many file rows drew — so
     /// the harness can tell "the data folded" from "the user can see it".
     pub ctx_fill: Option<egui::Rect>,
@@ -198,6 +199,7 @@ impl Probe {
             topbar: None,
             sidebar: None,
             rail: None,
+            header: None,
             ctx_fill: None,
             file_rows: 0,
             ctx_header: false,
@@ -320,6 +322,9 @@ pub struct UiData<'a> {
     /// (Ctrl+← / Ctrl+→). Persisted in settings.
     pub hide_sidebar: bool,
     pub hide_rail: bool,
+    /// Focused view: the pane header — sigil, name, agent/model chips, status
+    /// — is collapsed (Ctrl+↑). Persisted in settings.
+    pub hide_header: bool,
     /// Context + touched files read from the session transcript for pty panes
     /// running claude, keyed by pane id (see `termagent`).
     pub term_agents: &'a std::collections::HashMap<u64, crate::termagent::PaneAgent>,
@@ -1243,17 +1248,17 @@ fn sidebar(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
 }
 
 /// The main column: pane header, then transcript or terminal, then composer.
-fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<UiAction>) {
-    let Some(p) = d.panes.get(d.active) else {
-        ui.centered_and_justified(|ui| {
-            ui.label(RichText::new("no pane").color(theme::TEXT_FAINT));
-        });
-        return;
-    };
-    let ps = d.ps(p);
-    let si = d.si(p);
-    // Header.
-    Frame::NONE
+/// The focused pane's header bar: sigil, name, agent chip, status pill, and —
+/// right-aligned — the model and (for claude) the permission mode. Returns the
+/// rect it occupied. Ctrl+↑ skips it entirely; see `main_pane`.
+fn pane_header(
+    ui: &mut egui::Ui,
+    d: &UiData,
+    p: &CPane,
+    ps: Option<&PaneState>,
+    si: usize,
+) -> egui::Rect {
+    let r = Frame::NONE
         .fill(theme::bg_chrome())
         .inner_margin(Margin::symmetric(16, 10))
         .show(ui, |ui| {
@@ -1322,6 +1327,27 @@ fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<
                 });
             });
         });
+    r.response.rect
+}
+
+fn main_pane(ui: &mut egui::Ui, d: &UiData, st: &mut UiState, actions: &mut Vec<UiAction>) {
+    let Some(p) = d.panes.get(d.active) else {
+        ui.centered_and_justified(|ui| {
+            ui.label(RichText::new("no pane").color(theme::TEXT_FAINT));
+        });
+        return;
+    };
+    let ps = d.ps(p);
+    let si = d.si(p);
+    // Header. Ctrl+↑ folds it away: everything on it is either already in the
+    // sidebar's pane row or a chip you don't need while you work, and the
+    // height it costs is height the terminal or transcript could have. Not
+    // drawing it — as with the flanking panels — is what lets the body
+    // reclaim the space rather than be letterboxed in it.
+    if !d.hide_header {
+        let rect = pane_header(ui, d, p, ps, si);
+        probe_set(|pr| pr.header = Some(rect));
+    }
     // Measure the body area (below the header) in cells at the terminal
     // font, so the pty is sized to the actual egui terminal widget rather
     // than the legacy full-window grid. Recorded for the app to send as

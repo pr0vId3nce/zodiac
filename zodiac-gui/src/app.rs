@@ -48,11 +48,29 @@ const MIN_FRAME: Duration = Duration::from_millis(16);
 /// background pane still streams visibly, at a fraction of the CPU.
 const UNFOCUSED_FRAME: Duration = Duration::from_millis(66);
 
+/// The desktop application ID. It is deliberately the basename of the
+/// launcher entry (`packaging/zodiac-gui.desktop`) — that agreement is what
+/// lets a compositor or launcher match a running window to the entry that
+/// started it, and hand it the right icon and name.
+pub const APP_ID: &str = "zodiac-gui";
+
 /// Events injected into the winit loop from outside: server frames read on
 /// the socket thread.
 pub enum UserEvent {
     Srv(Frame),
     SrvGone,
+}
+
+/// A piece of the focused view's chrome that folds away on a chord, freeing
+/// its space for the pane itself.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Chrome {
+    /// The pane list on the left (Ctrl+←).
+    Sidebar,
+    /// The activity rail on the right (Ctrl+→).
+    Rail,
+    /// The pane header across the top (Ctrl+↑).
+    Header,
 }
 
 pub struct GuiApp {
@@ -140,12 +158,13 @@ pub struct GuiApp {
     e2e_stream_ticks: usize,
     /// Interrupt frames sent (the e2e asserts Esc reaches the wire).
     e2e_interrupts: usize,
-    /// e2e: terminal columns before a chrome toggle, whether Ctrl+←/→ were
-    /// claimed as global chords, and the user's real panel settings to put
-    /// back (the toggles persist to config.json).
+    /// e2e: terminal columns and rows before a chrome toggle, whether Ctrl+←/→
+    /// and Ctrl+↑ were claimed as global chords, and the user's real chrome
+    /// settings to put back (the toggles persist to config.json).
     e2e_cols: u16,
+    e2e_rows: u16,
     e2e_chord_ok: bool,
-    e2e_chrome_saved: (String, String),
+    e2e_chrome_saved: (String, String, String),
     /// e2e: pane count before an action that may add one.
     e2e_panes_before: usize,
     /// e2e: pin this pane as a claude pty pane, and the scratch projects tree
@@ -226,8 +245,9 @@ impl GuiApp {
             e2e_stream_ticks: 0,
             e2e_interrupts: 0,
             e2e_cols: 0,
+            e2e_rows: 0,
             e2e_chord_ok: false,
-            e2e_chrome_saved: (String::new(), String::new()),
+            e2e_chrome_saved: (String::new(), String::new(), String::new()),
             e2e_panes_before: 0,
             e2e_force_claude: None,
             e2e_actions: Vec::new(),
@@ -1240,9 +1260,11 @@ impl GuiApp {
                 self.e2e_chrome_saved = (
                     self.settings.gui_sidebar.clone(),
                     self.settings.gui_rail.clone(),
+                    self.settings.gui_header.clone(),
                 );
                 self.settings.gui_sidebar = "show".into();
                 self.settings.gui_rail = "show".into();
+                self.settings.gui_header = "show".into();
                 self.screen = Screen::Observatory;
                 self.request_redraw();
                 self.e2e_after(600);
@@ -1264,12 +1286,16 @@ impl GuiApp {
                 let p = self.ui_state.probe;
                 self.check(
                     "the top bar is hidden in the focused view",
-                    p.topbar.is_none() && p.sidebar.is_some() && p.rail.is_some(),
+                    p.topbar.is_none()
+                        && p.sidebar.is_some()
+                        && p.rail.is_some()
+                        && p.header.is_some(),
                     format!(
-                        "topbar={:?} sidebar={} rail={}",
+                        "topbar={:?} sidebar={} rail={} header={}",
                         p.topbar,
                         p.sidebar.is_some(),
-                        p.rail.is_some()
+                        p.rail.is_some(),
+                        p.header.is_some()
                     ),
                 );
                 // Baseline width, then collapse the sidebar through the real
@@ -1278,7 +1304,8 @@ impl GuiApp {
                 self.e2e_cols = self.ui_state.term_grid.map(|g| g.1).unwrap_or(0);
                 self.mods = ModifiersState::CONTROL;
                 let claimed = self.is_global_chord(&Key::Named(NamedKey::ArrowLeft))
-                    && self.is_global_chord(&Key::Named(NamedKey::ArrowRight));
+                    && self.is_global_chord(&Key::Named(NamedKey::ArrowRight))
+                    && self.is_global_chord(&Key::Named(NamedKey::ArrowUp));
                 self.e2e_chord_ok = claimed;
                 self.on_key_logical(&Key::Named(NamedKey::ArrowLeft));
                 self.mods = ModifiersState::empty();
@@ -1308,29 +1335,50 @@ impl GuiApp {
                     self.ui_state.probe.rail.is_none() && cols > was,
                     format!("cols {was} -> {cols}"),
                 );
-                // Both again: the toggles must restore, not just hide.
+                // Now the header, on the other axis: the pty should gain rows,
+                // which is the whole point of folding it away.
+                self.e2e_rows = self.ui_state.term_grid.map(|g| g.0).unwrap_or(0);
                 self.mods = ModifiersState::CONTROL;
-                self.on_key_logical(&Key::Named(NamedKey::ArrowLeft));
-                self.on_key_logical(&Key::Named(NamedKey::ArrowRight));
+                self.on_key_logical(&Key::Named(NamedKey::ArrowUp));
                 self.mods = ModifiersState::empty();
                 self.request_redraw();
                 self.e2e_after(900);
             }
             45 => {
-                let p = self.ui_state.probe;
+                let rows = self.ui_state.term_grid.map(|g| g.0).unwrap_or(0);
+                let was = self.e2e_rows;
                 self.check(
-                    "the toggles restore both panels",
-                    p.sidebar.is_some() && p.rail.is_some(),
-                    format!("sidebar={} rail={}", p.sidebar.is_some(), p.rail.is_some()),
+                    "ctrl+up collapses the pane header and the pty reclaims it",
+                    self.ui_state.probe.header.is_none() && rows > was,
+                    format!("rows {was} -> {rows}"),
                 );
-                let (s, r) = self.e2e_chrome_saved.clone();
-                self.settings.gui_sidebar = s;
-                self.settings.gui_rail = r;
-                self.e2e_after(300);
+                // All three again: the toggles must restore, not just hide.
+                self.mods = ModifiersState::CONTROL;
+                self.on_key_logical(&Key::Named(NamedKey::ArrowLeft));
+                self.on_key_logical(&Key::Named(NamedKey::ArrowRight));
+                self.on_key_logical(&Key::Named(NamedKey::ArrowUp));
+                self.mods = ModifiersState::empty();
+                self.request_redraw();
+                self.e2e_after(900);
             }
 
             // --- alt+r renames the pane, as the TUI does -----------------
             46 => {
+                let p = self.ui_state.probe;
+                self.check(
+                    "the toggles restore all three",
+                    p.sidebar.is_some() && p.rail.is_some() && p.header.is_some(),
+                    format!(
+                        "sidebar={} rail={} header={}",
+                        p.sidebar.is_some(),
+                        p.rail.is_some(),
+                        p.header.is_some()
+                    ),
+                );
+                let (s, r, h) = self.e2e_chrome_saved.clone();
+                self.settings.gui_sidebar = s;
+                self.settings.gui_rail = r;
+                self.settings.gui_header = h;
                 self.e2e_pane_before = (0, self.panes[self.e2e_pty().unwrap_or(0)].id);
                 self.focus(self.e2e_pty().unwrap_or(0));
                 self.screen = Screen::Focused;
@@ -2128,16 +2176,17 @@ impl GuiApp {
         self.on_key_logical(&ev.logical_key);
     }
 
-    /// Collapse or restore one of the focused view's flanking panels — the
-    /// pane sidebar (`left`) or the activity rail. Persisted, so a panel you
-    /// closed stays closed next launch. The pty is re-measured from the wider
-    /// central panel on the next frame, so the terminal actually grows into
-    /// the space rather than being letterboxed in it.
-    fn toggle_chrome(&mut self, left: bool) {
-        let field = if left {
-            &mut self.settings.gui_sidebar
-        } else {
-            &mut self.settings.gui_rail
+    /// Collapse or restore one piece of the focused view's chrome — the pane
+    /// sidebar (Ctrl+←), the activity rail (Ctrl+→) or the pane header
+    /// (Ctrl+↑). Persisted, so what you closed stays closed next launch. The
+    /// pty is re-measured from the larger central panel on the next frame, so
+    /// the terminal actually grows into the space rather than being
+    /// letterboxed in it.
+    fn toggle_chrome(&mut self, which: Chrome) {
+        let field = match which {
+            Chrome::Sidebar => &mut self.settings.gui_sidebar,
+            Chrome::Rail => &mut self.settings.gui_rail,
+            Chrome::Header => &mut self.settings.gui_header,
         };
         *field = if field == "hide" { "show" } else { "hide" }.to_string();
         // Never persist under the harness: the e2e drives this toggle, and a
@@ -2178,10 +2227,10 @@ impl GuiApp {
                 return true;
             }
         }
-        // Ctrl+PageUp/PageDown switch panes; Ctrl+←/→ collapse the sidebar and
-        // the activity rail. The latter must be global for the same reason as
-        // the Alt chords, and additionally so a terminal pane doesn't receive
-        // the keystroke as well as toggling the panel.
+        // Ctrl+PageUp/PageDown switch panes; Ctrl+←/→/↑ collapse the sidebar,
+        // the activity rail and the pane header. The latter must be global for
+        // the same reason as the Alt chords, and additionally so a terminal
+        // pane doesn't receive the keystroke as well as toggling the chrome.
         if self.mods.control_key()
             && matches!(
                 logical,
@@ -2190,6 +2239,7 @@ impl GuiApp {
                         | NamedKey::PageDown
                         | NamedKey::ArrowLeft
                         | NamedKey::ArrowRight
+                        | NamedKey::ArrowUp
                 )
             )
         {
@@ -2309,16 +2359,21 @@ impl GuiApp {
                 }
             }
         }
-        // Chrome shortcuts: Ctrl+←/→ collapse the sidebar / activity rail,
-        // giving the pane the full width. Pane-switch: Ctrl+PageUp/Down.
+        // Chrome shortcuts: Ctrl+←/→ collapse the sidebar / activity rail and
+        // Ctrl+↑ the pane header, giving the pane the full window. Pane-switch:
+        // Ctrl+PageUp/Down.
         if self.mods.control_key() {
             match *logical {
                 Key::Named(NamedKey::ArrowLeft) => {
-                    self.toggle_chrome(true);
+                    self.toggle_chrome(Chrome::Sidebar);
                     return;
                 }
                 Key::Named(NamedKey::ArrowRight) => {
-                    self.toggle_chrome(false);
+                    self.toggle_chrome(Chrome::Rail);
+                    return;
+                }
+                Key::Named(NamedKey::ArrowUp) => {
+                    self.toggle_chrome(Chrome::Header);
                     return;
                 }
                 Key::Named(NamedKey::PageUp) => {
@@ -2873,6 +2928,7 @@ impl GuiApp {
         let agent_scale = self.settings.agent_font() / gui_font;
         let hide_sidebar = self.settings.gui_sidebar_hidden();
         let hide_rail = self.settings.gui_rail_hidden();
+        let hide_header = self.settings.gui_header_hidden();
         // Snapshot the worker's findings for pty panes running claude. Small
         // (a usage struct + a path list per pane) and read, never parsed, here.
         let term_agents = self.term_agent_snapshot();
@@ -2898,6 +2954,7 @@ impl GuiApp {
                 agent_scale,
                 hide_sidebar,
                 hide_rail,
+                hide_header,
                 term_agents: &term_agents,
             };
             crate::ui::build(
@@ -3217,6 +3274,21 @@ impl ApplicationHandler<UserEvent> for GuiApp {
         // move/minimize/close.
         #[cfg(not(target_os = "macos"))]
         let attrs = attrs.with_decorations(false);
+        // The application ID, which has to match the basename of the
+        // installed `.desktop` file (see `packaging/`): it is how a Wayland
+        // compositor or launcher ties this window back to its launcher entry,
+        // and so how the app gets its icon and its name in a window switcher.
+        // Without it the window inherits winit's fallback and shows up
+        // unnamed and icon-less.
+        #[cfg(all(unix, not(target_os = "macos"), not(target_os = "android")))]
+        let attrs = {
+            use winit::platform::wayland::WindowAttributesExtWayland;
+            use winit::platform::x11::WindowAttributesExtX11;
+            // Both traits spell it `with_name`, so call each by name rather
+            // than by method syntax.
+            let a = WindowAttributesExtWayland::with_name(attrs, APP_ID, APP_ID);
+            WindowAttributesExtX11::with_name(a, APP_ID, APP_ID)
+        };
         // macOS: keep the real window frame but make it transparent and let
         // content run full height under it. That is how a Mac app gets
         // genuine traffic lights, rounded corners, snapping and fullscreen

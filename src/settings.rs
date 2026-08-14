@@ -125,6 +125,11 @@ pub struct Settings {
     /// GUI-only.
     #[serde(default)]
     pub gui_rail: String,
+    /// GUI focused-view chrome: "hide" collapses the pane header — the bar
+    /// carrying the sigil, name, agent/model chips and status (Ctrl+↑).
+    /// GUI-only.
+    #[serde(default)]
+    pub gui_header: String,
     /// GUI backdrop preset: "oled" (#000, default), "charcoal", "midnight",
     /// "slate". GUI-only.
     #[serde(default)]
@@ -319,6 +324,11 @@ impl Settings {
     /// Is the focused view's activity rail collapsed? (Ctrl+→ toggles it.)
     pub fn gui_rail_hidden(&self) -> bool {
         self.gui_rail == "hide"
+    }
+
+    /// Is the focused view's pane header collapsed? (Ctrl+↑ toggles it.)
+    pub fn gui_header_hidden(&self) -> bool {
+        self.gui_header == "hide"
     }
 
     /// GUI backdrop preset name (default "oled"). The GUI maps it to RGB.

@@ -1,0 +1,17 @@
+[Desktop Entry]
+Type=Application
+Name=zodiac
+GenericName=Agent multiplexer
+Comment=Terminal multiplexer built around AI coding agents
+# @EXEC@ is substituted with the absolute path to the launcher by
+# update.sh: an app launcher does not read a login shell's PATH, so a bare
+# `zodiac-gui` here would not start on most desktops.
+Exec=@EXEC@
+Icon=zodiac-gui
+Terminal=false
+Categories=System;TerminalEmulator;
+Keywords=zodiac;terminal;multiplexer;agent;claude;
+# Matches the window's application ID (app.rs: APP_ID), so the compositor
+# ties a running window back to this entry.
+StartupWMClass=zodiac-gui
+StartupNotify=true

@@ -61,9 +61,13 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
   pty panes.
 - **Chrome that gets out of the way** — the top bar (wordmark, session chip,
   chrome buttons, host vitals) is Observatory chrome: the focused view doesn't
-  draw it, so a pane keeps those 52px. **Ctrl+←** collapses the pane sidebar
-  and **Ctrl+→** the activity rail; both persist, and the pty is re-measured so
-  the terminal actually grows into the reclaimed width. With the bar hidden the
+  draw it, so a pane keeps those 52px. **Ctrl+←** collapses the pane sidebar,
+  **Ctrl+→** the activity rail, and **Ctrl+↑** the pane header (sigil, name,
+  agent/model chips, status) — everything on that header is either already in
+  the sidebar's pane row or a chip you don't need while you work. All three
+  persist, and the pty is re-measured so the terminal actually grows into the
+  reclaimed width *and* height rather than being letterboxed in it. With the
+  bar hidden the
   window is moved and closed by the WM (Alt+Z brings it back with the
   Observatory), and every button it carried has a key: ⌘K, ⌘, , Alt+O, Alt+P.
 - **⌘K / Ctrl+K** — command palette (fuzzy pane jump; ↑/↓, Enter, Esc).
@@ -156,6 +160,24 @@ those libraries on `LD_LIBRARY_PATH` yourself.
 
 Testing hook: `ZODIAC_GUI_EXIT_AFTER_MS=<ms>` detaches and exits after the
 delay (used by unattended smoke tests).
+
+## Launcher entry
+
+`update.sh` installs a desktop entry so the GUI starts from the desktop's app
+launcher, not only from a shell:
+
+- `~/.local/share/applications/zodiac-gui.desktop` — generated from
+  `packaging/zodiac-gui.desktop.in`, with `Exec` filled in as the absolute
+  path to `~/.cargo/bin/zodiac-gui` (a launcher does not read a login shell's
+  PATH, and on NixOS that wrapper is what supplies the devshell's
+  `LD_LIBRARY_PATH`).
+- `~/.local/share/icons/hicolor/scalable/apps/zodiac-gui.svg` — the icon.
+
+The window sets its application ID to `zodiac-gui` (`app.rs`: `APP_ID`), which
+matches the entry's basename and its `StartupWMClass`; that agreement is what
+lets a compositor tie a running window back to the entry it came from, so the
+window carries the right name and icon. macOS has its own bundle
+(`scripts/bundle-macos-app.sh`), so the entry is Linux/BSD only.
 
 ## Known gaps / deferred (native rebuild)
 

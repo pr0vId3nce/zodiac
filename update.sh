@@ -123,6 +123,26 @@ EOF
   fi
   chmod +x "$BIN/zodiac-gui"
   note "$BIN/zodiac-gui"
+
+  # Launcher entry, so the GUI starts from the desktop's app launcher and not
+  # only from a shell. Exec is the absolute path to the wrapper above:
+  # launchers do not read a login shell's PATH. Icon and entry basename match
+  # the window's application ID (zodiac-gui), which is what lets a compositor
+  # tie a running window to this entry. macOS has its own bundle
+  # (scripts/bundle-macos-app.sh), so this is Linux/BSD only.
+  if [ "$(uname)" != Darwin ]; then
+    APPS="${XDG_DATA_HOME:-$HOME/.local/share}/applications"
+    ICONS="${XDG_DATA_HOME:-$HOME/.local/share}/icons/hicolor/scalable/apps"
+    mkdir -p "$APPS" "$ICONS"
+    cp packaging/zodiac-gui.svg "$ICONS/zodiac-gui.svg"
+    sed "s|@EXEC@|$BIN/zodiac-gui|" packaging/zodiac-gui.desktop.in \
+      > "$APPS/zodiac-gui.desktop"
+    # Best effort: most launchers read the directory directly, but the ones
+    # that keep a cache need this.
+    command -v update-desktop-database >/dev/null 2>&1 &&
+      update-desktop-database "$APPS" >/dev/null 2>&1 || true
+    note "$APPS/zodiac-gui.desktop"
+  fi
 fi
 
 # ── astrolabe (web bundle and/or bridge service)

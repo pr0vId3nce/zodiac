@@ -125,6 +125,28 @@ underneath still held egui focus and swallowed Enter, so the dialog never saw
 it. Any modal without its own text field had the same problem. The composer now
 ignores Enter and the slash picker's keys while an overlay is up.
 
+### Stale/wrong readings in the rail — reported and fixed
+
+A pane in `~` showed `236k / 200k · 100%`, `100.4M cached`, and a FILES list
+from an unrelated project. Three separate faults, all mine:
+
+1. **Wrong session.** Attribution took the most recently *written* transcript
+   in the directory. `~/.claude/projects/-home-d3s/` holds 63 of them, and the
+   winner was a 42 MB session belonging to another window entirely. Now only a
+   session **born while the pane was alive** can be claimed, and if two began
+   there the panel says so instead of guessing — a coin flip presented as fact
+   is worse than an empty panel. Verified against the real directory: a
+   three-minute-old pane in `/home/d3s` now claims nothing.
+2. **A meaningless total.** `cached` summed `cache_read` across every turn, but
+   a cached prefix is re-read on each request — one prefix counted hundreds of
+   times, hence `100.4M` against a 200k window. Only genuinely cumulative
+   tokens (generated) are shown now.
+3. **A window that couldn't be true.** A 200k session cannot hold 236k, so the
+   assumed window was wrong (the 1M opt-in). The limit is now corrected from
+   the observation rather than rendering a permanent, false 100%.
+
+Each is pinned by a test: two on attribution, one on the window inference.
+
 ### CONTEXT + FILES for terminal panes
 
 | # | Item | Status | Covered by |

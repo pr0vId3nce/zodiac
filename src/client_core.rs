@@ -104,6 +104,21 @@ pub fn context_limit(model: Option<&str>) -> u64 {
     }
 }
 
+/// The window to measure `context` against, given what the session is actually
+/// holding. The model id is the intended signal, but it isn't always available
+/// (a terminal pane's model is whatever the server could infer) and the 1M
+/// window is opt-in. An occupancy above the assumed limit is proof the
+/// assumption was wrong — a 200k session cannot be holding 236k — so believe
+/// the observation rather than render a permanent, false 100%.
+pub fn context_limit_for(model: Option<&str>, context: u64) -> u64 {
+    let limit = context_limit(model);
+    if context > limit {
+        1_000_000
+    } else {
+        limit
+    }
+}
+
 /// A richer transcript item for the GUI. The TUI keeps reading the flat
 /// `AgentUi::log`; the GUI reads `items`, which preserves what `log`
 /// collapses: thinking prose, and each tool's real command + result. Both
@@ -1571,5 +1586,32 @@ mod apply_line_tests {
         assert_eq!(tc.command, "echo hello");
         assert_eq!(tc.result.as_deref(), Some("hello\n"));
         assert!(!tc.is_error);
+    }
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+
+    #[test]
+    fn an_occupancy_above_the_assumed_window_corrects_it() {
+        // A 200k session cannot be holding 236k, so the assumption was wrong
+        // (a 1M-window session). Believing the assumption printed a permanent,
+        // false "236k / 200k · 100%".
+        assert_eq!(context_limit_for(None, 236_000), 1_000_000);
+        assert_eq!(context_limit_for(Some("claude-opus-5"), 236_000), 1_000_000);
+        // Normal readings keep the model's window.
+        assert_eq!(context_limit_for(None, 54_000), 200_000);
+        assert_eq!(
+            context_limit_for(Some("claude-sonnet-5[1m]"), 300_000),
+            1_000_000
+        );
+        // …and the fraction it produces is a real number, not a pinned 100%.
+        let u = Usage {
+            context: 236_000,
+            ..Default::default()
+        };
+        let f = u.context_frac(context_limit_for(None, u.context)).unwrap();
+        assert!(f < 0.25, "236k of a 1M window should read as ~24%, got {f}");
     }
 }

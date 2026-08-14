@@ -44,6 +44,19 @@ pub struct PaneAgent {
     pub files: Vec<FileEdit>,
     /// The transcript this came from, for the panel's hover text.
     pub session: Option<String>,
+    /// More than one session started in this directory while the pane was
+    /// alive, so which one belongs to it can't be known. Nothing is shown —
+    /// see [`find_session`].
+    pub ambiguous: usize,
+}
+
+/// Which transcript, if any, belongs to a pane.
+#[derive(Debug, PartialEq)]
+pub enum Pick {
+    One(PathBuf),
+    /// N sessions began here while the pane was alive: unattributable.
+    Ambiguous(usize),
+    None,
 }
 
 /// Handle held by the app: push the current pane list, read the latest results.
@@ -104,16 +117,27 @@ fn worker(rx: Receiver<Vec<PaneReq>>, out: Arc<Mutex<HashMap<u64, PaneAgent>>>) 
                 .unwrap_or(SystemTime::UNIX_EPOCH);
             let tail = match tails.get_mut(&p.id) {
                 Some(t) => t,
-                None => {
-                    let Some(path) = find_session(&p.cwd, started) else {
-                        continue;
-                    };
-                    tails.entry(p.id).or_insert(Tail {
+                None => match find_session(&p.cwd, started) {
+                    Pick::One(path) => tails.entry(p.id).or_insert(Tail {
                         path,
                         offset: 0,
                         fold: TranscriptFold::default(),
-                    })
-                }
+                    }),
+                    // Say why there is nothing rather than showing nothing.
+                    Pick::Ambiguous(n) => {
+                        if let Ok(mut m) = out.lock() {
+                            m.insert(
+                                p.id,
+                                PaneAgent {
+                                    ambiguous: n,
+                                    ..Default::default()
+                                },
+                            );
+                        }
+                        continue;
+                    }
+                    Pick::None => continue,
+                },
             };
             if read_new(tail) {
                 let snap = PaneAgent {
@@ -123,6 +147,7 @@ fn worker(rx: Receiver<Vec<PaneReq>>, out: Arc<Mutex<HashMap<u64, PaneAgent>>>) 
                         .path
                         .file_stem()
                         .map(|s| s.to_string_lossy().into_owned()),
+                    ambiguous: 0,
                 };
                 if let Ok(mut m) = out.lock() {
                     m.insert(p.id, snap);
@@ -197,34 +222,40 @@ pub fn project_slug(cwd: &str) -> String {
 /// directory can't be told apart this way, and the newer writer wins. The
 /// panel names the session it read so a wrong guess is visible rather than
 /// silent.
-pub fn find_session(cwd: &str, started: SystemTime) -> Option<PathBuf> {
-    let dir = projects_root()?.join(project_slug(cwd));
-    let mut best: Option<(SystemTime, bool, PathBuf)> = None;
-    for e in std::fs::read_dir(dir).ok()?.flatten() {
+pub fn find_session(cwd: &str, started: SystemTime) -> Pick {
+    let Some(root) = projects_root() else {
+        return Pick::None;
+    };
+    let Ok(entries) = std::fs::read_dir(root.join(project_slug(cwd))) else {
+        return Pick::None;
+    };
+    // Only a session *born* while this pane was alive can be this pane's. An
+    // earlier one that merely got written to belongs to whoever else is in the
+    // directory, and attributing it produced exactly that: a busy home
+    // directory's 42 MB transcript — another project's files, a hundred
+    // million cached tokens — shown against an unrelated pane.
+    let mut born: Vec<PathBuf> = Vec::new();
+    for e in entries.flatten() {
         let path = e.path();
         if path.extension().and_then(|x| x.to_str()) != Some("jsonl") {
             continue;
         }
         let Ok(md) = e.metadata() else { continue };
-        let Ok(modified) = md.modified() else {
-            continue;
-        };
-        // Untouched since the pane began: it belongs to some other run.
-        if modified < started {
-            continue;
-        }
-        let born_here = md.created().map(|c| c >= started).unwrap_or(false);
-        let better = match &best {
-            None => true,
-            // A session born in this pane beats an older one that merely got
-            // written to (e.g. resumed in a different window).
-            Some((bt, bb, _)) => (born_here, modified) > (*bb, *bt),
-        };
-        if better {
-            best = Some((modified, born_here, path));
+        // No creation time (some filesystems don't record one): ownership
+        // can't be established, so don't claim it.
+        let Ok(created) = md.created() else { continue };
+        if created >= started && md.modified().map(|m| m >= started).unwrap_or(false) {
+            born.push(path);
         }
     }
-    best.map(|(_, _, p)| p)
+    match born.len() {
+        0 => Pick::None,
+        1 => Pick::One(born.remove(0)),
+        // Two sessions started in one directory while this pane ran. Nothing
+        // distinguishes them from the outside, and a coin flip presented as
+        // fact is worse than saying so.
+        n => Pick::Ambiguous(n),
+    }
 }
 
 /// Where claude keeps its per-directory transcripts. `ZODIAC_PROJECTS_DIR`
@@ -256,6 +287,54 @@ mod tests {
         );
         // Dots and underscores are separators too, not kept verbatim.
         assert_eq!(project_slug("/tmp/a.b_c"), "-tmp-a-b-c");
+    }
+
+    /// A directory holding an older session plus one started after the pane:
+    /// only the latter can be this pane's.
+    #[test]
+    fn only_a_session_born_after_the_pane_is_claimed() {
+        let root = std::env::temp_dir().join(format!("zodiac-pick-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cwd = "/some/where";
+        let dir = root.join(project_slug(cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+        // An old, *busy* session: the kind that used to win on mtime and put
+        // another project's files and totals against an unrelated pane.
+        std::fs::write(dir.join("old.jsonl"), "{}\n").unwrap();
+        std::thread::sleep(Duration::from_millis(30));
+        let started = SystemTime::now();
+        std::thread::sleep(Duration::from_millis(30));
+        std::fs::write(dir.join("mine.jsonl"), "{}\n").unwrap();
+        // The old one is touched again *after* the pane started — recency
+        // alone must not make it the pane's.
+        std::fs::write(dir.join("old.jsonl"), "{}\n{}\n").unwrap();
+        std::env::set_var("ZODIAC_PROJECTS_DIR", &root);
+        let pick = find_session(cwd, started);
+        std::env::remove_var("ZODIAC_PROJECTS_DIR");
+        assert_eq!(pick, Pick::One(dir.join("mine.jsonl")));
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn two_sessions_born_here_are_reported_as_ambiguous() {
+        let root = std::env::temp_dir().join(format!("zodiac-amb-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        let cwd = "/two/agents";
+        let dir = root.join(project_slug(cwd));
+        std::fs::create_dir_all(&dir).unwrap();
+        let started = SystemTime::now();
+        std::thread::sleep(Duration::from_millis(30));
+        std::fs::write(dir.join("a.jsonl"), "{}\n").unwrap();
+        std::fs::write(dir.join("b.jsonl"), "{}\n").unwrap();
+        std::env::set_var("ZODIAC_PROJECTS_DIR", &root);
+        let pick = find_session(cwd, started);
+        std::env::remove_var("ZODIAC_PROJECTS_DIR");
+        assert_eq!(
+            pick,
+            Pick::Ambiguous(2),
+            "a coin flip must not read as fact"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

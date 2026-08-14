@@ -4236,7 +4236,11 @@ fn activity_rail(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
     // get the same two facts read from the session transcript (`d.term_agent`).
     let from_stream = p.is_agent();
     let term = (!from_stream).then(|| d.term_agent(p.id)).flatten();
-    if from_stream || term.is_some() {
+    // A terminal pane running claude gets the panels even before (or without)
+    // an attributable session, so they can say why they're empty. Silence read
+    // as a missing feature the last time these panels had nothing to show.
+    let watched_tty = !from_stream && d.ps(p).is_some_and(|s| s.agent.is_some());
+    if from_stream || term.is_some() || watched_tty {
         let usage = term.map(|t| t.usage).unwrap_or(p.agent.usage);
         let files: &[zodiac::client_core::FileEdit] =
             term.map(|t| t.files.as_slice()).unwrap_or(&p.agent.files);
@@ -4246,8 +4250,46 @@ fn activity_rail(ui: &mut egui::Ui, d: &UiData, actions: &mut Vec<UiAction>) {
             d.ps(p).and_then(|s| s.model.as_deref())
         };
         let source = term.and_then(|t| t.session.as_deref());
-        context_panel(ui, usage, model, source);
-        files_panel(ui, files, actions);
+        let ambiguous = term.map(|t| t.ambiguous).unwrap_or(0);
+        if ambiguous > 0 {
+            // Several sessions began in this directory while the pane ran.
+            // Say so; picking one would be a coin flip presented as fact.
+            ui.label(
+                RichText::new("CONTEXT")
+                    .color(theme::TEXT_GHOST)
+                    .size(11.0)
+                    .strong(),
+            );
+            probe_set(|p| p.ctx_header = true);
+            ui.add_space(8.0);
+            ui.add(Label::new(
+                RichText::new(format!(
+                    "{ambiguous} claude sessions started in this directory — \
+                     can't tell which is this pane's"
+                ))
+                .color(theme::TEXT_GHOST)
+                .size(12.0),
+            ));
+            ui.add_space(16.0);
+        } else if watched_tty && term.is_none() {
+            ui.label(
+                RichText::new("CONTEXT")
+                    .color(theme::TEXT_GHOST)
+                    .size(11.0)
+                    .strong(),
+            );
+            probe_set(|p| p.ctx_header = true);
+            ui.add_space(8.0);
+            ui.add(Label::new(
+                RichText::new("no session started in this pane yet")
+                    .color(theme::TEXT_GHOST)
+                    .size(12.0),
+            ));
+            ui.add_space(16.0);
+        } else {
+            context_panel(ui, usage, model, source);
+            files_panel(ui, files, actions);
+        }
     }
     let ps = d.ps(p);
     // The output-rate histogram used to head this rail. It was removed: an
@@ -4330,7 +4372,7 @@ fn context_panel(
     model: Option<&str>,
     source: Option<&str>,
 ) {
-    let limit = zodiac::client_core::context_limit(model);
+    let limit = zodiac::client_core::context_limit_for(model, u.context);
     let header = ui.label(
         RichText::new("CONTEXT")
             .color(theme::TEXT_GHOST)
@@ -4388,19 +4430,15 @@ fn context_panel(
         });
     });
     ui.add_space(4.0);
-    let cached = if u.cache_read > 0 {
-        format!(" · {} cached", tok(u.cache_read))
-    } else {
-        String::new()
-    };
+    // Only tokens that are meaningful to *add up* are shown. Prompt and cache
+    // figures are per-request: the same cached prefix is re-read every turn,
+    // so summing them counts one prefix hundreds of times — that is what
+    // produced a "100.4M cached" against a 200k window. Generated tokens are
+    // genuinely cumulative.
     ui.label(
-        RichText::new(format!(
-            "{} in · {} out{cached}",
-            tok(u.input),
-            tok(u.output)
-        ))
-        .color(theme::TEXT_GHOST)
-        .size(11.0),
+        RichText::new(format!("{} generated", tok(u.output)))
+            .color(theme::TEXT_GHOST)
+            .size(11.0),
     );
     // Subscription plans report no cost, so a $0.00 would be noise, not data.
     if u.cost_usd > 0.0 {

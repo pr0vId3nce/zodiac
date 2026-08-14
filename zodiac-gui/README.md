@@ -150,7 +150,12 @@ nix develop --command cargo run --release -p zodiac-gui [session]   # default: m
   and the frame is cleared to nothing, so the grounds egui paints supply both
   color and alpha; an all-opaque configuration keeps the opaque clear it
   always had. A surface offering no alpha mode (X11 with no compositor)
-  simply stays opaque.
+  simply stays opaque. The other half of it is the window's **opaque region**:
+  winit puts one over a window built opaque, and a compositor honoring that
+  ignores every bit of alpha rendered under it — so changing an opacity row
+  also calls `Window::set_transparent`, and the change lands on the spot
+  rather than at the next launch. (X11 can only choose this at creation, so
+  there the first switch does need a relaunch.)
 - **Design tokens** (`theme.rs`): the handoff's ground/chrome/text/accent
   palette folded into egui `Visuals`, with the five status colors carried
   verbatim from `src/theme.rs` (thinking → violet, idle text override).

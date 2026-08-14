@@ -1831,18 +1831,46 @@ impl GuiApp {
             // --- transparency, per ground -------------------------------
             68 => {
                 // In memory only: like the chrome toggles, this must not
-                // persist into the user's config.json.
+                // persist into the user's config.json. And pin an opaque
+                // baseline: these checks are about what the settings *do*,
+                // not about what the user happens to have chosen.
                 self.e2e_opacity_saved = (
                     self.settings.term_opacity.clone(),
                     self.settings.chat_opacity.clone(),
                     self.settings.gui_opacity.clone(),
                 );
-                self.settings.chat_opacity = "80%".into();
+                self.settings.term_opacity = "100%".into();
+                self.settings.chat_opacity = "100%".into();
+                self.settings.gui_opacity = "100%".into();
                 self.apply_settings();
                 self.request_redraw();
                 self.e2e_after(600);
             }
             69 => {
+                let clears = self.renderer.as_ref().is_some_and(|r| r.is_transparent());
+                self.check(
+                    "all-opaque keeps the opaque clear",
+                    crate::theme::bg_chat().a() == 255
+                        && crate::theme::bg_chrome().a() == 255
+                        && !clears,
+                    format!(
+                        "chat={} chrome={} clear_transparent={clears}",
+                        crate::theme::bg_chat().a(),
+                        crate::theme::bg_chrome().a()
+                    ),
+                );
+                // Two of the three, so the check also covers that they don't
+                // move together — and this is a *live* change on a window
+                // built opaque, the case that was broken: winit had put an
+                // opaque region over the surface, and a compositor honoring
+                // that ignores every bit of alpha we render.
+                self.settings.chat_opacity = "80%".into();
+                self.settings.gui_opacity = "70%".into();
+                self.apply_settings();
+                self.request_redraw();
+                self.e2e_after(2500);
+            }
+            70 => {
                 let chat = crate::theme::bg_chat().a();
                 let chrome = crate::theme::bg_chrome().a();
                 let term = crate::theme::fade_term(egui::Color32::from_rgb(9, 9, 9)).a();
@@ -1852,28 +1880,37 @@ impl GuiApp {
                     .as_ref()
                     .is_some_and(|r| r.can_be_transparent());
                 self.check(
-                    "one ground goes translucent without dragging the others with it",
-                    chat == 204 && chrome == 255 && term == 255 && (clears || !capable),
+                    "grounds go translucent independently, live",
+                    // 0.8 and 0.7 of 255, rounded; the terminal was left at
+                    // 100% and must not have moved.
+                    chat == 204 && chrome == 179 && term == 255 && (clears || !capable),
                     format!("chat={chat} chrome={chrome} term={term} clear_transparent={clears} capable={capable}"),
                 );
+                self.settings.chat_opacity = "100%".into();
+                self.settings.gui_opacity = "100%".into();
+                self.apply_settings();
+                self.request_redraw();
+                self.e2e_after(600);
+            }
+            71 => {
+                let clears = self.renderer.as_ref().is_some_and(|r| r.is_transparent());
+                self.check(
+                    "back to opaque restores the opaque clear",
+                    crate::theme::bg_chat().a() == 255
+                        && crate::theme::bg_chrome().a() == 255
+                        && !clears,
+                    format!(
+                        "chat={} chrome={} clear_transparent={clears}",
+                        crate::theme::bg_chat().a(),
+                        crate::theme::bg_chrome().a()
+                    ),
+                );
+                // The user's real choices go back, unsaved either way.
                 let (t, c, g) = self.e2e_opacity_saved.clone();
                 self.settings.term_opacity = t;
                 self.settings.chat_opacity = c;
                 self.settings.gui_opacity = g;
                 self.apply_settings();
-                self.request_redraw();
-                self.e2e_after(600);
-            }
-            70 => {
-                let clears = self.renderer.as_ref().is_some_and(|r| r.is_transparent());
-                self.check(
-                    "back to opaque restores the opaque clear",
-                    crate::theme::bg_chat().a() == 255 && !clears,
-                    format!(
-                        "chat={} clear_transparent={clears}",
-                        crate::theme::bg_chat().a()
-                    ),
-                );
                 self.e2e_after(300);
             }
 
@@ -2236,7 +2273,18 @@ impl GuiApp {
             r.set_tab_bg(tab_bg);
             r.set_user_scale(scale);
             r.set_tab_style(style);
-            r.set_transparent(transparent && r.can_be_transparent());
+            let on = transparent && r.can_be_transparent();
+            // Both halves are needed, and this is the half that was missing:
+            // a window built opaque has an opaque region covering all of it
+            // (winit sets one on the Wayland surface), and a compositor with
+            // that region ignores the alpha we render no matter what the
+            // surface's alpha mode says. Clearing the region is what actually
+            // makes the desktop show through, so a translucent ground picked
+            // in the settings dialog works on the spot rather than only on
+            // the next launch. X11 can only decide this at creation, hence
+            // `with_transparent` there as well.
+            r.window.set_transparent(on);
+            r.set_transparent(on);
         }
         // Grid dimensions may have changed under the new chrome/scale.
         self.sent_grid = (0, 0);
